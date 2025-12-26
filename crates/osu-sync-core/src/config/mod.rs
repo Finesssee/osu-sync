@@ -48,6 +48,32 @@ impl Config {
         Self::default()
     }
 
+    /// Get the config file path
+    fn config_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|p| p.join("osu-sync").join("config.json"))
+    }
+
+    /// Load config from disk, falling back to auto-detection if not found
+    pub fn load() -> Self {
+        Self::config_path()
+            .and_then(|path| std::fs::read_to_string(&path).ok())
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default()
+    }
+
+    /// Save config to disk
+    pub fn save(&self) -> std::io::Result<()> {
+        if let Some(path) = Self::config_path() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let content = serde_json::to_string_pretty(self)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            std::fs::write(&path, content)?;
+        }
+        Ok(())
+    }
+
     /// Get the Songs folder path for osu!stable
     pub fn stable_songs_path(&self) -> Option<PathBuf> {
         self.stable_path.as_ref().map(|p| p.join("Songs"))

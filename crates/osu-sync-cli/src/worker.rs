@@ -108,7 +108,7 @@ fn run_worker(
 }
 
 fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool) {
-    let config = Config::default();
+    let config = Config::load();
 
     let mut stable_result = None;
     let mut lazer_result = None;
@@ -234,7 +234,7 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
 }
 
 fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
-    let config = Config::default();
+    let config = Config::load();
 
     // Check paths
     let stable_path = match config.stable_path.as_ref() {
@@ -300,7 +300,7 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
 }
 
 fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
-    let config = Config::default();
+    let config = Config::load();
 
     let _ = app_tx.send(AppMessage::StatsProgress("Scanning osu!stable...".to_string()));
 
@@ -336,7 +336,7 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
 }
 
 fn handle_load_collections(app_tx: &Sender<AppMessage>) {
-    let config = Config::default();
+    let config = Config::load();
 
     let collections = if let Some(stable_path) = config.stable_path.as_ref() {
         // The collection.db is in the root osu! folder, not in Songs
@@ -365,7 +365,7 @@ fn handle_load_collections(app_tx: &Sender<AppMessage>) {
 }
 
 fn handle_sync_collections(app_tx: &Sender<AppMessage>, strategy: CollectionSyncStrategy) {
-    let config = Config::default();
+    let config = Config::load();
 
     // Load collections from stable
     let collections = if let Some(stable_path) = config.stable_path.as_ref() {
@@ -420,7 +420,7 @@ fn handle_sync_collections(app_tx: &Sender<AppMessage>, strategy: CollectionSync
 }
 
 fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
-    let config = Config::default();
+    let config = Config::load();
 
     // Check paths
     let stable_path = match config.stable_path.as_ref() {
@@ -483,7 +483,7 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
 }
 
 fn handle_create_backup(app_tx: &Sender<AppMessage>, target: BackupTarget) {
-    let config = Config::default();
+    let config = Config::load();
     let backup_manager = BackupManager::new(BackupManager::default_backup_dir());
 
     // Determine source path based on target
@@ -584,7 +584,7 @@ fn handle_load_backups(app_tx: &Sender<AppMessage>) {
 }
 
 fn handle_restore_backup(app_tx: &Sender<AppMessage>, backup_path: PathBuf) {
-    let config = Config::default();
+    let config = Config::load();
     let backup_manager = BackupManager::new(BackupManager::default_backup_dir());
 
     // Parse backup info to determine target
@@ -673,7 +673,7 @@ fn handle_media_extraction(
 ) {
     use osu_sync_core::media::{ExtractionProgress, MediaExtractor};
 
-    let config = Config::default();
+    let config = Config::load();
 
     // Get stable path
     let stable_path = match config.stable_path.as_ref() {
@@ -719,7 +719,7 @@ fn handle_media_extraction(
 fn handle_load_replays(app_tx: &Sender<AppMessage>) {
     use osu_sync_core::replay::StableReplayReader;
 
-    let config = Config::default();
+    let config = Config::load();
 
     // Get stable path
     let stable_path = match config.stable_path.as_ref() {
@@ -754,7 +754,7 @@ fn handle_replay_export(
 ) {
     use osu_sync_core::replay::{ReplayExporter, ReplayProgress, StableReplayReader};
 
-    let config = Config::default();
+    let config = Config::load();
 
     // Get stable path
     let stable_path = match config.stable_path.as_ref() {

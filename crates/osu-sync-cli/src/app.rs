@@ -838,11 +838,23 @@ impl App {
                         });
                     }
 
+                    // Save config to disk
+                    let config = osu_sync_core::config::Config {
+                        stable_path: new_stable.clone().map(std::path::PathBuf::from),
+                        lazer_path: new_lazer.clone().map(std::path::PathBuf::from),
+                        duplicate_strategy: osu_sync_core::config::DuplicateStrategy::Ask,
+                    };
+                    let save_result = config.save();
+
                     self.state = AppState::Config {
                         selected,
                         stable_path: new_stable,
                         lazer_path: new_lazer,
-                        status_message: "Path updated".to_string(),
+                        status_message: if save_result.is_ok() {
+                            "Path saved!".to_string()
+                        } else {
+                            "Path updated (failed to save)".to_string()
+                        },
                         editing: None,
                     };
                 }
@@ -1329,11 +1341,18 @@ impl App {
 
     /// Go to configuration screen
     fn go_to_config(&mut self) {
-        let stable_path = self
-            .cached_stable_scan
-            .as_ref()
-            .and_then(|s| s.path.clone());
-        let lazer_path = self.cached_lazer_scan.as_ref().and_then(|s| s.path.clone());
+        // Load saved config first, fall back to cached scans
+        let saved_config = osu_sync_core::config::Config::load();
+
+        let stable_path = saved_config
+            .stable_path
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| self.cached_stable_scan.as_ref().and_then(|s| s.path.clone()));
+
+        let lazer_path = saved_config
+            .lazer_path
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| self.cached_lazer_scan.as_ref().and_then(|s| s.path.clone()));
 
         self.state = AppState::Config {
             selected: 0,
@@ -1472,7 +1491,7 @@ impl App {
     /// Get the restore destination path for a backup target
     fn get_restore_dest_path(&self, target: &BackupTarget) -> PathBuf {
         use osu_sync_core::config::Config;
-        let config = Config::default();
+        let config = Config::load();
 
         match target {
             BackupTarget::StableSongs => config
