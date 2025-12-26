@@ -126,7 +126,8 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
                 message: "Scanning osu!stable beatmaps...".to_string(),
             });
 
-            match StableScanner::new(songs_path).scan_parallel_timed() {
+            // Use fast mode (skip hashing) for browsing - 5x faster
+            match StableScanner::new(songs_path).skip_hashing().scan_parallel_timed() {
                 Ok((sets, timing)) => {
                     let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
                     stable_result = Some(ScanResult {
@@ -252,7 +253,7 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
-    // Create components
+    // Create components (full hashing required for sync to compare files)
     let songs_path = stable_path.join("Songs");
     let scanner = StableScanner::new(songs_path);
     let database = match LazerDatabase::open(&lazer_path) {
@@ -303,10 +304,10 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
 
     let _ = app_tx.send(AppMessage::StatsProgress("Scanning osu!stable...".to_string()));
 
-    // Scan stable
+    // Scan stable (fast mode - no hashing needed for stats)
     let stable_sets = if let Some(path) = config.stable_path.as_ref() {
         let songs_path = path.join("Songs");
-        match StableScanner::new(songs_path).scan() {
+        match StableScanner::new(songs_path).skip_hashing().scan_parallel() {
             Ok(sets) => sets,
             Err(_) => Vec::new(),
         }
@@ -438,7 +439,7 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
-    // Create components
+    // Create components (full hashing required for sync to compare files)
     let songs_path = stable_path.join("Songs");
     let scanner = StableScanner::new(songs_path);
     let database = match LazerDatabase::open(&lazer_path) {
@@ -685,8 +686,8 @@ fn handle_media_extraction(
 
     let songs_path = stable_path.join("Songs");
 
-    // Scan beatmap sets first
-    let sets = match StableScanner::new(songs_path.clone()).scan() {
+    // Scan beatmap sets first (fast mode - no hashing needed for media extraction)
+    let sets = match StableScanner::new(songs_path.clone()).skip_hashing().scan_parallel() {
         Ok(s) => s,
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!("Failed to scan beatmaps: {}", e)));

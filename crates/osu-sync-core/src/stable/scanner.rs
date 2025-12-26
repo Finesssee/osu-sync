@@ -80,6 +80,8 @@ impl ScanTiming {
 /// Scanner for osu!stable Songs folder
 pub struct StableScanner {
     songs_path: PathBuf,
+    /// Skip file hashing for faster scans (hashes won't be available)
+    skip_hashing: bool,
 }
 
 /// Progress callback for scanning (must be Sync for parallel scanning)
@@ -88,7 +90,17 @@ pub type ScanProgress = Box<dyn Fn(usize, usize, &str) + Send + Sync>;
 impl StableScanner {
     /// Create a new scanner for the given Songs folder
     pub fn new(songs_path: PathBuf) -> Self {
-        Self { songs_path }
+        Self {
+            songs_path,
+            skip_hashing: false,
+        }
+    }
+
+    /// Skip file hashing for faster scans (~3x speedup)
+    /// File hashes won't be available in the results
+    pub fn skip_hashing(mut self) -> Self {
+        self.skip_hashing = true;
+        self
     }
 
     /// Scan all beatmap sets in the Songs folder
@@ -289,27 +301,29 @@ impl StableScanner {
             }
         }
 
-        // Collect all files in the directory
-        for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() {
-                let hash_start = Instant::now();
-                if let Ok(content) = fs::read(path) {
-                    let hash = format!("{:x}", Sha256::digest(&content));
-                    timing.file_hashing += hash_start.elapsed();
-                    timing.files_hashed += 1;
-                    timing.bytes_hashed += content.len() as u64;
+        // Collect all files in the directory (optionally hash them)
+        if !self.skip_hashing {
+            for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_file() {
+                    let hash_start = Instant::now();
+                    if let Ok(content) = fs::read(path) {
+                        let hash = format!("{:x}", Sha256::digest(&content));
+                        timing.file_hashing += hash_start.elapsed();
+                        timing.files_hashed += 1;
+                        timing.bytes_hashed += content.len() as u64;
 
-                    let filename = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
+                        let filename = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
 
-                    beatmap_set.files.push(crate::beatmap::BeatmapFile {
-                        filename,
-                        hash,
-                        size: content.len() as u64,
-                    });
+                        beatmap_set.files.push(crate::beatmap::BeatmapFile {
+                            filename,
+                            hash,
+                            size: content.len() as u64,
+                        });
+                    }
                 }
             }
         }
