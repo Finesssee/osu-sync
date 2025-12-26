@@ -1,0 +1,36 @@
+[package]
+name = "osu-sync-core"
+description = "Core library for osu! beatmap synchronization between stable and lazer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+# osu! parsing
+rosu-map.workspace = true
+osu-db = "0.3"
+
+# File handling
+zip.workspace = true
+walkdir.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+directories.workspace = true
+dirs.workspace = true
+
+# Parallel processing
+rayon = "1.10"
+
+# Data export
+csv = "1.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3.14"

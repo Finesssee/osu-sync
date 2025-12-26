@@ -1,0 +1,23 @@
+[package]
+name = "osu-sync-gui"
+description = "GUI application for osu! beatmap synchronization"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "osu-sync-gui"
+path = "src/main.rs"
+
+[dependencies]
+osu-sync-core = { path = "../osu-sync-core" }
+
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+tokio.workspace = true
+
+# GUI
+iced.workspace = true
