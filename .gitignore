@@ -1,7 +1,15 @@
 # Build artifacts
 /target/
+/target2/
 debug/
 release/
+
+# Temp files
+nul
+*.bat
+*.ps1
+*.txt
+test-core.rs
 
 # Cargo lock for libraries (keep for binaries)
 # Cargo.lock

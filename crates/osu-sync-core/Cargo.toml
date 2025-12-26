@@ -15,7 +15,7 @@ tokio.workspace = true
 
 # osu! parsing
 rosu-map.workspace = true
-osu-db = "0.3"
+osu-db = { git = "https://github.com/kovaxis/osu-db", branch = "master" }
 
 # File handling
 zip.workspace = true
