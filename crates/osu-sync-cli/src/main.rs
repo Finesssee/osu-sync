@@ -1,4 +1,9 @@
-//! osu-sync TUI - Terminal interface for syncing osu! beatmaps between stable and lazer
+//! osu-sync - Beatmap synchronization tool for osu!stable and osu!lazer
+//!
+//! Usage:
+//!   osu-sync          Run TUI mode (default)
+//!   osu-sync --gui    Run GUI mode (requires 'gui' feature)
+//!   osu-sync --help   Show help
 
 use std::fs::File;
 use std::sync::mpsc;
@@ -10,8 +15,10 @@ use tracing_subscriber::FmtSubscriber;
 
 mod app;
 mod event;
+mod gui;
 mod resolver;
 mod screens;
+pub mod theme;
 mod tui;
 mod widgets;
 mod worker;
@@ -20,19 +27,49 @@ use app::App;
 use worker::Worker;
 
 fn main() -> anyhow::Result<()> {
-    // Install panic hook for terminal restoration
+    let args: Vec<String> = std::env::args().collect();
+
+    // Check for --help
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+
+    // Check for --gui flag
+    if args.iter().any(|a| a == "--gui") {
+        #[cfg(feature = "gui")]
+        {
+            gui::run().map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
+            return Ok(());
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            eprintln!("Error: GUI mode requires the 'gui' feature.");
+            eprintln!("Rebuild with: cargo build --release --features gui");
+            std::process::exit(1);
+        }
+    }
+
+    // Default: TUI mode
     tui::install_panic_hook();
-
-    // Initialize logging (to file to avoid TUI interference)
     init_logging();
-
-    // Run the application
     let result = run();
-
-    // Restore terminal
     tui::restore()?;
-
     result
+}
+
+fn print_help() {
+    println!("osu-sync v{}", env!("CARGO_PKG_VERSION"));
+    println!("Sync beatmaps between osu!stable and osu!lazer");
+    println!();
+    println!("USAGE:");
+    println!("    osu-sync [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    --gui     Run in GUI mode (requires 'gui' feature)");
+    println!("    --help    Show this help message");
+    println!();
+    println!("By default, osu-sync runs in TUI (terminal) mode.");
 }
 
 fn init_logging() {
@@ -52,6 +89,10 @@ fn init_logging() {
 }
 
 fn run() -> anyhow::Result<()> {
+    // Load config and set theme
+    let config = osu_sync_core::config::Config::load();
+    theme::set_theme(config.theme);
+
     // Initialize terminal
     let mut terminal = tui::init()?;
 
