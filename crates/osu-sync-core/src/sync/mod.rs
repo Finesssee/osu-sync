@@ -4,11 +4,15 @@ mod conflict;
 mod direction;
 mod dry_run;
 mod engine;
+pub mod skip_list;
 
-pub use conflict::{AutoResolver, ConfigBasedResolver, ConflictResolver, InteractiveResolver, SmartResolver};
+pub use conflict::{
+    AutoResolver, ConfigBasedResolver, ConflictResolver, InteractiveResolver, SmartResolver,
+};
 pub use direction::SyncDirection;
 pub use dry_run::{format_bytes, DryRunAction, DryRunItem, DryRunResult};
 pub use engine::{
     ProgressCallback, SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress,
     SyncResult,
 };
+pub use skip_list::SkipList;

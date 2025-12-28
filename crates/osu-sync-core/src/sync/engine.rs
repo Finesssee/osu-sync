@@ -74,7 +74,7 @@ impl SyncError {
 }
 
 /// Progress information for sync callbacks
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SyncProgress {
     /// Current item being processed
     pub current: usize,
@@ -84,12 +84,19 @@ pub struct SyncProgress {
     pub current_name: String,
     /// Current phase of sync
     pub phase: SyncPhase,
+    /// Items processed per second
+    pub items_per_second: f32,
+    /// Elapsed time in seconds
+    pub elapsed_seconds: u64,
+    /// Estimated remaining time in seconds
+    pub estimated_remaining_seconds: Option<u64>,
 }
 
 /// Phase of the sync operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SyncPhase {
     /// Scanning source beatmaps
+    #[default]
     Scanning,
     /// Checking for duplicates
     Deduplicating,
@@ -235,6 +242,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Analyzing osu!stable beatmaps...".to_string(),
             phase: SyncPhase::Scanning,
+            ..Default::default()
         });
 
         // Scan stable beatmaps
@@ -266,6 +274,7 @@ impl SyncEngine {
                     .clone()
                     .unwrap_or_else(|| stable_set.generate_folder_name()),
                 phase: SyncPhase::Deduplicating,
+                ..Default::default()
             });
 
             // Check for duplicates
@@ -318,6 +327,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Analyzing osu!lazer beatmaps...".to_string(),
             phase: SyncPhase::Scanning,
+                ..Default::default()
         });
 
         // Get lazer beatmaps
@@ -336,6 +346,7 @@ impl SyncEngine {
                 total,
                 current_name: beatmap_set.generate_folder_name(),
                 phase: SyncPhase::Deduplicating,
+                ..Default::default()
             });
 
             // Check for duplicates
@@ -423,6 +434,7 @@ impl SyncEngine {
             total: result.total(),
             current_name: String::new(),
             phase: SyncPhase::Complete,
+                ..Default::default()
         });
 
         tracing::info!(
@@ -445,6 +457,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Scanning osu!stable...".to_string(),
             phase: SyncPhase::Scanning,
+                ..Default::default()
         });
 
         let stable_sets = self.stable_scanner.scan()?;
@@ -470,6 +483,7 @@ impl SyncEngine {
             total,
             current_name: "Loading osu!lazer database...".to_string(),
             phase: SyncPhase::Deduplicating,
+                ..Default::default()
         });
 
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
@@ -498,6 +512,7 @@ impl SyncEngine {
                 total,
                 current_name: set_name.clone(),
                 phase: SyncPhase::Importing,
+                ..Default::default()
             });
 
             // Check for duplicates
@@ -552,6 +567,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Loading osu!lazer database...".to_string(),
             phase: SyncPhase::Scanning,
+                ..Default::default()
         });
 
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
@@ -565,6 +581,7 @@ impl SyncEngine {
             total,
             current_name: "Scanning osu!stable...".to_string(),
             phase: SyncPhase::Deduplicating,
+                ..Default::default()
         });
 
         let stable_index = self.stable_scanner.build_index()?;
@@ -585,6 +602,7 @@ impl SyncEngine {
                 total,
                 current_name: set_name.clone(),
                 phase: SyncPhase::Importing,
+                ..Default::default()
             });
 
             // Check for duplicates
