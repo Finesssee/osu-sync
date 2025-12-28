@@ -1,10 +1,10 @@
 //! Backup screen for creating osu! data backups
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Gauge};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 
 use crate::app::{PINK, SUBTLE, SUCCESS, TEXT};
-use osu_sync_core::backup::{BackupProgress, BackupTarget};
+use osu_sync_core::backup::{BackupMode, BackupProgress, BackupTarget, CompressionLevel};
 
 /// Menu items for backup selection
 const BACKUP_TARGETS: [BackupTarget; 5] = [
@@ -15,19 +15,107 @@ const BACKUP_TARGETS: [BackupTarget; 5] = [
     BackupTarget::All,
 ];
 
-/// Render the backup screen (target selection)
+/// Backup options state for UI
+#[derive(Debug, Clone)]
+pub struct BackupUIState {
+    /// Selected backup target index
+    pub selected_target: usize,
+    /// Current compression level
+    pub compression: CompressionLevel,
+    /// Current backup mode
+    pub mode: BackupMode,
+    /// Which option is focused (0 = target, 1 = compression, 2 = mode)
+    pub focused_option: usize,
+}
+
+impl Default for BackupUIState {
+    fn default() -> Self {
+        Self {
+            selected_target: 0,
+            compression: CompressionLevel::Normal,
+            mode: BackupMode::Full,
+            focused_option: 0,
+        }
+    }
+}
+
+impl BackupUIState {
+    /// Move focus to next option
+    pub fn focus_next(&mut self) {
+        self.focused_option = (self.focused_option + 1) % 3;
+    }
+
+    /// Move focus to previous option
+    pub fn focus_prev(&mut self) {
+        self.focused_option = (self.focused_option + 2) % 3;
+    }
+
+    /// Handle up arrow
+    pub fn handle_up(&mut self) {
+        match self.focused_option {
+            0 => {
+                if self.selected_target > 0 {
+                    self.selected_target -= 1;
+                }
+            }
+            _ => self.focus_prev(),
+        }
+    }
+
+    /// Handle down arrow
+    pub fn handle_down(&mut self) {
+        match self.focused_option {
+            0 => {
+                if self.selected_target < BACKUP_TARGETS.len() - 1 {
+                    self.selected_target += 1;
+                }
+            }
+            _ => self.focus_next(),
+        }
+    }
+
+    /// Handle left/right arrow to cycle options
+    pub fn cycle_option(&mut self) {
+        match self.focused_option {
+            1 => self.compression = self.compression.next(),
+            2 => self.mode = self.mode.toggle(),
+            _ => {}
+        }
+    }
+
+    /// Get the selected target
+    pub fn selected_target(&self) -> BackupTarget {
+        BACKUP_TARGETS[self.selected_target]
+    }
+}
+
+/// Render the backup screen (target selection) - legacy version
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     selected: usize,
     status_message: &str,
 ) {
+    let state = BackupUIState {
+        selected_target: selected,
+        ..Default::default()
+    };
+    render_with_state(frame, area, &state, status_message);
+}
+
+/// Render the backup screen with full state
+pub fn render_with_state(
+    frame: &mut Frame,
+    area: Rect,
+    state: &BackupUIState,
+    status_message: &str,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Min(0),    // Content
-            Constraint::Length(2), // Status
+            Constraint::Length(3),  // Title
+            Constraint::Min(0),     // Content (targets + options)
+            Constraint::Length(2),  // Status
         ])
         .split(area);
 
@@ -39,21 +127,35 @@ pub fn render(
     .alignment(Alignment::Center);
     frame.render_widget(title, chunks[0]);
 
-    // Backup options - centered
-    let menu_width = 45;
-    let menu_height = (BACKUP_TARGETS.len() * 2 + 3) as u16;
-    let menu_area = centered_rect(menu_width, menu_height, chunks[1]);
+    // Content area - split into targets and options
+    let content_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(55), // Targets
+            Constraint::Percentage(45), // Options
+        ])
+        .split(chunks[1]);
 
-    let menu_block = Block::default()
-        .title(Span::styled(" Select what to backup ", Style::default().fg(PINK).bold()))
+    // Backup targets - left side
+    let targets_height = (BACKUP_TARGETS.len() * 2 + 2) as u16;
+    let targets_area = centered_rect(42, targets_height.min(content_chunks[0].height), content_chunks[0]);
+
+    let targets_border_style = if state.focused_option == 0 {
+        Style::default().fg(PINK)
+    } else {
+        Style::default().fg(SUBTLE)
+    };
+
+    let targets_block = Block::default()
+        .title(Span::styled(" Select Target ", targets_border_style.bold()))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(PINK))
+        .border_style(targets_border_style)
         .border_type(ratatui::widgets::BorderType::Rounded);
 
-    let inner = menu_block.inner(menu_area);
-    frame.render_widget(menu_block, menu_area);
+    let targets_inner = targets_block.inner(targets_area);
+    frame.render_widget(targets_block, targets_area);
 
-    // Render menu items
+    // Render target menu items
     let item_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -63,18 +165,23 @@ pub fn render(
                 .collect::<Vec<_>>(),
         )
         .margin(0)
-        .split(inner);
+        .split(targets_inner);
 
     for (i, (target, item_area)) in BACKUP_TARGETS.iter().zip(item_chunks.iter()).enumerate() {
-        let is_selected = i == selected;
+        let is_selected = i == state.selected_target;
 
         let prefix = if is_selected { "> " } else { "  " };
         let icon = get_target_icon(target);
 
-        let (prefix_style, label_style) = if is_selected {
+        let (prefix_style, label_style) = if is_selected && state.focused_option == 0 {
             (
                 Style::default().fg(PINK),
                 Style::default().fg(Color::White).bold(),
+            )
+        } else if is_selected {
+            (
+                Style::default().fg(SUBTLE),
+                Style::default().fg(TEXT).bold(),
             )
         } else {
             (
@@ -92,6 +199,66 @@ pub fn render(
         let item_widget = Paragraph::new(item_line);
         frame.render_widget(item_widget, *item_area);
     }
+
+    // Options panel - right side
+    let options_area = centered_rect(35, 8, content_chunks[1]);
+
+    let options_block = Block::default()
+        .title(Span::styled(" Options ", Style::default().fg(SUBTLE).bold()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(SUBTLE))
+        .border_type(ratatui::widgets::BorderType::Rounded);
+
+    let options_inner = options_block.inner(options_area);
+    frame.render_widget(options_block, options_area);
+
+    // Render options
+    let option_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Compression
+            Constraint::Length(1), // Spacer
+            Constraint::Length(2), // Mode
+        ])
+        .split(options_inner);
+
+    // Compression level option
+    let compression_focused = state.focused_option == 1;
+    let compression_style = if compression_focused {
+        Style::default().fg(PINK).bold()
+    } else {
+        Style::default().fg(TEXT)
+    };
+    let compression_prefix = if compression_focused { "> " } else { "  " };
+
+    let compression_line = Line::from(vec![
+        Span::styled(compression_prefix, compression_style),
+        Span::styled("Compression: ", Style::default().fg(SUBTLE)),
+        Span::styled(
+            format!("[{}]", state.compression.short_label()),
+            compression_style,
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(compression_line), option_chunks[0]);
+
+    // Mode option
+    let mode_focused = state.focused_option == 2;
+    let mode_style = if mode_focused {
+        Style::default().fg(PINK).bold()
+    } else {
+        Style::default().fg(TEXT)
+    };
+    let mode_prefix = if mode_focused { "> " } else { "  " };
+
+    let mode_line = Line::from(vec![
+        Span::styled(mode_prefix, mode_style),
+        Span::styled("Mode: ", Style::default().fg(SUBTLE)),
+        Span::styled(
+            format!("[{}]", state.mode.short_label()),
+            mode_style,
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(mode_line), option_chunks[2]);
 
     // Status message
     let status = Paragraph::new(Span::styled(
@@ -182,11 +349,22 @@ pub fn render_complete(
     backup_path: &str,
     size_bytes: u64,
 ) {
+    render_complete_with_type(frame, area, backup_path, size_bytes, false);
+}
+
+/// Render the backup complete screen with backup type info
+pub fn render_complete_with_type(
+    frame: &mut Frame,
+    area: Rect,
+    backup_path: &str,
+    size_bytes: u64,
+    is_incremental: bool,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),  // Title + status
-            Constraint::Length(10), // Results
+            Constraint::Length(12), // Results
             Constraint::Min(0),     // Spacer
         ])
         .split(area);
@@ -207,7 +385,7 @@ pub fn render_complete(
     frame.render_widget(title, chunks[0]);
 
     // Results panel
-    let results_area = centered_rect(55, 6, chunks[1]);
+    let results_area = centered_rect(55, 8, chunks[1]);
     let results_block = Block::default()
         .title(" Backup Details ")
         .borders(Borders::ALL)
@@ -218,6 +396,7 @@ pub fn render_complete(
 
     let size_display = format_size(size_bytes);
     let path_display = truncate_path(backup_path, 45);
+    let type_display = if is_incremental { "Incremental" } else { "Full" };
 
     let results = Paragraph::new(vec![
         Line::from(""),
@@ -228,6 +407,10 @@ pub fn render_complete(
         Line::from(vec![
             Span::styled("  Size:     ", Style::default().fg(SUBTLE)),
             Span::styled(size_display, Style::default().fg(SUCCESS)),
+        ]),
+        Line::from(vec![
+            Span::styled("  Type:     ", Style::default().fg(SUBTLE)),
+            Span::styled(type_display, Style::default().fg(TEXT)),
         ]),
     ]);
     frame.render_widget(results, results_inner);
