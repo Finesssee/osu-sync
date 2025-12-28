@@ -21,6 +21,9 @@
   <a href="https://github.com/Finesssee/osu-sync/actions">
     <img src="https://img.shields.io/github/actions/workflow/status/Finesssee/osu-sync/ci.yml?style=flat-square" alt="Build">
   </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square&logo=rust" alt="Rust">
+  </a>
 </p>
 
 <p align="center">
