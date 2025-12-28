@@ -52,6 +52,7 @@ pub mod replay;
 pub mod stable;
 pub mod stats;
 pub mod sync;
+pub mod unified;
 
 // Re-export key types for convenience
 
