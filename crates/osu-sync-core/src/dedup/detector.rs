@@ -2,6 +2,7 @@
 
 use crate::beatmap::BeatmapSet;
 use crate::dedup::DuplicateStrategy;
+use std::collections::{HashMap, HashSet};
 
 /// Information about a detected duplicate
 #[derive(Debug, Clone)]
@@ -164,6 +165,108 @@ impl DuplicateDetector {
             .iter()
             .filter_map(|source| self.find_duplicate(source, existing))
             .collect()
+    }
+}
+
+/// Pre-built index for O(1) duplicate lookups
+/// This is MUCH faster than the linear scan for large collections
+pub struct DuplicateIndex {
+    /// Set IDs that exist in the target
+    set_ids: HashSet<i32>,
+    /// MD5 hashes that exist in the target
+    md5_hashes: HashSet<String>,
+    /// Metadata key (lowercase title|artist|creator) -> set index
+    metadata_keys: HashSet<String>,
+}
+
+impl DuplicateIndex {
+    /// Build an index from existing beatmap sets
+    /// This is O(n) but only needs to be done once
+    pub fn build(existing: &[BeatmapSet]) -> Self {
+        let mut set_ids = HashSet::with_capacity(existing.len());
+        let mut md5_hashes = HashSet::with_capacity(existing.len() * 5); // estimate 5 diffs per set
+        let mut metadata_keys = HashSet::with_capacity(existing.len());
+
+        for set in existing {
+            // Index by set ID
+            if let Some(id) = set.id {
+                set_ids.insert(id);
+            }
+
+            // Index by MD5 hashes of all difficulties
+            for beatmap in &set.beatmaps {
+                if !beatmap.md5_hash.is_empty() {
+                    md5_hashes.insert(beatmap.md5_hash.clone());
+                }
+            }
+
+            // Index by metadata
+            if let Some(meta) = set.metadata() {
+                let key = format!(
+                    "{}|{}|{}",
+                    meta.title.to_lowercase(),
+                    meta.artist.to_lowercase(),
+                    meta.creator.to_lowercase()
+                );
+                metadata_keys.insert(key);
+            }
+        }
+
+        Self {
+            set_ids,
+            md5_hashes,
+            metadata_keys,
+        }
+    }
+
+    /// Check if a set ID exists (O(1))
+    #[inline]
+    pub fn has_set_id(&self, id: i32) -> bool {
+        self.set_ids.contains(&id)
+    }
+
+    /// Check if any MD5 hash from the source exists (O(k) where k = difficulties)
+    #[inline]
+    pub fn has_any_hash(&self, source: &BeatmapSet) -> bool {
+        source.beatmaps.iter().any(|b| self.md5_hashes.contains(&b.md5_hash))
+    }
+
+    /// Check if metadata matches (O(1))
+    #[inline]
+    pub fn has_metadata(&self, source: &BeatmapSet) -> bool {
+        if let Some(meta) = source.metadata() {
+            let key = format!(
+                "{}|{}|{}",
+                meta.title.to_lowercase(),
+                meta.artist.to_lowercase(),
+                meta.creator.to_lowercase()
+            );
+            self.metadata_keys.contains(&key)
+        } else {
+            false
+        }
+    }
+
+    /// Fast duplicate check - returns true if this is likely a duplicate
+    /// Uses O(1) lookups instead of O(n) scans
+    #[inline]
+    pub fn is_duplicate(&self, source: &BeatmapSet, strategy: DuplicateStrategy) -> bool {
+        match strategy {
+            DuplicateStrategy::ByHash => self.has_any_hash(source),
+            DuplicateStrategy::BySetId => source.id.map_or(false, |id| self.has_set_id(id)),
+            DuplicateStrategy::ByMetadata => self.has_metadata(source),
+            DuplicateStrategy::Composite => {
+                self.has_any_hash(source)
+                    || source.id.map_or(false, |id| self.has_set_id(id))
+                    || self.has_metadata(source)
+            }
+        }
+    }
+
+    /// Check if set ID exists in target
+    #[inline]
+    pub fn exists_by_id(&self, id: i32) -> bool {
+        self.set_ids.contains(&id)
     }
 }
 

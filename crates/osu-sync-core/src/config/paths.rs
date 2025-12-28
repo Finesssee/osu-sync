@@ -17,37 +17,115 @@ fn get_available_drives() -> Vec<PathBuf> {
     drives
 }
 
+/// Check if a path is a valid osu!stable installation
+/// Looks for: Songs folder + (osu!.exe OR osu!.db OR collection.db)
+fn is_stable_installation(path: &PathBuf) -> bool {
+    if !path.exists() || !path.is_dir() {
+        return false;
+    }
+
+    let songs = path.join("Songs");
+    if !songs.exists() || !songs.is_dir() {
+        return false;
+    }
+
+    // Confirm it's actually osu! by checking for signature files
+    path.join("osu!.exe").exists()
+        || path.join("osu!.db").exists()
+        || path.join("collection.db").exists()
+        || path.join("scores.db").exists()
+}
+
+/// Check if a path is a valid osu!lazer data directory
+/// Looks for: client.realm file
+fn is_lazer_installation(path: &PathBuf) -> bool {
+    if !path.exists() || !path.is_dir() {
+        return false;
+    }
+
+    path.join("client.realm").exists()
+}
+
+/// Scan a directory for osu! installations (non-recursive, checks immediate children)
+#[cfg(target_os = "windows")]
+fn scan_directory_for_stable(dir: &PathBuf) -> Option<PathBuf> {
+    if !dir.exists() || !dir.is_dir() {
+        return None;
+    }
+
+    // First check if this directory itself is osu!
+    if is_stable_installation(dir) {
+        return Some(dir.clone());
+    }
+
+    // Then check immediate children
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && is_stable_installation(&path) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Scan a directory for osu!lazer installations (non-recursive, checks immediate children)
+#[cfg(target_os = "windows")]
+fn scan_directory_for_lazer(dir: &PathBuf) -> Option<PathBuf> {
+    if !dir.exists() || !dir.is_dir() {
+        return None;
+    }
+
+    // First check if this directory itself is lazer
+    if is_lazer_installation(dir) {
+        return Some(dir.clone());
+    }
+
+    // Then check immediate children
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && is_lazer_installation(&path) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 /// Detect osu!lazer data directory
 pub fn detect_lazer_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        // Windows: %APPDATA%/osu
+        // Priority 1: Standard locations with known names
         if let Some(appdata) = dirs::data_dir() {
             let path = appdata.join("osu");
-            if path.exists() && path.join("client.realm").exists() {
+            if is_lazer_installation(&path) {
                 return Some(path);
             }
         }
-        // Also check %LOCALAPPDATA%/osu for some installations
         if let Some(local) = dirs::data_local_dir() {
             let path = local.join("osu");
-            if path.exists() && path.join("client.realm").exists() {
+            if is_lazer_installation(&path) {
                 return Some(path);
             }
         }
 
-        // Scan all drives for portable lazer installations
+        // Priority 2: Scan common directories on all drives
         for drive in get_available_drives() {
-            // Check common portable locations
-            let candidates = [
-                drive.join("osu"),
-                drive.join("osu!lazer"),
-                drive.join("Games").join("osu"),
-                drive.join("Games").join("osu!lazer"),
+            // Check common game directories (scans children too)
+            let scan_dirs = [
+                drive.clone(),
+                drive.join("Games"),
+                drive.join("Program Files"),
+                drive.join("Program Files (x86)"),
             ];
 
-            for path in candidates {
-                if path.exists() && path.join("client.realm").exists() {
+            for dir in &scan_dirs {
+                if let Some(path) = scan_directory_for_lazer(dir) {
                     return Some(path);
                 }
             }
@@ -56,10 +134,9 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: ~/.local/share/osu
         if let Some(data) = dirs::data_local_dir() {
             let path = data.join("osu");
-            if path.exists() && path.join("client.realm").exists() {
+            if is_lazer_installation(&path) {
                 return Some(path);
             }
         }
@@ -67,10 +144,9 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS: ~/Library/Application Support/osu
         if let Some(data) = dirs::data_dir() {
             let path = data.join("osu");
-            if path.exists() && path.join("client.realm").exists() {
+            if is_lazer_installation(&path) {
                 return Some(path);
             }
         }
@@ -83,28 +159,27 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
 pub fn detect_stable_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        // First check %LOCALAPPDATA%/osu! (common location)
+        // Priority 1: Standard location
         if let Some(local) = dirs::data_local_dir() {
             let osu_path = local.join("osu!");
-            if osu_path.exists() && osu_path.join("Songs").exists() {
+            if is_stable_installation(&osu_path) {
                 return Some(osu_path);
             }
         }
 
-        // Scan all available drives for osu! installations
+        // Priority 2: Scan common directories on all drives
+        // This will find osu! even if the folder is renamed
         for drive in get_available_drives() {
-            // Check common installation patterns on each drive
-            let candidates = [
-                drive.join("osu!"),
-                drive.join("osu"),
-                drive.join("Games").join("osu!"),
-                drive.join("Games").join("osu"),
-                drive.join("Program Files").join("osu!"),
-                drive.join("Program Files (x86)").join("osu!"),
+            // Check common game directories (scans children too)
+            let scan_dirs = [
+                drive.clone(),
+                drive.join("Games"),
+                drive.join("Program Files"),
+                drive.join("Program Files (x86)"),
             ];
 
-            for path in candidates {
-                if path.exists() && path.join("Songs").exists() {
+            for dir in &scan_dirs {
+                if let Some(path) = scan_directory_for_stable(dir) {
                     return Some(path);
                 }
             }
@@ -113,8 +188,6 @@ pub fn detect_stable_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        // osu!stable on Linux typically runs through Wine
-        // Check common Wine prefixes
         if let Some(home) = dirs::home_dir() {
             let wine_paths = [
                 home.join(".wine/drive_c/osu!"),
@@ -123,7 +196,7 @@ pub fn detect_stable_path() -> Option<PathBuf> {
             ];
 
             for path in wine_paths {
-                if path.exists() && path.join("Songs").exists() {
+                if is_stable_installation(&path) {
                     return Some(path);
                 }
             }
@@ -132,7 +205,6 @@ pub fn detect_stable_path() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        // osu!stable on macOS runs through Wine/CrossOver
         if let Some(home) = dirs::home_dir() {
             let candidates = [
                 home.join("Library/Application Support/osu-wine/osu!"),
@@ -140,7 +212,7 @@ pub fn detect_stable_path() -> Option<PathBuf> {
             ];
 
             for path in candidates {
-                if path.exists() && path.join("Songs").exists() {
+                if is_stable_installation(&path) {
                     return Some(path);
                 }
             }

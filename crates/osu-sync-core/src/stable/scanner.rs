@@ -4,6 +4,7 @@ use crate::beatmap::BeatmapSet;
 use crate::error::{Error, Result};
 use crate::parser::parse_osu_file;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -36,11 +37,25 @@ pub struct ScanTiming {
     pub parallel: bool,
     /// Number of threads used (for parallel mode)
     pub thread_count: usize,
+    /// Whether result was loaded from cache
+    pub from_cache: bool,
 }
 
 impl ScanTiming {
     /// Format as human-readable report
     pub fn report(&self) -> String {
+        if self.from_cache {
+            return format!(
+                "Scan completed in {:.2}s (cached)\n\
+                 - Cache load: {:.2}s\n\
+                 - {} dirs, {} beatmaps",
+                self.total.as_secs_f64(),
+                self.total.as_secs_f64(),
+                self.dirs_scanned,
+                self.osu_files_parsed,
+            );
+        }
+
         let hash_speed = if self.file_hashing.as_secs_f64() > 0.0 {
             (self.bytes_hashed as f64 / 1024.0 / 1024.0) / self.file_hashing.as_secs_f64()
         } else {
@@ -77,6 +92,17 @@ impl ScanTiming {
     }
 }
 
+/// Cache for scanned beatmap sets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StableScanCache {
+    /// Number of directories when cache was created
+    dir_count: usize,
+    /// Number of beatmaps parsed
+    beatmaps_parsed: usize,
+    /// Cached beatmap sets
+    sets: Vec<BeatmapSet>,
+}
+
 /// Scanner for osu!stable Songs folder
 pub struct StableScanner {
     songs_path: PathBuf,
@@ -101,6 +127,64 @@ impl StableScanner {
     pub fn skip_hashing(mut self) -> Self {
         self.skip_hashing = true;
         self
+    }
+
+    /// Get the cache file path
+    fn cache_path(&self) -> PathBuf {
+        self.songs_path
+            .parent()
+            .unwrap_or(&self.songs_path)
+            .join(".osu-sync-stable-cache.json")
+    }
+
+    /// Try to load from cache if valid
+    fn load_from_cache(&self, current_dir_count: usize) -> Option<(Vec<BeatmapSet>, usize)> {
+        let cache_path = self.cache_path();
+        if !cache_path.exists() {
+            return None;
+        }
+
+        let content = fs::read_to_string(&cache_path).ok()?;
+        let cache: StableScanCache = serde_json::from_str(&content).ok()?;
+
+        // Cache is valid if directory count matches
+        if cache.dir_count == current_dir_count {
+            tracing::info!(
+                "Loaded {} beatmap sets from stable cache",
+                cache.sets.len()
+            );
+            Some((cache.sets, cache.beatmaps_parsed))
+        } else {
+            tracing::info!(
+                "Stable cache invalidated: dir count changed ({} -> {})",
+                cache.dir_count,
+                current_dir_count
+            );
+            None
+        }
+    }
+
+    /// Save results to cache
+    fn save_to_cache(&self, sets: &[BeatmapSet], dir_count: usize, beatmaps_parsed: usize) {
+        let cache = StableScanCache {
+            dir_count,
+            beatmaps_parsed,
+            sets: sets.to_vec(),
+        };
+
+        let cache_path = self.cache_path();
+        match serde_json::to_string(&cache) {
+            Ok(json) => {
+                if let Err(e) = fs::write(&cache_path, json) {
+                    tracing::warn!("Failed to write stable cache: {}", e);
+                } else {
+                    tracing::info!("Saved {} beatmap sets to stable cache", sets.len());
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize stable cache: {}", e);
+            }
+        }
     }
 
     /// Scan all beatmap sets in the Songs folder
@@ -201,6 +285,22 @@ impl StableScanner {
         let dir_enumeration = dir_start.elapsed();
 
         let total = entries.len();
+
+        // Try to load from cache
+        if let Some((cached_sets, beatmaps_parsed)) = self.load_from_cache(total) {
+            let timing = ScanTiming {
+                total: total_start.elapsed(),
+                dir_enumeration,
+                dirs_scanned: total,
+                osu_files_parsed: beatmaps_parsed,
+                parallel: true,
+                thread_count: rayon::current_num_threads(),
+                from_cache: true,
+                ..Default::default()
+            };
+            return Ok((cached_sets, timing));
+        }
+
         let processed = AtomicUsize::new(0);
         let timing = Mutex::new(ScanTiming {
             dir_enumeration,
@@ -252,6 +352,9 @@ impl StableScanner {
 
         let mut final_timing = timing.into_inner().unwrap();
         final_timing.total = total_start.elapsed();
+
+        // Save to cache for next time
+        self.save_to_cache(&results, total, final_timing.osu_files_parsed);
 
         Ok((results, final_timing))
     }

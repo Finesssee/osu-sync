@@ -53,6 +53,23 @@ impl LazerFileStore {
         Ok(fs::read(path)?)
     }
 
+    /// Read just the first N bytes of a file (for header detection)
+    pub fn read_prefix(&self, hash: &str, len: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let path = self.hash_to_path(hash);
+        if !path.exists() {
+            return Err(Error::BeatmapNotFound(format!(
+                "File with hash {} not found",
+                hash
+            )));
+        }
+        let mut file = fs::File::open(path)?;
+        let mut buffer = vec![0u8; len];
+        let bytes_read = file.read(&mut buffer)?;
+        buffer.truncate(bytes_read);
+        Ok(buffer)
+    }
+
     /// Verify a file's hash matches its content
     pub fn verify(&self, hash: &str) -> Result<bool> {
         let content = self.read(hash)?;
@@ -60,39 +77,44 @@ impl LazerFileStore {
         Ok(actual_hash == hash.to_lowercase())
     }
 
-    /// Get all files in the store (expensive operation)
+    /// Get all files in the store using parallel directory walking
     pub fn list_all(&self) -> Result<Vec<String>> {
-        let mut hashes = Vec::new();
+        use rayon::prelude::*;
 
         if !self.files_path.exists() {
-            return Ok(hashes);
+            return Ok(Vec::new());
         }
 
-        // Iterate through first-level directories (0-9, a-f)
-        for dir1 in fs::read_dir(&self.files_path)? {
-            let dir1 = dir1?;
-            if !dir1.path().is_dir() {
-                continue;
-            }
+        // Collect first-level directories
+        let dir1_entries: Vec<_> = fs::read_dir(&self.files_path)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
 
-            // Iterate through second-level directories
-            for dir2 in fs::read_dir(dir1.path())? {
-                let dir2 = dir2?;
-                if !dir2.path().is_dir() {
-                    continue;
-                }
-
-                // Each file in here is a hash
-                for file in fs::read_dir(dir2.path())? {
-                    let file = file?;
-                    if file.path().is_file() {
-                        if let Some(name) = file.file_name().to_str() {
-                            hashes.push(name.to_string());
+        // Process directories in parallel
+        let hashes: Vec<String> = dir1_entries
+            .par_iter()
+            .flat_map(|dir1| {
+                let mut local_hashes = Vec::new();
+                if let Ok(dir2_iter) = fs::read_dir(dir1.path()) {
+                    for dir2 in dir2_iter.filter_map(|e| e.ok()) {
+                        if !dir2.path().is_dir() {
+                            continue;
+                        }
+                        if let Ok(file_iter) = fs::read_dir(dir2.path()) {
+                            for file in file_iter.filter_map(|e| e.ok()) {
+                                if file.path().is_file() {
+                                    if let Some(name) = file.file_name().to_str() {
+                                        local_hashes.push(name.to_string());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
+                local_hashes
+            })
+            .collect();
 
         Ok(hashes)
     }

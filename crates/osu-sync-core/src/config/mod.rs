@@ -4,6 +4,7 @@ mod paths;
 
 pub use paths::*;
 
+use crate::unified::UnifiedStorageConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -57,6 +58,9 @@ pub struct Config {
     /// UI theme preference
     #[serde(default)]
     pub theme: ThemeName,
+    /// Unified storage configuration
+    #[serde(default)]
+    pub unified_storage: Option<UnifiedStorageConfig>,
 }
 
 /// Strategy for handling duplicate beatmaps
@@ -80,6 +84,7 @@ impl Default for Config {
             lazer_path: detect_lazer_path(),
             duplicate_strategy: DuplicateStrategy::Ask,
             theme: ThemeName::Default,
+            unified_storage: None,
         }
     }
 }
