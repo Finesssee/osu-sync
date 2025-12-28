@@ -1509,4 +1509,279 @@ mod tests {
         let parsed: BackupManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stable_path, PathBuf::from("/stable"));
     }
+
+    // ============================================================================
+    // Additional Migration Step Tests
+    // ============================================================================
+
+    #[test]
+    fn test_all_migration_step_descriptions() {
+        let steps = vec![
+            MigrationStep::CheckPrerequisites,
+            MigrationStep::BackupOriginal { path: PathBuf::from("/backup") },
+            MigrationStep::CreateSharedFolder { path: PathBuf::from("/shared") },
+            MigrationStep::CopyBeatmaps { count: 50, size: 1024 * 1024 * 1024 },
+            MigrationStep::CreateJunctions { count: 10 },
+            MigrationStep::CreateSymlinks { count: 5 },
+            MigrationStep::VerifyIntegrity,
+            MigrationStep::CleanupBackups,
+            MigrationStep::UpdateManifest,
+        ];
+
+        for step in steps {
+            let desc = step.description();
+            assert!(!desc.is_empty(), "Step {:?} should have a description", step);
+        }
+    }
+
+    #[test]
+    fn test_migration_step_copy_beatmaps_size_format() {
+        // Test different size formats
+        let step = MigrationStep::CopyBeatmaps {
+            count: 10,
+            size: 500, // 500 bytes
+        };
+        assert!(step.description().contains("10 beatmaps"));
+
+        let step = MigrationStep::CopyBeatmaps {
+            count: 100,
+            size: 1024 * 1024, // 1 MB
+        };
+        assert!(step.description().contains("100 beatmaps"));
+    }
+
+    // ============================================================================
+    // Migration Plan Tests
+    // ============================================================================
+
+    #[test]
+    fn test_migration_plan_all_modes() {
+        for mode in [
+            UnifiedStorageMode::Disabled,
+            UnifiedStorageMode::StableMaster,
+            UnifiedStorageMode::LazerMaster,
+            UnifiedStorageMode::TrueUnified,
+        ] {
+            let plan = MigrationPlan::new(mode);
+            assert_eq!(plan.mode, mode);
+            assert_eq!(plan.step_count(), 0);
+            assert!(!plan.has_warnings());
+        }
+    }
+
+    #[test]
+    fn test_migration_plan_multiple_warnings() {
+        let mut plan = MigrationPlan::new(UnifiedStorageMode::StableMaster);
+
+        plan.add_warning("Warning 1");
+        plan.add_warning("Warning 2");
+        plan.add_warning("Warning 3");
+
+        assert!(plan.has_warnings());
+        assert_eq!(plan.warnings.len(), 3);
+    }
+
+    #[test]
+    fn test_migration_plan_step_iteration() {
+        let mut plan = MigrationPlan::new(UnifiedStorageMode::StableMaster);
+
+        plan.add_step(MigrationStep::CheckPrerequisites);
+        plan.add_step(MigrationStep::BackupOriginal { path: PathBuf::from("/backup") });
+        plan.add_step(MigrationStep::VerifyIntegrity);
+
+        assert_eq!(plan.step_count(), 3);
+
+        // Verify steps are in order
+        let steps: Vec<_> = plan.steps.iter().collect();
+        assert!(matches!(steps[0], MigrationStep::CheckPrerequisites));
+        assert!(matches!(steps[1], MigrationStep::BackupOriginal { .. }));
+        assert!(matches!(steps[2], MigrationStep::VerifyIntegrity));
+    }
+
+    // ============================================================================
+    // Migration Progress Tests
+    // ============================================================================
+
+    #[test]
+    fn test_migration_progress_boundaries() {
+        // At start
+        let progress = MigrationProgress::new(0, 10, "Starting");
+        assert!(progress.overall_progress() >= 0.0);
+
+        // In middle
+        let progress = MigrationProgress::new(1, 10, "Middle");
+        let pct = progress.overall_progress();
+        assert!(pct > 0.0 && pct < 100.0);
+
+        // Near end
+        let progress = MigrationProgress::new(9, 10, "Almost done");
+        assert!(progress.overall_progress() > 50.0);
+    }
+
+    #[test]
+    fn test_migration_progress_step_progress() {
+        let mut progress = MigrationProgress::new(0, 5, "Step 1");
+
+        // Update step progress
+        progress.step_progress = 0.5;
+        let overall = progress.overall_progress();
+
+        // Verify step progress contributes to overall
+        assert!(overall > 0.0);
+    }
+
+    #[test]
+    fn test_migration_progress_bytes_tracking() {
+        let mut progress = MigrationProgress::new(2, 5, "Copying files");
+        progress.bytes_processed = 500 * 1024 * 1024; // 500 MB processed
+        progress.total_bytes = 1024 * 1024 * 1024; // 1 GB total
+
+        assert_eq!(progress.bytes_processed, 500 * 1024 * 1024);
+        assert_eq!(progress.total_bytes, 1024 * 1024 * 1024);
+    }
+
+    // ============================================================================
+    // Migration Result Tests
+    // ============================================================================
+
+    #[test]
+    fn test_migration_result_size_display() {
+        // Test various sizes
+        let result = MigrationResult::success(1, 512); // 512 bytes
+        assert_eq!(result.space_saved_display(), "512 B");
+
+        let result = MigrationResult::success(1, 2048); // 2 KB
+        assert_eq!(result.space_saved_display(), "2.00 KB");
+
+        let result = MigrationResult::success(1, 5 * 1024 * 1024); // 5 MB
+        assert_eq!(result.space_saved_display(), "5.00 MB");
+
+        let result = MigrationResult::success(1, 2 * 1024 * 1024 * 1024); // 2 GB
+        assert_eq!(result.space_saved_display(), "2.00 GB");
+    }
+
+    #[test]
+    fn test_migration_result_multiple_errors() {
+        let errors = vec![
+            "Error 1: File not found".to_string(),
+            "Error 2: Permission denied".to_string(),
+            "Error 3: Disk full".to_string(),
+        ];
+
+        let result = MigrationResult::failure(errors.clone());
+
+        assert!(!result.success);
+        assert_eq!(result.errors.len(), 3);
+        assert_eq!(result.links_created, 0);
+        assert_eq!(result.space_saved, 0);
+    }
+
+    #[test]
+    fn test_migration_result_warnings() {
+        let mut result = MigrationResult::success(10, 1024 * 1024 * 1024);
+        result.warnings.push("Some files were skipped".to_string());
+
+        assert!(result.success);
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    // ============================================================================
+    // Backup Manifest Tests
+    // ============================================================================
+
+    #[test]
+    fn test_backup_manifest_with_moved_paths() {
+        let mut manifest = BackupManifest::new(
+            PathBuf::from("/stable"),
+            PathBuf::from("/lazer"),
+            UnifiedStorageMode::TrueUnified,
+        );
+
+        // Add some moved paths (HashMap insert)
+        manifest.moved_paths.insert(
+            PathBuf::from("/stable/Songs"),
+            PathBuf::from("/backup/Songs"),
+        );
+        manifest.moved_paths.insert(
+            PathBuf::from("/lazer/Songs"),
+            PathBuf::from("/backup/LazerSongs"),
+        );
+
+        assert_eq!(manifest.moved_paths.len(), 2);
+
+        // Verify serialization works with paths
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("Songs"));
+
+        let parsed: BackupManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.moved_paths.len(), 2);
+    }
+
+    #[test]
+    fn test_backup_manifest_all_modes() {
+        for mode in [
+            UnifiedStorageMode::StableMaster,
+            UnifiedStorageMode::LazerMaster,
+            UnifiedStorageMode::TrueUnified,
+        ] {
+            let manifest = BackupManifest::new(
+                PathBuf::from("/stable"),
+                PathBuf::from("/lazer"),
+                mode,
+            );
+
+            assert_eq!(manifest.mode, mode);
+            assert!(manifest.moved_paths.is_empty());
+        }
+    }
+
+    // ============================================================================
+    // Format Bytes Edge Cases
+    // ============================================================================
+
+    #[test]
+    fn test_format_bytes_edge_cases() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1), "1 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1536), "1.50 KB"); // 1.5 KB
+    }
+
+    #[test]
+    fn test_format_bytes_large_values() {
+        // Test very large values
+        let petabyte = 1024u64 * 1024 * 1024 * 1024 * 1024;
+        let result = format_bytes(petabyte);
+        assert!(result.contains("PB") || result.contains("TB")); // Either is acceptable
+    }
+
+    // ============================================================================
+    // SharedResourceType Tests
+    // ============================================================================
+
+    #[test]
+    fn test_shared_resource_type_folder_names() {
+        assert_eq!(SharedResourceType::Beatmaps.folder_name(), "Songs");
+        assert_eq!(SharedResourceType::Skins.folder_name(), "Skins");
+        assert_eq!(SharedResourceType::Replays.folder_name(), "Replays");
+        assert_eq!(SharedResourceType::Screenshots.folder_name(), "Screenshots");
+        assert_eq!(SharedResourceType::Exports.folder_name(), "Exports");
+        assert_eq!(SharedResourceType::Backgrounds.folder_name(), "Backgrounds");
+    }
+
+    #[test]
+    fn test_shared_resource_type_display_names() {
+        for resource in SharedResourceType::all() {
+            let display = resource.display_name();
+            assert!(!display.is_empty());
+            // Display name should be human-readable
+            assert!(display.chars().next().unwrap().is_uppercase());
+        }
+    }
+
+    #[test]
+    fn test_shared_resource_type_all_count() {
+        assert_eq!(SharedResourceType::all().len(), 6);
+    }
 }
