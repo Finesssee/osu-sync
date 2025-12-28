@@ -1,8 +1,13 @@
 //! Main synchronization engine
 
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
 use crate::beatmap::BeatmapSet;
 use crate::config::Config;
-use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateStrategy};
+use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateIndex, DuplicateStrategy};
 use crate::error::{Error, Result};
 use crate::filter::{FilterCriteria, FilterEngine};
 use crate::lazer::{LazerDatabase, LazerImporter};
@@ -126,8 +131,13 @@ pub struct SyncEngine {
     stable_scanner: StableScanner,
     lazer_database: LazerDatabase,
     duplicate_detector: DuplicateDetector,
+    duplicate_strategy: DuplicateStrategy,
     progress_callback: Option<ProgressCallback>,
     filter: Option<FilterCriteria>,
+    /// Optional set of beatmap set IDs to sync (for user selection)
+    selected_set_ids: Option<HashSet<i32>>,
+    /// Optional cancellation token for aborting sync
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl SyncEngine {
@@ -137,22 +147,32 @@ impl SyncEngine {
         stable_scanner: StableScanner,
         lazer_database: LazerDatabase,
     ) -> Self {
-        let duplicate_detector = DuplicateDetector::new(DuplicateStrategy::default());
+        let strategy = DuplicateStrategy::default();
+        let duplicate_detector = DuplicateDetector::new(strategy);
 
         Self {
             config,
             stable_scanner,
             lazer_database,
             duplicate_detector,
+            duplicate_strategy: strategy,
             progress_callback: None,
             filter: None,
+            selected_set_ids: None,
+            cancellation: None,
         }
     }
 
     /// Set the duplicate detection strategy
     pub fn with_duplicate_strategy(mut self, strategy: DuplicateStrategy) -> Self {
         self.duplicate_detector = DuplicateDetector::new(strategy);
+        self.duplicate_strategy = strategy;
         self
+    }
+
+    /// Get the current duplicate detection strategy
+    fn duplicate_detector_strategy(&self) -> DuplicateStrategy {
+        self.duplicate_strategy
     }
 
     /// Set the progress callback
@@ -181,9 +201,33 @@ impl SyncEngine {
         self.filter = None;
     }
 
+    /// Set selected beatmap set IDs for user selection
+    pub fn with_selected_set_ids(mut self, set_ids: HashSet<i32>) -> Self {
+        if set_ids.is_empty() {
+            self.selected_set_ids = None;
+        } else {
+            self.selected_set_ids = Some(set_ids);
+        }
+        self
+    }
+
+    /// Set a cancellation token for aborting sync operations
+    pub fn with_cancellation(mut self, token: Arc<AtomicBool>) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
+
+    /// Check if cancellation has been requested
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .map(|c| c.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
     /// Apply filter to stable beatmap sets, returning indices of matching sets
     fn filter_stable_sets(&self, sets: &[BeatmapSet]) -> Vec<usize> {
-        if let Some(ref filter) = self.filter {
+        let mut indices: Vec<usize> = if let Some(ref filter) = self.filter {
             sets.iter()
                 .enumerate()
                 .filter(|(_, set)| FilterEngine::matches_stable(set, filter))
@@ -192,7 +236,16 @@ impl SyncEngine {
         } else {
             // No filter, include all
             (0..sets.len()).collect()
+        };
+
+        // Apply user selection filter if set
+        if let Some(ref selected_ids) = self.selected_set_ids {
+            indices.retain(|&i| {
+                sets[i].id.map_or(false, |id| selected_ids.contains(&id))
+            });
         }
+
+        indices
     }
 
     /// Report progress to the callback if set
@@ -245,8 +298,8 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        // Scan stable beatmaps
-        let stable_sets = self.stable_scanner.scan()?;
+        // Scan stable beatmaps (uses parallel scanning with caching)
+        let stable_sets = self.stable_scanner.scan_parallel()?;
 
         // Apply filter to get matching sets
         let filtered_indices = self.filter_stable_sets(&stable_sets);
@@ -260,47 +313,53 @@ impl SyncEngine {
             );
         }
 
-        // Get lazer beatmaps for duplicate detection
+        self.report_progress(SyncProgress {
+            current: 0,
+            total,
+            current_name: "Building duplicate index...".to_string(),
+            phase: SyncPhase::Deduplicating,
+            ..Default::default()
+        });
+
+        // Get lazer beatmaps and build fast lookup index (O(n) once)
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
         let lazer_beatmap_sets: Vec<BeatmapSet> = lazer_sets
             .iter()
             .map(|ls| self.lazer_database.to_beatmap_set(ls))
             .collect();
 
-        // Analyze each filtered stable set
-        for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
-            let stable_set = &stable_sets[*set_idx];
-            self.report_progress(SyncProgress {
-                current: progress_idx + 1,
-                total,
-                current_name: stable_set
-                    .folder_name
-                    .clone()
-                    .unwrap_or_else(|| stable_set.generate_folder_name()),
-                phase: SyncPhase::Deduplicating,
-                ..Default::default()
-            });
+        // Build O(1) lookup index
+        let dup_index = DuplicateIndex::build(&lazer_beatmap_sets);
+        let strategy = self.duplicate_detector_strategy();
 
-            // Check for duplicates
-            let action = if let Some(_duplicate) = self
-                .duplicate_detector
-                .find_duplicate(stable_set, &lazer_beatmap_sets)
-            {
+        // Process in parallel with rayon
+        let progress_counter = AtomicUsize::new(0);
+        let last_reported = AtomicUsize::new(0);
+        let results_mutex = Mutex::new(Vec::with_capacity(total));
+
+        // Collect filtered sets for parallel processing
+        let filtered_sets: Vec<_> = filtered_indices
+            .iter()
+            .map(|&idx| &stable_sets[idx])
+            .collect();
+
+        // Process in parallel
+        filtered_sets.par_iter().for_each(|stable_set| {
+            // Check for cancellation early
+            if self.is_cancelled() {
+                return;
+            }
+
+            // Fast O(1) duplicate check using index
+            let action = if dup_index.is_duplicate(stable_set, strategy) {
                 DryRunAction::Duplicate
+            } else if stable_set.id.map_or(false, |id| dup_index.exists_by_id(id)) {
+                DryRunAction::Skip
             } else {
-                // Check if it already exists in lazer by ID
-                let exists = stable_set.id.map_or(false, |id| {
-                    lazer_beatmap_sets.iter().any(|s| s.id == Some(id))
-                });
-
-                if exists {
-                    DryRunAction::Skip
-                } else {
-                    DryRunAction::Import
-                }
+                DryRunAction::Import
             };
 
-            // Calculate size from files
+            // Calculate size
             let size_bytes = self.calculate_stable_set_size(stable_set);
 
             let item = DryRunItem {
@@ -318,6 +377,30 @@ impl SyncEngine {
                 difficulty_count: stable_set.beatmaps.len(),
             };
 
+            // Add to results
+            results_mutex.lock().unwrap().push(item);
+
+            // Update progress periodically (every 100 items to reduce lock contention)
+            let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let last = last_reported.load(Ordering::Relaxed);
+            if current >= last + 100 || current == total {
+                last_reported.store(current, Ordering::Relaxed);
+                self.report_progress(SyncProgress {
+                    current,
+                    total,
+                    current_name: stable_set
+                        .folder_name
+                        .clone()
+                        .unwrap_or_else(|| stable_set.generate_folder_name()),
+                    phase: SyncPhase::Deduplicating,
+                    ..Default::default()
+                });
+            }
+        });
+
+        // Add all items to result
+        let items = results_mutex.into_inner().unwrap();
+        for item in items {
             result.add_item(item);
         }
 
@@ -338,11 +421,18 @@ impl SyncEngine {
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
         let total = lazer_sets.len();
 
-        // Scan stable for duplicate detection
-        let stable_index = self.stable_scanner.build_index()?;
+        // Scan stable for duplicate detection (uses parallel scanning with caching)
+        let stable_sets = self.stable_scanner.scan_parallel()?;
+        let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
 
         // Analyze each lazer set
         for (idx, lazer_set) in lazer_sets.iter().enumerate() {
+            // Check for cancellation
+            if self.is_cancelled() {
+                tracing::info!("Dry run cancelled by user at item {}/{}", idx, total);
+                break;
+            }
+
             let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
 
             self.report_progress(SyncProgress {
@@ -464,7 +554,7 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        let stable_sets = self.stable_scanner.scan()?;
+        let stable_sets = self.stable_scanner.scan_parallel()?;
 
         // Apply filter to get matching sets
         let filtered_indices = self.filter_stable_sets(&stable_sets);
@@ -505,6 +595,12 @@ impl SyncEngine {
         );
 
         for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
+            // Check for cancellation
+            if self.is_cancelled() {
+                tracing::info!("Sync cancelled by user at item {}/{}", progress_idx, total);
+                break;
+            }
+
             let stable_set = &stable_sets[*set_idx];
             let set_name = stable_set
                 .folder_name
@@ -590,7 +686,8 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        let stable_index = self.stable_scanner.build_index()?;
+        let stable_sets = self.stable_scanner.scan_parallel()?;
+        let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
 
         // Phase 3: Import to stable
         let stable_importer = StableImporter::new(
@@ -600,6 +697,12 @@ impl SyncEngine {
         );
 
         for (idx, lazer_set) in lazer_sets.iter().enumerate() {
+            // Check for cancellation
+            if self.is_cancelled() {
+                tracing::info!("Sync cancelled by user at item {}/{}", idx, total);
+                break;
+            }
+
             let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
             let set_name = beatmap_set.generate_folder_name();
 
@@ -730,6 +833,8 @@ pub struct SyncEngineBuilder {
     lazer_database: Option<LazerDatabase>,
     duplicate_strategy: DuplicateStrategy,
     progress_callback: Option<ProgressCallback>,
+    selected_set_ids: Option<HashSet<i32>>,
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl SyncEngineBuilder {
@@ -741,6 +846,8 @@ impl SyncEngineBuilder {
             lazer_database: None,
             duplicate_strategy: DuplicateStrategy::default(),
             progress_callback: None,
+            selected_set_ids: None,
+            cancellation: None,
         }
     }
 
@@ -774,6 +881,22 @@ impl SyncEngineBuilder {
         self
     }
 
+    /// Set selected beatmap set IDs for user selection
+    pub fn selected_set_ids(mut self, set_ids: HashSet<i32>) -> Self {
+        if set_ids.is_empty() {
+            self.selected_set_ids = None;
+        } else {
+            self.selected_set_ids = Some(set_ids);
+        }
+        self
+    }
+
+    /// Set a cancellation token for aborting sync operations
+    pub fn cancellation(mut self, token: Arc<AtomicBool>) -> Self {
+        self.cancellation = Some(token);
+        self
+    }
+
     /// Build the sync engine
     pub fn build(self) -> Result<SyncEngine> {
         let config = self
@@ -793,6 +916,14 @@ impl SyncEngineBuilder {
 
         if let Some(callback) = self.progress_callback {
             engine = engine.with_progress_callback(callback);
+        }
+
+        if let Some(set_ids) = self.selected_set_ids {
+            engine = engine.with_selected_set_ids(set_ids);
+        }
+
+        if let Some(token) = self.cancellation {
+            engine = engine.with_cancellation(token);
         }
 
         Ok(engine)
