@@ -5,7 +5,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
-use osu_sync_core::backup::{BackupManager, BackupTarget};
+use osu_sync_core::backup::{
+    BackupManager, BackupMode, BackupOptions, BackupTarget, CompressionLevel,
+};
 use osu_sync_core::collection::{CollectionSyncEngine, CollectionSyncStrategy, StableCollectionReader};
 use osu_sync_core::config::Config;
 use osu_sync_core::lazer::LazerDatabase;
@@ -79,8 +81,12 @@ fn run_worker(
             Ok(WorkerMessage::SyncCollections { strategy }) => {
                 handle_sync_collections(&app_tx, strategy);
             }
-            Ok(WorkerMessage::CreateBackup { target }) => {
-                handle_create_backup(&app_tx, target);
+            Ok(WorkerMessage::CreateBackup {
+                target,
+                compression,
+                mode,
+            }) => {
+                handle_create_backup(&app_tx, target, compression, mode);
             }
             Ok(WorkerMessage::LoadBackups) => {
                 handle_load_backups(&app_tx);
@@ -88,14 +94,27 @@ fn run_worker(
             Ok(WorkerMessage::RestoreBackup { backup_path }) => {
                 handle_restore_backup(&app_tx, backup_path);
             }
-            Ok(WorkerMessage::StartMediaExtraction { media_type, organization, output_path }) => {
-                handle_media_extraction(&app_tx, media_type, organization, output_path);
+            Ok(WorkerMessage::StartMediaExtraction {
+                media_type,
+                organization,
+                output_path,
+                skip_duplicates,
+                include_metadata,
+            }) => {
+                handle_media_extraction(
+                    &app_tx,
+                    media_type,
+                    organization,
+                    output_path,
+                    skip_duplicates,
+                    include_metadata,
+                );
             }
             Ok(WorkerMessage::LoadReplays) => {
                 handle_load_replays(&app_tx);
             }
-            Ok(WorkerMessage::StartReplayExport { organization, output_path }) => {
-                handle_replay_export(&app_tx, organization, output_path);
+            Ok(WorkerMessage::StartReplayExport { organization, output_path, filter, rename_pattern }) => {
+                handle_replay_export(&app_tx, organization, output_path, filter, rename_pattern);
             }
             Ok(WorkerMessage::Cancel) => {
                 // TODO: Implement cancellation
@@ -482,7 +501,12 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     }
 }
 
-fn handle_create_backup(app_tx: &Sender<AppMessage>, target: BackupTarget) {
+fn handle_create_backup(
+    app_tx: &Sender<AppMessage>,
+    target: BackupTarget,
+    compression: CompressionLevel,
+    mode: BackupMode,
+) {
     let config = Config::load();
     let backup_manager = BackupManager::new(BackupManager::default_backup_dir());
 
@@ -546,14 +570,26 @@ fn handle_create_backup(app_tx: &Sender<AppMessage>, target: BackupTarget) {
         }
     };
 
+    // Create backup options
+    let options = BackupOptions::new()
+        .with_compression(compression)
+        .with_mode(mode);
+
+    let is_incremental = mode == BackupMode::Incremental;
+
     // Create progress callback
     let progress_tx = app_tx.clone();
     let progress_callback = Box::new(move |progress: osu_sync_core::backup::BackupProgress| {
         let _ = progress_tx.send(AppMessage::BackupProgress(progress));
     });
 
-    // Create backup
-    match backup_manager.create_backup_with_progress(target, &source_path, Some(progress_callback)) {
+    // Create backup with options
+    match backup_manager.create_backup_with_options(
+        target,
+        &source_path,
+        options,
+        Some(progress_callback),
+    ) {
         Ok(backup_path) => {
             let size_bytes = std::fs::metadata(&backup_path)
                 .map(|m| m.len())
@@ -561,6 +597,7 @@ fn handle_create_backup(app_tx: &Sender<AppMessage>, target: BackupTarget) {
             let _ = app_tx.send(AppMessage::BackupComplete {
                 path: backup_path,
                 size_bytes,
+                is_incremental,
             });
         }
         Err(e) => {
@@ -670,6 +707,8 @@ fn handle_media_extraction(
     media_type: osu_sync_core::media::MediaType,
     organization: osu_sync_core::media::OutputOrganization,
     output_path: PathBuf,
+    _skip_duplicates: bool,
+    include_metadata: bool,
 ) {
     use osu_sync_core::media::{ExtractionProgress, MediaExtractor};
 
@@ -687,7 +726,10 @@ fn handle_media_extraction(
     let songs_path = stable_path.join("Songs");
 
     // Scan beatmap sets first (fast mode - no hashing needed for media extraction)
-    let sets = match StableScanner::new(songs_path.clone()).skip_hashing().scan_parallel() {
+    let sets = match StableScanner::new(songs_path.clone())
+        .skip_hashing()
+        .scan_parallel()
+    {
         Ok(s) => s,
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!("Failed to scan beatmaps: {}", e)));
@@ -701,10 +743,11 @@ fn handle_media_extraction(
         let _ = progress_tx.send(AppMessage::MediaProgress(progress));
     });
 
-    // Create extractor and run
+    // Create extractor with metadata option
     let mut extractor = MediaExtractor::new(&output_path)
         .with_media_type(media_type)
-        .with_organization(organization);
+        .with_organization(organization)
+        .with_metadata(include_metadata);
 
     match extractor.extract_from_stable(&songs_path, &sets, Some(progress_callback)) {
         Ok(result) => {
@@ -751,6 +794,8 @@ fn handle_replay_export(
     app_tx: &Sender<AppMessage>,
     organization: osu_sync_core::replay::ExportOrganization,
     output_path: PathBuf,
+    filter: osu_sync_core::replay::ReplayFilter,
+    rename_pattern: Option<String>,
 ) {
     use osu_sync_core::replay::{ReplayExporter, ReplayProgress, StableReplayReader};
 
@@ -783,10 +828,16 @@ fn handle_replay_export(
         let _ = progress_tx.send(AppMessage::ReplayProgress(progress));
     });
 
-    // Create exporter and run
-    let exporter = ReplayExporter::new(output_path)
+    // Create exporter with filter and rename pattern
+    let mut exporter = ReplayExporter::new(output_path)
         .with_organization(organization)
+        .with_filter(filter)
         .with_progress_callback(progress_callback);
+
+    // Add rename pattern if provided
+    if let Some(pattern) = rename_pattern {
+        exporter = exporter.with_rename_pattern(pattern);
+    }
 
     match exporter.export(&replays) {
         Ok(result) => {

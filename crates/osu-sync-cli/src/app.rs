@@ -5,19 +5,25 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 
-use osu_sync_core::backup::{BackupInfo, BackupProgress, BackupTarget};
+use osu_sync_core::backup::{
+    BackupInfo, BackupMode, BackupProgress, BackupTarget, CompressionLevel,
+};
 use osu_sync_core::beatmap::GameMode;
 use osu_sync_core::collection::{Collection, CollectionSyncResult, CollectionSyncStrategy};
 use osu_sync_core::dedup::DuplicateInfo;
 use osu_sync_core::filter::FilterCriteria;
 use osu_sync_core::media::{ExtractionProgress, ExtractionResult, MediaType, OutputOrganization};
-use osu_sync_core::replay::{ExportOrganization, ReplayExportResult, ReplayInfo, ReplayProgress};
+use osu_sync_core::replay::{
+    ExportOrganization, Grade, ReplayExportResult, ReplayExportStats, ReplayFilter, ReplayInfo,
+    ReplayProgress,
+};
 use osu_sync_core::stats::ComparisonStats;
 use osu_sync_core::sync::{DryRunResult, SyncDirection, SyncProgress, SyncResult};
 use ratatui::prelude::*;
 
 use crate::event;
 use crate::screens;
+use crate::theme;
 
 /// osu! pink color
 pub const PINK: Color = Color::Rgb(255, 102, 170);
@@ -34,6 +40,27 @@ pub const SUCCESS: Color = Color::Green;
 pub const WARNING: Color = Color::Yellow;
 /// Error color
 pub const ERROR: Color = Color::Red;
+/// Selection background color
+pub const SELECTION_BG: Color = Color::Rgb(69, 71, 90);
+
+// Helper functions for color access
+
+/// Get the pink accent color
+pub fn pink() -> Color { PINK }
+/// Get the text color
+pub fn text_color() -> Color { TEXT }
+/// Get the subtle/dimmed text color
+pub fn subtle_color() -> Color { SUBTLE }
+/// Get the success color
+pub fn success_color() -> Color { SUCCESS }
+/// Get the warning color
+#[allow(dead_code)]
+pub fn warning_color() -> Color { WARNING }
+/// Get the error color
+#[allow(dead_code)]
+pub fn error_color() -> Color { ERROR }
+/// Get the selection background color
+pub fn selection_bg() -> Color { SELECTION_BG }
 
 /// Log entry for sync operations
 #[derive(Debug, Clone)]
@@ -59,6 +86,7 @@ pub enum StatisticsTab {
     Stable,
     Lazer,
     Duplicates,
+    Recommendations,
 }
 
 /// State for export dialog
@@ -136,6 +164,7 @@ pub enum AppMessage {
     BackupComplete {
         path: PathBuf,
         size_bytes: u64,
+        is_incremental: bool,
     },
     BackupsLoaded(Vec<BackupInfo>),
     RestoreProgress(BackupProgress),
@@ -166,7 +195,11 @@ pub enum WorkerMessage {
     ResolveDuplicate(osu_sync_core::dedup::DuplicateResolution),
     LoadCollections,
     SyncCollections { strategy: CollectionSyncStrategy },
-    CreateBackup { target: BackupTarget },
+    CreateBackup {
+        target: BackupTarget,
+        compression: CompressionLevel,
+        mode: BackupMode,
+    },
     LoadBackups,
     RestoreBackup { backup_path: PathBuf },
     // Media extraction
@@ -174,12 +207,16 @@ pub enum WorkerMessage {
         media_type: MediaType,
         organization: OutputOrganization,
         output_path: PathBuf,
+        skip_duplicates: bool,
+        include_metadata: bool,
     },
     // Replay export
     LoadReplays,
     StartReplayExport {
         organization: ExportOrganization,
         output_path: PathBuf,
+        filter: ReplayFilter,
+        rename_pattern: Option<String>,
     },
     Cancel,
     Shutdown,
@@ -210,6 +247,7 @@ pub enum AppState {
         progress: Option<SyncProgress>,
         logs: Vec<LogEntry>,
         stats: SyncStats,
+        is_paused: bool,
     },
     DuplicateDialog {
         info: DuplicateInfo,
@@ -266,6 +304,7 @@ pub enum AppState {
     BackupComplete {
         backup_path: PathBuf,
         size_bytes: u64,
+        is_incremental: bool,
     },
     RestoreConfig {
         backups: Vec<BackupInfo>,
@@ -292,6 +331,8 @@ pub enum AppState {
         media_type: MediaType,
         organization: OutputOrganization,
         output_path: String,
+        skip_duplicates: bool,
+        include_metadata: bool,
         status_message: Option<String>,
     },
     MediaProgress {
@@ -309,6 +350,14 @@ pub enum AppState {
         replays: Vec<ReplayInfo>,
         loading: bool,
         status_message: Option<String>,
+        /// Filter settings
+        filter: ReplayFilter,
+        /// Custom rename pattern (empty = default)
+        rename_pattern: String,
+        /// Whether filter panel is open
+        filter_panel_open: bool,
+        /// Which filter field is selected (0-4: grade, osu, taiko, catch, mania)
+        filter_field: usize,
     },
     ReplayProgress {
         progress: Option<ReplayProgress>,
@@ -316,6 +365,7 @@ pub enum AppState {
     },
     ReplayComplete {
         result: ReplayExportResult,
+        stats: Option<ReplayExportStats>,
     },
     Help {
         /// The state to return to when help is closed
@@ -732,6 +782,24 @@ impl App {
         if event::is_escape(&key) {
             let _ = self.worker_tx.send(WorkerMessage::Cancel);
             // Will wait for SyncComplete message
+        } else if event::is_space(&key) {
+            // Toggle pause state
+            if let AppState::Syncing {
+                progress,
+                logs,
+                stats,
+                is_paused,
+            } = &self.state
+            {
+                self.state = AppState::Syncing {
+                    progress: progress.clone(),
+                    logs: logs.clone(),
+                    stats: stats.clone(),
+                    is_paused: !is_paused,
+                };
+                // Note: The worker would need to check this pause state
+                // For now this just updates the UI state
+            }
         }
     }
 
@@ -781,7 +849,7 @@ impl App {
 
     fn handle_config_key(&mut self, key: KeyEvent, selected: usize) {
         use crossterm::event::KeyCode;
-        const OPTIONS: usize = 2;
+        const OPTIONS: usize = 3; // stable path, lazer path, theme
 
         // Extract current state
         let (stable_path, lazer_path, status_message, editing) = if let AppState::Config {
@@ -843,6 +911,7 @@ impl App {
                         stable_path: new_stable.clone().map(std::path::PathBuf::from),
                         lazer_path: new_lazer.clone().map(std::path::PathBuf::from),
                         duplicate_strategy: osu_sync_core::config::DuplicateStrategy::Ask,
+                        theme: theme::current_theme_name(),
                     };
                     let save_result = config.save();
 
@@ -915,19 +984,59 @@ impl App {
         } else if event::is_key(&key, 'd') {
             // Auto-detect paths
             self.auto_detect_paths();
-        } else if event::is_enter(&key) {
-            // Start editing the selected path
-            let current_value = if selected == 0 {
-                stable_path.clone().unwrap_or_default()
-            } else {
-                lazer_path.clone().unwrap_or_default()
-            };
+        } else if event::is_enter(&key) || event::is_left(&key) || event::is_right(&key) {
+            if selected == 2 {
+                // Theme selection - cycle theme
+                self.cycle_theme();
+            } else if event::is_enter(&key) {
+                // Start editing the selected path
+                let current_value = if selected == 0 {
+                    stable_path.clone().unwrap_or_default()
+                } else {
+                    lazer_path.clone().unwrap_or_default()
+                };
+                self.state = AppState::Config {
+                    selected,
+                    stable_path,
+                    lazer_path,
+                    status_message: "Type path, Enter to save, Esc to cancel".to_string(),
+                    editing: Some(current_value),
+                };
+            }
+        }
+    }
+
+    /// Cycle to the next theme and save the preference
+    fn cycle_theme(&mut self) {
+        let current = theme::current_theme_name();
+        let new_theme = current.next();
+
+        // Apply the new theme immediately
+        theme::set_theme(new_theme);
+
+        // Save to config
+        let mut config = osu_sync_core::config::Config::load();
+        config.theme = new_theme;
+        let save_result = config.save();
+
+        // Update state with success message
+        if let AppState::Config {
+            selected,
+            stable_path,
+            lazer_path,
+            ..
+        } = &self.state
+        {
             self.state = AppState::Config {
-                selected,
-                stable_path,
-                lazer_path,
-                status_message: "Type path, Enter to save, Esc to cancel".to_string(),
-                editing: Some(current_value),
+                selected: *selected,
+                stable_path: stable_path.clone(),
+                lazer_path: lazer_path.clone(),
+                status_message: if save_result.is_ok() {
+                    format!("Theme '{}' applied and saved!", new_theme.display_name())
+                } else {
+                    format!("Theme '{}' applied (save failed)", new_theme.display_name())
+                },
+                editing: None,
             };
         }
     }
@@ -1027,7 +1136,8 @@ impl App {
                 StatisticsTab::Overview => StatisticsTab::Stable,
                 StatisticsTab::Stable => StatisticsTab::Lazer,
                 StatisticsTab::Lazer => StatisticsTab::Duplicates,
-                StatisticsTab::Duplicates => StatisticsTab::Overview,
+                StatisticsTab::Duplicates => StatisticsTab::Recommendations,
+                StatisticsTab::Recommendations => StatisticsTab::Overview,
             };
             self.state = AppState::Statistics {
                 stats,
@@ -1039,10 +1149,11 @@ impl App {
         } else if event::is_left(&key) {
             // Cycle backwards
             let prev_tab = match tab {
-                StatisticsTab::Overview => StatisticsTab::Duplicates,
+                StatisticsTab::Overview => StatisticsTab::Recommendations,
                 StatisticsTab::Stable => StatisticsTab::Overview,
                 StatisticsTab::Lazer => StatisticsTab::Stable,
                 StatisticsTab::Duplicates => StatisticsTab::Lazer,
+                StatisticsTab::Recommendations => StatisticsTab::Duplicates,
             };
             self.state = AppState::Statistics {
                 stats,
@@ -1086,8 +1197,8 @@ impl App {
                 export_state,
             };
         } else if event::is_down(&key) {
-            // Navigate down in format selection
-            export_state.selected_format = (export_state.selected_format + 1).min(1);
+            // Navigate down in format selection (now supports 3 formats: JSON, CSV, HTML)
+            export_state.selected_format = (export_state.selected_format + 1).min(2);
             export_state.result_message = None;
             self.state = AppState::Statistics {
                 stats,
@@ -1099,10 +1210,10 @@ impl App {
         } else if event::is_enter(&key) {
             // Perform export
             if let Some(ref comparison_stats) = stats {
-                let format = if export_state.selected_format == 0 {
-                    ExportFormat::Json
-                } else {
-                    ExportFormat::Csv
+                let format = match export_state.selected_format {
+                    0 => ExportFormat::Json,
+                    1 => ExportFormat::Csv,
+                    _ => ExportFormat::Html,
                 };
 
                 // Determine export path (use current directory or documents folder)
@@ -1424,6 +1535,8 @@ impl App {
             media_type: MediaType::Both,
             organization: OutputOrganization::Flat,
             output_path: "extracted_media".to_string(),
+            skip_duplicates: true,
+            include_metadata: false,
             status_message: None,
         };
     }
@@ -1437,6 +1550,10 @@ impl App {
             replays: Vec::new(),
             loading: true,
             status_message: Some("Loading replays...".to_string()),
+            filter: ReplayFilter::new(),
+            rename_pattern: String::new(),
+            filter_panel_open: false,
+            filter_field: 0,
         };
         let _ = self.worker_tx.send(WorkerMessage::LoadReplays);
     }
@@ -1462,7 +1579,11 @@ impl App {
                 current_file: None,
             },
         };
-        let _ = self.worker_tx.send(WorkerMessage::CreateBackup { target });
+        let _ = self.worker_tx.send(WorkerMessage::CreateBackup {
+            target,
+            compression: CompressionLevel::default(),
+            mode: BackupMode::Full,
+        });
     }
 
     /// Start a restore operation
@@ -1532,6 +1653,7 @@ impl App {
                 level: LogLevel::Info,
             }],
             stats: SyncStats::default(),
+            is_paused: false,
         };
         let _ = self.worker_tx.send(WorkerMessage::StartSync { direction });
     }
@@ -1546,6 +1668,7 @@ impl App {
                 level: LogLevel::Info,
             }],
             stats: SyncStats::default(),
+            is_paused: false,
         };
         let _ = self
             .worker_tx
@@ -1676,12 +1799,14 @@ impl App {
     }
 
     fn handle_media_config_key(&mut self, key: KeyEvent, selected: usize) {
-        const MEDIA_OPTIONS: usize = 4; // media type, organization, output path, start
+        const MEDIA_OPTIONS: usize = 6; // media type, organization, skip duplicates, include metadata, output path, start
 
         if let AppState::MediaConfig {
             media_type,
             organization,
             output_path,
+            skip_duplicates,
+            include_metadata,
             status_message,
             ..
         } = &self.state
@@ -1689,16 +1814,20 @@ impl App {
             let media_type = *media_type;
             let organization = *organization;
             let output_path = output_path.clone();
+            let skip_duplicates = *skip_duplicates;
+            let include_metadata = *include_metadata;
             let status_message = status_message.clone();
 
             if event::is_escape(&key) {
-                self.state = AppState::MainMenu { selected: 4 };
+                self.state = AppState::MainMenu { selected: 3 };
             } else if event::is_down(&key) {
                 self.state = AppState::MediaConfig {
                     selected: (selected + 1) % MEDIA_OPTIONS,
                     media_type,
                     organization,
                     output_path,
+                    skip_duplicates,
+                    include_metadata,
                     status_message,
                 };
             } else if event::is_up(&key) {
@@ -1707,6 +1836,8 @@ impl App {
                     media_type,
                     organization,
                     output_path,
+                    skip_duplicates,
+                    include_metadata,
                     status_message,
                 };
             } else if event::is_enter(&key) || event::is_space(&key) {
@@ -1723,6 +1854,8 @@ impl App {
                             media_type: new_type,
                             organization,
                             output_path,
+                            skip_duplicates,
+                            include_metadata,
                             status_message,
                         };
                     }
@@ -1738,15 +1871,47 @@ impl App {
                             media_type,
                             organization: new_org,
                             output_path,
+                            skip_duplicates,
+                            include_metadata,
                             status_message,
                         };
                     }
                     2 => {
-                        // Output path - could add editing, for now just toggle
+                        // Toggle skip duplicates
+                        self.state = AppState::MediaConfig {
+                            selected,
+                            media_type,
+                            organization,
+                            output_path,
+                            skip_duplicates: !skip_duplicates,
+                            include_metadata,
+                            status_message,
+                        };
                     }
                     3 => {
+                        // Toggle include metadata
+                        self.state = AppState::MediaConfig {
+                            selected,
+                            media_type,
+                            organization,
+                            output_path,
+                            skip_duplicates,
+                            include_metadata: !include_metadata,
+                            status_message,
+                        };
+                    }
+                    4 => {
+                        // Output path - could add editing, for now just toggle
+                    }
+                    5 => {
                         // Start extraction
-                        self.start_media_extraction(media_type, organization, &output_path);
+                        self.start_media_extraction(
+                            media_type,
+                            organization,
+                            &output_path,
+                            skip_duplicates,
+                            include_metadata,
+                        );
                     }
                     _ => {}
                 }
@@ -1768,7 +1933,7 @@ impl App {
     }
 
     fn handle_replay_config_key(&mut self, key: KeyEvent, selected: usize) {
-        const REPLAY_OPTIONS: usize = 3; // organization, output path, start
+        const REPLAY_OPTIONS: usize = 5; // organization, output path, filter, rename pattern, start
 
         if let AppState::ReplayConfig {
             organization,
@@ -1776,6 +1941,10 @@ impl App {
             replays,
             loading,
             status_message,
+            filter,
+            rename_pattern,
+            filter_panel_open,
+            filter_field,
             ..
         } = &self.state
         {
@@ -1784,11 +1953,44 @@ impl App {
             let replays = replays.clone();
             let loading = *loading;
             let status_message = status_message.clone();
+            let filter = filter.clone();
+            let rename_pattern = rename_pattern.clone();
+            let filter_panel_open = *filter_panel_open;
+            let filter_field = *filter_field;
 
             if event::is_escape(&key) {
-                self.state = AppState::MainMenu { selected: 5 };
+                if filter_panel_open {
+                    // Close filter panel
+                    self.state = AppState::ReplayConfig {
+                        selected,
+                        organization,
+                        output_path,
+                        replays,
+                        loading,
+                        status_message,
+                        filter,
+                        rename_pattern,
+                        filter_panel_open: false,
+                        filter_field: 0,
+                    };
+                } else {
+                    self.state = AppState::MainMenu { selected: 5 };
+                }
             } else if loading {
                 return; // Don't process navigation while loading
+            } else if filter_panel_open {
+                // Handle filter panel navigation
+                self.handle_replay_filter_panel_key(
+                    key,
+                    selected,
+                    organization,
+                    output_path,
+                    replays,
+                    status_message,
+                    filter,
+                    rename_pattern,
+                    filter_field,
+                );
             } else if event::is_down(&key) {
                 self.state = AppState::ReplayConfig {
                     selected: (selected + 1) % REPLAY_OPTIONS,
@@ -1797,6 +1999,10 @@ impl App {
                     replays,
                     loading,
                     status_message,
+                    filter,
+                    rename_pattern,
+                    filter_panel_open: false,
+                    filter_field,
                 };
             } else if event::is_up(&key) {
                 self.state = AppState::ReplayConfig {
@@ -1806,6 +2012,10 @@ impl App {
                     replays,
                     loading,
                     status_message,
+                    filter,
+                    rename_pattern,
+                    filter_panel_open: false,
+                    filter_field,
                 };
             } else if event::is_enter(&key) || event::is_space(&key) {
                 match selected {
@@ -1825,20 +2035,170 @@ impl App {
                             replays,
                             loading,
                             status_message,
+                            filter,
+                            rename_pattern,
+                            filter_panel_open: false,
+                            filter_field,
                         };
                     }
                     1 => {
                         // Output path - could add editing
                     }
                     2 => {
+                        // Open filter panel
+                        self.state = AppState::ReplayConfig {
+                            selected,
+                            organization,
+                            output_path,
+                            replays,
+                            loading,
+                            status_message,
+                            filter,
+                            rename_pattern,
+                            filter_panel_open: true,
+                            filter_field: 0,
+                        };
+                    }
+                    3 => {
+                        // Toggle between rename pattern presets
+                        let new_pattern = if rename_pattern.is_empty() {
+                            "{artist} - {title} [{grade}]".to_string()
+                        } else if rename_pattern == "{artist} - {title} [{grade}]" {
+                            "{player}_{date}_{title}_{grade}".to_string()
+                        } else if rename_pattern == "{player}_{date}_{title}_{grade}" {
+                            "{date}_{mode}_{title}".to_string()
+                        } else {
+                            String::new()
+                        };
+                        self.state = AppState::ReplayConfig {
+                            selected,
+                            organization,
+                            output_path,
+                            replays,
+                            loading,
+                            status_message,
+                            filter,
+                            rename_pattern: new_pattern,
+                            filter_panel_open: false,
+                            filter_field,
+                        };
+                    }
+                    4 => {
                         // Start export
-                        if !replays.is_empty() {
-                            self.start_replay_export(organization, &output_path);
+                        let exportable: Vec<_> = replays.iter().filter(|r| r.has_replay_file).cloned().collect();
+                        if !exportable.is_empty() {
+                            self.start_replay_export(organization, &output_path, filter, &rename_pattern);
                         }
                     }
                     _ => {}
                 }
             }
+        }
+    }
+
+    fn handle_replay_filter_panel_key(
+        &mut self,
+        key: KeyEvent,
+        selected: usize,
+        organization: ExportOrganization,
+        output_path: String,
+        replays: Vec<ReplayInfo>,
+        status_message: Option<String>,
+        mut filter: ReplayFilter,
+        rename_pattern: String,
+        filter_field: usize,
+    ) {
+        const FILTER_FIELDS: usize = 5; // grade, osu, taiko, catch, mania
+
+        if event::is_down(&key) || event::is_right(&key) {
+            let next_field = (filter_field + 1) % FILTER_FIELDS;
+            self.state = AppState::ReplayConfig {
+                selected,
+                organization,
+                output_path,
+                replays,
+                loading: false,
+                status_message,
+                filter,
+                rename_pattern,
+                filter_panel_open: true,
+                filter_field: next_field,
+            };
+        } else if event::is_up(&key) || event::is_left(&key) {
+            let prev_field = if filter_field == 0 { FILTER_FIELDS - 1 } else { filter_field - 1 };
+            self.state = AppState::ReplayConfig {
+                selected,
+                organization,
+                output_path,
+                replays,
+                loading: false,
+                status_message,
+                filter,
+                rename_pattern,
+                filter_panel_open: true,
+                filter_field: prev_field,
+            };
+        } else if event::is_space(&key) || event::is_enter(&key) {
+            // Toggle the selected filter
+            match filter_field {
+                0 => {
+                    // Cycle grade threshold: None -> SS -> S -> A -> B -> C -> D -> None
+                    filter.min_grade = match filter.min_grade {
+                        None => Some(Grade::SS),
+                        Some(Grade::SS) | Some(Grade::SSilver) => Some(Grade::S),
+                        Some(Grade::S) | Some(Grade::SSilver2) => Some(Grade::A),
+                        Some(Grade::A) => Some(Grade::B),
+                        Some(Grade::B) => Some(Grade::C),
+                        Some(Grade::C) => Some(Grade::D),
+                        Some(Grade::D) | Some(Grade::F) => None,
+                    };
+                }
+                1 => {
+                    // Toggle osu! mode
+                    if filter.modes.contains(&GameMode::Osu) {
+                        filter.modes.retain(|m| *m != GameMode::Osu);
+                    } else {
+                        filter.modes.push(GameMode::Osu);
+                    }
+                }
+                2 => {
+                    // Toggle taiko mode
+                    if filter.modes.contains(&GameMode::Taiko) {
+                        filter.modes.retain(|m| *m != GameMode::Taiko);
+                    } else {
+                        filter.modes.push(GameMode::Taiko);
+                    }
+                }
+                3 => {
+                    // Toggle catch mode
+                    if filter.modes.contains(&GameMode::Catch) {
+                        filter.modes.retain(|m| *m != GameMode::Catch);
+                    } else {
+                        filter.modes.push(GameMode::Catch);
+                    }
+                }
+                4 => {
+                    // Toggle mania mode
+                    if filter.modes.contains(&GameMode::Mania) {
+                        filter.modes.retain(|m| *m != GameMode::Mania);
+                    } else {
+                        filter.modes.push(GameMode::Mania);
+                    }
+                }
+                _ => {}
+            }
+            self.state = AppState::ReplayConfig {
+                selected,
+                organization,
+                output_path,
+                replays,
+                loading: false,
+                status_message,
+                filter,
+                rename_pattern,
+                filter_panel_open: true,
+                filter_field,
+            };
         }
     }
 
@@ -1860,6 +2220,8 @@ impl App {
         media_type: MediaType,
         organization: OutputOrganization,
         output_path: &str,
+        skip_duplicates: bool,
+        include_metadata: bool,
     ) {
         self.state = AppState::MediaProgress {
             progress: None,
@@ -1869,10 +2231,18 @@ impl App {
             media_type,
             organization,
             output_path: PathBuf::from(output_path),
+            skip_duplicates,
+            include_metadata,
         });
     }
 
-    fn start_replay_export(&mut self, organization: ExportOrganization, output_path: &str) {
+    fn start_replay_export(
+        &mut self,
+        organization: ExportOrganization,
+        output_path: &str,
+        filter: ReplayFilter,
+        rename_pattern: &str,
+    ) {
         self.state = AppState::ReplayProgress {
             progress: None,
             current_replay: "Starting...".to_string(),
@@ -1880,6 +2250,12 @@ impl App {
         let _ = self.worker_tx.send(WorkerMessage::StartReplayExport {
             organization,
             output_path: PathBuf::from(output_path),
+            filter,
+            rename_pattern: if rename_pattern.is_empty() {
+                None
+            } else {
+                Some(rename_pattern.to_string())
+            },
         });
     }
 
@@ -1907,6 +2283,7 @@ impl App {
             progress: None,
             logs: Vec::new(),
             stats: SyncStats::default(),
+            is_paused: false,
         };
     }
 
@@ -1934,6 +2311,7 @@ impl App {
                         progress: p,
                         logs,
                         stats,
+                        is_paused: _,
                     } = &mut self.state
                     {
                         // Add log entry
@@ -2033,10 +2411,15 @@ impl App {
                         *p = progress;
                     }
                 }
-                AppMessage::BackupComplete { path, size_bytes } => {
+                AppMessage::BackupComplete {
+                    path,
+                    size_bytes,
+                    is_incremental,
+                } => {
                     self.state = AppState::BackupComplete {
                         backup_path: path,
                         size_bytes,
+                        is_incremental,
                     };
                 }
                 AppMessage::BackupsLoaded(backups) => {
@@ -2084,6 +2467,8 @@ impl App {
                         selected,
                         organization,
                         output_path,
+                        filter,
+                        rename_pattern,
                         ..
                     } = &self.state
                     {
@@ -2097,6 +2482,10 @@ impl App {
                                 "Found {} replays with .osr files",
                                 exportable_count
                             )),
+                            filter: filter.clone(),
+                            rename_pattern: rename_pattern.clone(),
+                            filter_panel_open: false,
+                            filter_field: 0,
                         };
                     }
                 }
@@ -2111,7 +2500,8 @@ impl App {
                     }
                 }
                 AppMessage::ReplayComplete(result) => {
-                    self.state = AppState::ReplayComplete { result };
+                    let stats = result.stats.clone();
+                    self.state = AppState::ReplayComplete { result, stats };
                 }
                 AppMessage::Error(error) => {
                     self.last_error = Some(error);
