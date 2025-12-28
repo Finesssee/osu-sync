@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use crate::app::{PINK, SUBTLE, TEXT};
 
 /// Render media extraction configuration screen
+#[allow(clippy::too_many_arguments)]
 pub fn render_config(
     frame: &mut Frame,
     area: Rect,
@@ -14,6 +15,8 @@ pub fn render_config(
     media_type: MediaType,
     organization: OutputOrganization,
     output_path: &str,
+    skip_duplicates: bool,
+    include_metadata: bool,
     status_message: &Option<String>,
 ) {
     let chunks = Layout::default()
@@ -55,9 +58,14 @@ pub fn render_config(
         OutputOrganization::ByBeatmap => "By Beatmap",
     };
 
+    let skip_dup_str = if skip_duplicates { "[x] Yes" } else { "[ ] No" };
+    let metadata_str = if include_metadata { "[x] Yes" } else { "[ ] No" };
+
     let options = [
         format!("Media Type: {}", media_type_str),
         format!("Organization: {}", org_str),
+        format!("Skip Duplicates: {}", skip_dup_str),
+        format!("Include Metadata: {}", metadata_str),
         format!("Output: {}", output_path),
         "Start Extraction".to_string(),
     ];
@@ -188,7 +196,7 @@ pub fn render_complete(frame: &mut Frame, area: Rect, result: &ExtractionResult)
     frame.render_widget(title, chunks[0]);
 
     // Results
-    let results_text = vec![
+    let mut results_text = vec![
         Line::from(""),
         Line::from(Span::styled(
             format!("Audio files extracted: {}", result.audio_extracted),
@@ -203,12 +211,35 @@ pub fn render_complete(frame: &mut Frame, area: Rect, result: &ExtractionResult)
             Style::default().fg(SUBTLE),
         )),
         Line::from(Span::styled(
-            format!("Total data written: {:.1} MB", result.bytes_written as f64 / 1_048_576.0),
+            format!(
+                "Total data written: {:.1} MB",
+                result.bytes_written as f64 / 1_048_576.0
+            ),
             Style::default().fg(TEXT),
         )),
     ];
 
-    let mut results_text = results_text;
+    // Show metadata files created if any
+    if result.metadata_files_created > 0 {
+        results_text.push(Line::from(Span::styled(
+            format!("Metadata files created: {}", result.metadata_files_created),
+            Style::default().fg(TEXT),
+        )));
+    }
+
+    // Show audio format breakdown if available
+    if !result.audio_by_format.is_empty() {
+        let format_info: Vec<String> = result
+            .audio_by_format
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect();
+        results_text.push(Line::from(Span::styled(
+            format!("Audio formats: {}", format_info.join(", ")),
+            Style::default().fg(SUBTLE),
+        )));
+    }
+
     if !result.errors.is_empty() {
         results_text.push(Line::from(""));
         results_text.push(Line::from(Span::styled(

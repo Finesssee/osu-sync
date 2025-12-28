@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 
 use crate::app::{ExportState, StatisticsTab, PINK, SUBTLE, SUCCESS, TEXT, WARNING};
 use crate::widgets::{get_spinner_frame, render_tabs};
-use osu_sync_core::stats::ComparisonStats;
+use osu_sync_core::stats::{ComparisonStats, ModeCount, Recommendations};
 use osu_sync_core::ExportFormat;
 
 pub fn render(
@@ -27,12 +27,13 @@ pub fn render(
         .split(area);
 
     // Tab bar
-    let tab_labels = ["Overview", "Stable", "Lazer", "Duplicates"];
+    let tab_labels = ["Overview", "Stable", "Lazer", "Duplicates", "Recommendations"];
     let selected_idx = match tab {
         StatisticsTab::Overview => 0,
         StatisticsTab::Stable => 1,
         StatisticsTab::Lazer => 2,
         StatisticsTab::Duplicates => 3,
+        StatisticsTab::Recommendations => 4,
     };
     render_tabs(frame, chunks[0], &tab_labels, selected_idx);
 
@@ -59,6 +60,9 @@ pub fn render(
                     render_installation(frame, chunks[1], "osu!lazer", &stats.lazer)
                 }
                 StatisticsTab::Duplicates => render_duplicates(frame, chunks[1], stats),
+                StatisticsTab::Recommendations => {
+                    render_recommendations(frame, chunks[1], &stats.recommendations)
+                }
             }
         }
     } else {
@@ -80,13 +84,18 @@ pub fn render(
 }
 
 fn render_overview(frame: &mut Frame, area: Rect, stats: &ComparisonStats) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .margin(1)
         .split(area);
 
-    // Left: Comparison table
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(main_chunks[0]);
+
+    // Top Left: Comparison table
     let rows = vec![
         Row::new(vec!["", "Stable", "Lazer"]).style(Style::default().fg(PINK).bold()),
         Row::new(vec![
@@ -120,9 +129,9 @@ fn render_overview(frame: &mut Frame, area: Rect, stats: &ComparisonStats) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(SUBTLE)),
     );
-    frame.render_widget(table, chunks[0]);
+    frame.render_widget(table, top_chunks[0]);
 
-    // Right: Summary
+    // Top Right: Summary
     let summary = vec![
         Line::from(""),
         Line::from(vec![
@@ -164,7 +173,84 @@ fn render_overview(frame: &mut Frame, area: Rect, stats: &ComparisonStats) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(SUBTLE)),
     );
-    frame.render_widget(summary_widget, chunks[1]);
+    frame.render_widget(summary_widget, top_chunks[1]);
+
+    // Bottom: Mode Breakdown
+    render_mode_breakdown(
+        frame,
+        main_chunks[1],
+        &stats.mode_breakdown.stable_counts,
+        &stats.mode_breakdown.lazer_counts,
+    );
+}
+
+fn render_mode_breakdown(
+    frame: &mut Frame,
+    area: Rect,
+    stable_counts: &ModeCount,
+    lazer_counts: &ModeCount,
+) {
+    let stable_total = stable_counts.total();
+    let lazer_total = lazer_counts.total();
+
+    let rows = vec![
+        Row::new(vec!["Mode", "Stable", "%", "Lazer", "%"])
+            .style(Style::default().fg(PINK).bold()),
+        Row::new(vec![
+            "osu!".to_string(),
+            stable_counts.osu.to_string(),
+            format_percent(stable_counts.osu, stable_total),
+            lazer_counts.osu.to_string(),
+            format_percent(lazer_counts.osu, lazer_total),
+        ]),
+        Row::new(vec![
+            "Taiko".to_string(),
+            stable_counts.taiko.to_string(),
+            format_percent(stable_counts.taiko, stable_total),
+            lazer_counts.taiko.to_string(),
+            format_percent(lazer_counts.taiko, lazer_total),
+        ]),
+        Row::new(vec![
+            "Catch".to_string(),
+            stable_counts.catch.to_string(),
+            format_percent(stable_counts.catch, stable_total),
+            lazer_counts.catch.to_string(),
+            format_percent(lazer_counts.catch, lazer_total),
+        ]),
+        Row::new(vec![
+            "Mania".to_string(),
+            stable_counts.mania.to_string(),
+            format_percent(stable_counts.mania, stable_total),
+            lazer_counts.mania.to_string(),
+            format_percent(lazer_counts.mania, lazer_total),
+        ]),
+    ];
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ],
+    )
+    .block(
+        Block::default()
+            .title(" Mode Breakdown ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    frame.render_widget(table, area);
+}
+
+fn format_percent(count: usize, total: usize) -> String {
+    if total == 0 {
+        "0%".to_string()
+    } else {
+        format!("{:.1}%", (count as f32 / total as f32) * 100.0)
+    }
 }
 
 fn render_installation(
@@ -254,7 +340,7 @@ fn render_duplicates(frame: &mut Frame, area: Rect, stats: &ComparisonStats) {
 fn render_export_dialog(frame: &mut Frame, area: Rect, export_state: &ExportState) {
     // Center the dialog
     let dialog_width = 50u16;
-    let dialog_height = 12u16;
+    let dialog_height = 14u16; // Increased to accommodate third option
     let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
     let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
     let dialog_area = Rect::new(
@@ -276,8 +362,8 @@ fn render_export_dialog(frame: &mut Frame, area: Rect, export_state: &ExportStat
         Line::from(""),
     ];
 
-    // Format options
-    let formats = [ExportFormat::Json, ExportFormat::Csv];
+    // Format options - now includes HTML
+    let formats = [ExportFormat::Json, ExportFormat::Csv, ExportFormat::Html];
     for (i, format) in formats.iter().enumerate() {
         let is_selected = i == export_state.selected_format;
         let prefix = if is_selected { "> " } else { "  " };
@@ -321,4 +407,162 @@ fn render_export_dialog(frame: &mut Frame, area: Rect, export_state: &ExportStat
     // Clear the background
     frame.render_widget(ratatui::widgets::Clear, dialog_area);
     frame.render_widget(dialog, dialog_area);
+}
+
+fn render_recommendations(frame: &mut Frame, area: Rect, recommendations: &Recommendations) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // Sync summary
+            Constraint::Min(0),    // Top star maps and popular artists
+        ])
+        .margin(1)
+        .split(area);
+
+    // Sync summary
+    let summary = vec![
+        Line::from(vec![
+            Span::styled("Sync Candidates: ", Style::default().fg(SUBTLE)),
+            Span::styled(
+                format!("{} stable -> lazer", recommendations.stable_to_lazer_count),
+                Style::default().fg(PINK),
+            ),
+            Span::styled(" | ", Style::default().fg(SUBTLE)),
+            Span::styled(
+                format!("{} lazer -> stable", recommendations.lazer_to_stable_count),
+                Style::default().fg(TEXT),
+            ),
+        ]),
+    ];
+
+    let summary_widget = Paragraph::new(summary).block(
+        Block::default()
+            .title(" Sync Overview ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(PINK)),
+    );
+    frame.render_widget(summary_widget, chunks[0]);
+
+    // Bottom section split into two columns
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[1]);
+
+    // Left: Top star rating maps
+    render_top_star_maps(frame, bottom_chunks[0], recommendations);
+
+    // Right: Popular unsynced artists
+    render_popular_artists(frame, bottom_chunks[1], recommendations);
+}
+
+fn render_top_star_maps(frame: &mut Frame, area: Rect, recommendations: &Recommendations) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Highest Star (Stable only):",
+            Style::default().fg(PINK).bold(),
+        )),
+        Line::from(""),
+    ];
+
+    if recommendations.top_star_stable.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No unique stable maps found",
+            Style::default().fg(SUBTLE),
+        )));
+    } else {
+        for rec in recommendations.top_star_stable.iter().take(5) {
+            let star_str = rec
+                .star_rating
+                .map(|s| format!("{:.2}*", s))
+                .unwrap_or_else(|| "?*".to_string());
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", star_str), Style::default().fg(WARNING)),
+                Span::styled(
+                    truncate_str(&rec.artist, 12),
+                    Style::default().fg(SUBTLE),
+                ),
+                Span::styled(" - ", Style::default().fg(SUBTLE)),
+                Span::styled(truncate_str(&rec.title, 15), Style::default().fg(TEXT)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Highest Star (Lazer only):",
+        Style::default().fg(PINK).bold(),
+    )));
+    lines.push(Line::from(""));
+
+    if recommendations.top_star_lazer.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No unique lazer maps found",
+            Style::default().fg(SUBTLE),
+        )));
+    } else {
+        for rec in recommendations.top_star_lazer.iter().take(5) {
+            let star_str = rec
+                .star_rating
+                .map(|s| format!("{:.2}*", s))
+                .unwrap_or_else(|| "?*".to_string());
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", star_str), Style::default().fg(WARNING)),
+                Span::styled(
+                    truncate_str(&rec.artist, 12),
+                    Style::default().fg(SUBTLE),
+                ),
+                Span::styled(" - ", Style::default().fg(SUBTLE)),
+                Span::styled(truncate_str(&rec.title, 15), Style::default().fg(TEXT)),
+            ]));
+        }
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Top Star Maps ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    frame.render_widget(widget, area);
+}
+
+fn render_popular_artists(frame: &mut Frame, area: Rect, recommendations: &Recommendations) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Top Unsynced Artists:",
+            Style::default().fg(PINK).bold(),
+        )),
+        Line::from(""),
+    ];
+
+    if recommendations.unsynced_artist_counts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  All artists synced!",
+            Style::default().fg(SUCCESS),
+        )));
+    } else {
+        for (artist, count) in recommendations.unsynced_artist_counts.iter().take(8) {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:>4} maps: ", count), Style::default().fg(SUBTLE)),
+                Span::styled(truncate_str(artist, 20), Style::default().fg(TEXT)),
+            ]));
+        }
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .title(" Popular Artists Not Synced ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(SUBTLE)),
+    );
+    frame.render_widget(widget, area);
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
 }
