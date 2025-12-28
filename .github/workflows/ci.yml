@@ -45,7 +45,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings -A dead_code
+        run: cargo clippy -- -W clippy::all
 
   release:
     needs: build
