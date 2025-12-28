@@ -8,5 +8,5 @@ mod export;
 mod model;
 
 pub use analyzer::StatsAnalyzer;
-pub use export::{export_csv, export_json, ExportFormat};
+pub use export::{export_csv, export_html, export_json, ExportFormat, HtmlExport};
 pub use model::*;

@@ -42,6 +42,94 @@ pub struct StarRatingBucket {
     pub count: usize,
 }
 
+/// Mode breakdown statistics
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModeBreakdown {
+    /// Count of beatmaps per mode in stable
+    pub stable_counts: ModeCount,
+    /// Count of beatmaps per mode in lazer
+    pub lazer_counts: ModeCount,
+    /// Percentage breakdown in stable
+    pub stable_percentages: ModePercentage,
+    /// Percentage breakdown in lazer
+    pub lazer_percentages: ModePercentage,
+}
+
+/// Beatmap counts by game mode
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModeCount {
+    pub osu: usize,
+    pub taiko: usize,
+    pub catch: usize,
+    pub mania: usize,
+}
+
+impl ModeCount {
+    /// Get total count across all modes
+    pub fn total(&self) -> usize {
+        self.osu + self.taiko + self.catch + self.mania
+    }
+}
+
+/// Percentage breakdown by game mode
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModePercentage {
+    pub osu: f32,
+    pub taiko: f32,
+    pub catch: f32,
+    pub mania: f32,
+}
+
+impl ModePercentage {
+    /// Calculate percentages from counts
+    pub fn from_counts(counts: &ModeCount) -> Self {
+        let total = counts.total() as f32;
+        if total == 0.0 {
+            return Self::default();
+        }
+        Self {
+            osu: (counts.osu as f32 / total) * 100.0,
+            taiko: (counts.taiko as f32 / total) * 100.0,
+            catch: (counts.catch as f32 / total) * 100.0,
+            mania: (counts.mania as f32 / total) * 100.0,
+        }
+    }
+}
+
+/// A beatmap recommendation entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeatmapRecommendation {
+    /// Beatmap set ID (if available)
+    pub set_id: Option<i32>,
+    /// Artist name
+    pub artist: String,
+    /// Song title
+    pub title: String,
+    /// Star rating (if available)
+    pub star_rating: Option<f32>,
+    /// Game mode
+    pub mode: GameMode,
+    /// Reason for recommendation
+    pub reason: String,
+}
+
+/// Recommendations for syncing beatmaps
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Recommendations {
+    /// Number of beatmaps in stable that are not in lazer (sync candidates)
+    pub stable_to_lazer_count: usize,
+    /// Number of beatmaps in lazer that are not in stable
+    pub lazer_to_stable_count: usize,
+    /// Top 10 highest star rating maps unique to stable
+    pub top_star_stable: Vec<BeatmapRecommendation>,
+    /// Top 10 highest star rating maps unique to lazer
+    pub top_star_lazer: Vec<BeatmapRecommendation>,
+    /// Maps by popular artists not yet synced
+    pub popular_artists_unsynced: Vec<BeatmapRecommendation>,
+    /// Most common unsynced artists (artist name, count)
+    pub unsynced_artist_counts: Vec<(String, usize)>,
+}
+
 /// Comprehensive statistics for an osu! installation
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InstallationStats {
@@ -104,6 +192,10 @@ pub struct ComparisonStats {
     pub unique_to_lazer: usize,
     /// Beatmap sets present in both
     pub common_beatmaps: usize,
+    /// Mode breakdown statistics
+    pub mode_breakdown: ModeBreakdown,
+    /// Sync recommendations
+    pub recommendations: Recommendations,
 }
 
 impl ComparisonStats {
@@ -111,6 +203,22 @@ impl ComparisonStats {
     pub fn total_unique(&self) -> usize {
         self.unique_to_stable + self.unique_to_lazer + self.common_beatmaps
     }
+}
+
+/// Convert days since Unix epoch to year/month/day
+pub fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    (year as u32, m, d)
 }
 
 /// Format bytes as human readable string (KB, MB, GB)
