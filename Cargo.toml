@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/osu-sync-core",
     "crates/osu-sync-cli",
-    "crates/osu-sync-gui",
 ]
 
 [workspace.package]

@@ -553,6 +553,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -2716,6 +2717,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
+ "iced",
  "osu-sync-core",
  "ratatui",
  "serde",
@@ -2731,6 +2733,7 @@ name = "osu-sync-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "csv",
  "directories",
  "dirs 5.0.1",
@@ -2747,20 +2750,6 @@ dependencies = [
  "tracing",
  "walkdir",
  "zip",
-]
-
-[[package]]
-name = "osu-sync-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "iced",
- "osu-sync-core",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
