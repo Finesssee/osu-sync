@@ -31,3 +31,9 @@ Thumbs.db
 .env
 .env.local
 /bin/
+
+# Claude session files
+.claude/
+
+# AutoHotkey scripts
+*.ahk
