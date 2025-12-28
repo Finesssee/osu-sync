@@ -45,7 +45,10 @@ impl LazerFileStore {
     pub fn read(&self, hash: &str) -> Result<Vec<u8>> {
         let path = self.hash_to_path(hash);
         if !path.exists() {
-            return Err(Error::BeatmapNotFound(format!("File with hash {} not found", hash)));
+            return Err(Error::BeatmapNotFound(format!(
+                "File with hash {} not found",
+                hash
+            )));
         }
         Ok(fs::read(path)?)
     }

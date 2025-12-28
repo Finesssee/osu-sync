@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 
-use crate::app::{pink, subtle_color, text_color, success_color, warning_color, error_color};
+use crate::app::{error_color, pink, subtle_color, success_color, text_color, warning_color};
 use osu_sync_core::activity::{ActivityLog, ActivityType};
 
 pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: usize) {
@@ -50,10 +50,19 @@ pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: u
     if entries.is_empty() {
         let empty_msg = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("No activity recorded yet.", Style::default().fg(subtle))),
+            Line::from(Span::styled(
+                "No activity recorded yet.",
+                Style::default().fg(subtle),
+            )),
             Line::from(""),
-            Line::from(Span::styled("Actions like scans, syncs, and exports", Style::default().fg(subtle))),
-            Line::from(Span::styled("will appear here as you use the app.", Style::default().fg(subtle))),
+            Line::from(Span::styled(
+                "Actions like scans, syncs, and exports",
+                Style::default().fg(subtle),
+            )),
+            Line::from(Span::styled(
+                "will appear here as you use the app.",
+                Style::default().fg(subtle),
+            )),
         ])
         .alignment(Alignment::Center);
         frame.render_widget(empty_msg, chunks[0]);
@@ -95,14 +104,10 @@ pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: u
         // Scroll indicator if needed
         if entries.len() > visible_height {
             let scroll_text = format!(" {}/{} ", scroll + 1, entries.len());
-            let scroll_indicator = Paragraph::new(Span::styled(scroll_text, Style::default().fg(subtle)))
-                .alignment(Alignment::Right);
-            let indicator_area = Rect::new(
-                chunks[0].right() - 10,
-                chunks[0].y,
-                10,
-                1,
-            );
+            let scroll_indicator =
+                Paragraph::new(Span::styled(scroll_text, Style::default().fg(subtle)))
+                    .alignment(Alignment::Right);
+            let indicator_area = Rect::new(chunks[0].right() - 10, chunks[0].y, 10, 1);
             frame.render_widget(scroll_indicator, indicator_area);
         }
     }
@@ -117,7 +122,10 @@ pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: u
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(count_text, Style::default().fg(subtle)),
         Span::styled(" | ", Style::default().fg(subtle)),
-        Span::styled("Press any key to close", Style::default().fg(subtle).italic()),
+        Span::styled(
+            "Press any key to close",
+            Style::default().fg(subtle).italic(),
+        ),
     ]))
     .alignment(Alignment::Center);
 

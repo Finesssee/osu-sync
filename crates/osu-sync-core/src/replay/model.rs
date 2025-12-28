@@ -127,7 +127,15 @@ impl Grade {
 
     /// Get simplified grade variants (without silver variants)
     pub fn simplified() -> &'static [Grade] {
-        &[Grade::SS, Grade::S, Grade::A, Grade::B, Grade::C, Grade::D, Grade::F]
+        &[
+            Grade::SS,
+            Grade::S,
+            Grade::A,
+            Grade::B,
+            Grade::C,
+            Grade::D,
+            Grade::F,
+        ]
     }
 }
 
@@ -431,7 +439,9 @@ mod tests {
         let mut result = ReplayExportResult::new();
         assert!(!result.has_errors());
 
-        result.errors.push(("hash1".to_string(), "error1".to_string()));
+        result
+            .errors
+            .push(("hash1".to_string(), "error1".to_string()));
         assert!(result.has_errors());
     }
 

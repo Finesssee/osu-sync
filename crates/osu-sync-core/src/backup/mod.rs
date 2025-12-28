@@ -396,7 +396,9 @@ impl RestoreOptions {
     /// Check if a file should be restored based on these options
     pub fn should_restore(&self, file_path: &str) -> bool {
         match &self.files_to_restore {
-            Some(files) => files.iter().any(|f| f == file_path || file_path.starts_with(&format!("{}/", f))),
+            Some(files) => files
+                .iter()
+                .any(|f| f == file_path || file_path.starts_with(&format!("{}/", f))),
             None => true,
         }
     }
@@ -849,7 +851,9 @@ impl BackupManager {
                     RestoreMode::Rename => {
                         // Generate new name for existing file
                         let new_name = Self::generate_backup_name(&dest_file);
-                        preview.renames.push((dest_file.display().to_string(), new_name));
+                        preview
+                            .renames
+                            .push((dest_file.display().to_string(), new_name));
                         preview.files_to_restore += 1;
                         preview.total_size += file_size;
                     }
@@ -1050,7 +1054,10 @@ fn chrono_timestamp() -> String {
     let minutes = ((time_of_day % 3600) / 60) as u32;
     let seconds = (time_of_day % 60) as u32;
 
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 /// Format bytes to human-readable size

@@ -28,9 +28,11 @@ pub fn render_footer(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
 
     let footer = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Center)
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(subtle)));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(subtle)),
+        );
 
     frame.render_widget(footer, area);
 }

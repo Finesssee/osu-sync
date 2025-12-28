@@ -303,8 +303,11 @@ pub fn create_backup_archive_with_options(
             }
         });
 
-    let mut manifest =
-        BackupManifest::new(target, options.mode == BackupMode::Incremental, base_backup.clone());
+    let mut manifest = BackupManifest::new(
+        target,
+        options.mode == BackupMode::Incremental,
+        base_backup.clone(),
+    );
 
     // Notify archiving phase
     if let Some(ref cb) = progress {

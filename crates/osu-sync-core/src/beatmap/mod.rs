@@ -117,8 +117,12 @@ impl BeatmapSet {
     pub fn generate_folder_name(&self) -> String {
         if let Some(meta) = self.metadata() {
             let id_prefix = self.id.map(|id| format!("{} ", id)).unwrap_or_default();
-            let artist = meta.artist.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-            let title = meta.title.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let artist = meta
+                .artist
+                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let title = meta
+                .title
+                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
             format!("{}{} - {}", id_prefix, artist, title)
         } else {
             "Unknown Beatmap".to_string()

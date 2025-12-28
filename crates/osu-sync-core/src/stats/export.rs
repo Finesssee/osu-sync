@@ -530,7 +530,10 @@ pub fn export_html(stats: &ComparisonStats, path: &Path) -> Result<()> {
             let hours = time_of_day / 3600;
             let minutes = (time_of_day % 3600) / 60;
             let seconds = time_of_day % 60;
-            format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hours, minutes, seconds)
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                year, month, day, hours, minutes, seconds
+            )
         })
         .unwrap_or_else(|_| "Unknown".to_string());
     html.push_str(&format!(

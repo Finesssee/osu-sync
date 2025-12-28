@@ -283,7 +283,9 @@ impl MediaExtractor {
                                 result.duplicates_skipped += 1;
                             }
                             Err(e) => {
-                                result.errors.push((bg_path.display().to_string(), e.to_string()));
+                                result
+                                    .errors
+                                    .push((bg_path.display().to_string(), e.to_string()));
                             }
                         }
 
@@ -491,17 +493,15 @@ impl MediaExtractor {
         }
 
         // For MP3 files with ID3 embedding enabled, append ID3v1 tag
-        let final_content = if self.embed_id3_tags
-            && is_audio
-            && audio_info.format == AudioFormat::Mp3
-        {
-            let mut new_content = content.clone();
-            let id3_tag = metadata.to_id3v1_tag();
-            new_content.extend_from_slice(&id3_tag);
-            new_content
-        } else {
-            content.clone()
-        };
+        let final_content =
+            if self.embed_id3_tags && is_audio && audio_info.format == AudioFormat::Mp3 {
+                let mut new_content = content.clone();
+                let id3_tag = metadata.to_id3v1_tag();
+                new_content.extend_from_slice(&id3_tag);
+                new_content
+            } else {
+                content.clone()
+            };
 
         // Write file
         let mut output_file = File::create(&output_path)?;
@@ -599,17 +599,15 @@ impl MediaExtractor {
         }
 
         // For MP3 files with ID3 embedding enabled, append ID3v1 tag
-        let final_content = if self.embed_id3_tags
-            && is_audio
-            && audio_info.format == AudioFormat::Mp3
-        {
-            let mut new_content = content.clone();
-            let id3_tag = metadata.to_id3v1_tag();
-            new_content.extend_from_slice(&id3_tag);
-            new_content
-        } else {
-            content.clone()
-        };
+        let final_content =
+            if self.embed_id3_tags && is_audio && audio_info.format == AudioFormat::Mp3 {
+                let mut new_content = content.clone();
+                let id3_tag = metadata.to_id3v1_tag();
+                new_content.extend_from_slice(&id3_tag);
+                new_content
+            } else {
+                content.clone()
+            };
 
         // Write file
         let mut output_file = File::create(&output_path)?;
@@ -752,8 +750,7 @@ mod tests {
 
     #[test]
     fn test_get_output_path_flat() {
-        let extractor =
-            MediaExtractor::new("/output").with_organization(OutputOrganization::Flat);
+        let extractor = MediaExtractor::new("/output").with_organization(OutputOrganization::Flat);
 
         let audio_path = extractor.get_output_path("Artist - Song", "audio.mp3", true);
         assert!(audio_path.to_string_lossy().contains("Artist - Song.mp3"));

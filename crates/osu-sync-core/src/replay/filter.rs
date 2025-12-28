@@ -116,7 +116,11 @@ impl ReplayFilter {
 
         // Check player name
         if let Some(ref name) = self.player_name {
-            if !replay.player_name.to_lowercase().contains(&name.to_lowercase()) {
+            if !replay
+                .player_name
+                .to_lowercase()
+                .contains(&name.to_lowercase())
+            {
                 return false;
             }
         }
@@ -279,10 +283,14 @@ mod tests {
     fn test_grade_filter() {
         let filter = ReplayFilter::new().with_min_grade(Grade::S);
 
-        let ss_replay = make_test_replay(Grade::SS, GameMode::Osu, 1704024000, "Player", Some("Song"));
-        let s_replay = make_test_replay(Grade::S, GameMode::Osu, 1704024000, "Player", Some("Song"));
-        let a_replay = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Song"));
-        let b_replay = make_test_replay(Grade::B, GameMode::Osu, 1704024000, "Player", Some("Song"));
+        let ss_replay =
+            make_test_replay(Grade::SS, GameMode::Osu, 1704024000, "Player", Some("Song"));
+        let s_replay =
+            make_test_replay(Grade::S, GameMode::Osu, 1704024000, "Player", Some("Song"));
+        let a_replay =
+            make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Song"));
+        let b_replay =
+            make_test_replay(Grade::B, GameMode::Osu, 1704024000, "Player", Some("Song"));
 
         assert!(filter.matches(&ss_replay));
         assert!(filter.matches(&s_replay));
@@ -296,9 +304,22 @@ mod tests {
             .with_mode(GameMode::Osu)
             .with_mode(GameMode::Taiko);
 
-        let osu_replay = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Song"));
-        let taiko_replay = make_test_replay(Grade::A, GameMode::Taiko, 1704024000, "Player", Some("Song"));
-        let catch_replay = make_test_replay(Grade::A, GameMode::Catch, 1704024000, "Player", Some("Song"));
+        let osu_replay =
+            make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Song"));
+        let taiko_replay = make_test_replay(
+            Grade::A,
+            GameMode::Taiko,
+            1704024000,
+            "Player",
+            Some("Song"),
+        );
+        let catch_replay = make_test_replay(
+            Grade::A,
+            GameMode::Catch,
+            1704024000,
+            "Player",
+            Some("Song"),
+        );
 
         assert!(filter.matches(&osu_replay));
         assert!(filter.matches(&taiko_replay));
@@ -311,9 +332,12 @@ mod tests {
             .with_after_date(1700000000)
             .with_before_date(1710000000);
 
-        let in_range = make_test_replay(Grade::A, GameMode::Osu, 1705000000, "Player", Some("Song"));
-        let before_range = make_test_replay(Grade::A, GameMode::Osu, 1690000000, "Player", Some("Song"));
-        let after_range = make_test_replay(Grade::A, GameMode::Osu, 1720000000, "Player", Some("Song"));
+        let in_range =
+            make_test_replay(Grade::A, GameMode::Osu, 1705000000, "Player", Some("Song"));
+        let before_range =
+            make_test_replay(Grade::A, GameMode::Osu, 1690000000, "Player", Some("Song"));
+        let after_range =
+            make_test_replay(Grade::A, GameMode::Osu, 1720000000, "Player", Some("Song"));
 
         assert!(filter.matches(&in_range));
         assert!(!filter.matches(&before_range));
@@ -324,8 +348,20 @@ mod tests {
     fn test_player_filter() {
         let filter = ReplayFilter::new().with_player_name("test");
 
-        let match_replay = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "TestPlayer", Some("Song"));
-        let no_match = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "OtherPlayer", Some("Song"));
+        let match_replay = make_test_replay(
+            Grade::A,
+            GameMode::Osu,
+            1704024000,
+            "TestPlayer",
+            Some("Song"),
+        );
+        let no_match = make_test_replay(
+            Grade::A,
+            GameMode::Osu,
+            1704024000,
+            "OtherPlayer",
+            Some("Song"),
+        );
 
         assert!(filter.matches(&match_replay));
         assert!(!filter.matches(&no_match));
@@ -335,8 +371,20 @@ mod tests {
     fn test_beatmap_search_filter() {
         let filter = ReplayFilter::new().with_beatmap_search("Freedom");
 
-        let match_title = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Freedom Dive"));
-        let no_match = make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Other Song"));
+        let match_title = make_test_replay(
+            Grade::A,
+            GameMode::Osu,
+            1704024000,
+            "Player",
+            Some("Freedom Dive"),
+        );
+        let no_match = make_test_replay(
+            Grade::A,
+            GameMode::Osu,
+            1704024000,
+            "Player",
+            Some("Other Song"),
+        );
 
         assert!(filter.matches(&match_title));
         assert!(!filter.matches(&no_match));
@@ -354,15 +402,23 @@ mod tests {
         assert!(filter.matches(&good));
 
         // Wrong grade
-        let bad_grade = make_test_replay(Grade::A, GameMode::Osu, 1705000000, "Player", Some("Song"));
+        let bad_grade =
+            make_test_replay(Grade::A, GameMode::Osu, 1705000000, "Player", Some("Song"));
         assert!(!filter.matches(&bad_grade));
 
         // Wrong mode
-        let bad_mode = make_test_replay(Grade::SS, GameMode::Taiko, 1705000000, "Player", Some("Song"));
+        let bad_mode = make_test_replay(
+            Grade::SS,
+            GameMode::Taiko,
+            1705000000,
+            "Player",
+            Some("Song"),
+        );
         assert!(!filter.matches(&bad_mode));
 
         // Before date
-        let bad_date = make_test_replay(Grade::SS, GameMode::Osu, 1690000000, "Player", Some("Song"));
+        let bad_date =
+            make_test_replay(Grade::SS, GameMode::Osu, 1690000000, "Player", Some("Song"));
         assert!(!filter.matches(&bad_date));
     }
 
@@ -371,7 +427,13 @@ mod tests {
         let filter = ReplayFilter::new().with_min_grade(Grade::S);
 
         let replays = vec![
-            make_test_replay(Grade::SS, GameMode::Osu, 1704024000, "Player", Some("Song1")),
+            make_test_replay(
+                Grade::SS,
+                GameMode::Osu,
+                1704024000,
+                "Player",
+                Some("Song1"),
+            ),
             make_test_replay(Grade::A, GameMode::Osu, 1704024000, "Player", Some("Song2")),
             make_test_replay(Grade::S, GameMode::Osu, 1704024000, "Player", Some("Song3")),
         ];

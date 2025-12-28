@@ -2,7 +2,7 @@
 
 use crate::beatmap::{BeatmapDifficulty, BeatmapInfo, BeatmapMetadata, GameMode};
 use crate::error::{Error, Result};
-use md5::{Md5, Digest as Md5Digest};
+use md5::{Digest as Md5Digest, Md5};
 use sha2::Sha256;
 use std::fs;
 use std::path::Path;
@@ -16,10 +16,11 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
     let md5_hash = format!("{:x}", Md5::digest(&content));
 
     // Parse with rosu-map
-    let beatmap = rosu_map::from_path::<rosu_map::Beatmap>(path).map_err(|e| Error::BeatmapParse {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
+    let beatmap =
+        rosu_map::from_path::<rosu_map::Beatmap>(path).map_err(|e| Error::BeatmapParse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
 
     // Extract metadata
     let metadata = BeatmapMetadata {
@@ -41,11 +42,7 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
         } else {
             Some(beatmap.source.clone())
         },
-        tags: beatmap
-            .tags
-            .split_whitespace()
-            .map(String::from)
-            .collect(),
+        tags: beatmap.tags.split_whitespace().map(String::from).collect(),
         beatmap_id: if beatmap.beatmap_id > 0 {
             Some(beatmap.beatmap_id as i32)
         } else {
@@ -85,8 +82,8 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
         bpm,
         mode: GameMode::from(beatmap.mode as u8),
         version: beatmap.version.clone(),
-        star_rating: None,      // Not available from .osu file, populated from database
-        ranked_status: None,    // Not available from .osu file, populated from database
+        star_rating: None, // Not available from .osu file, populated from database
+        ranked_status: None, // Not available from .osu file, populated from database
     })
 }
 

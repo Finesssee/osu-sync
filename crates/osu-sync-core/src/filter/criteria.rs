@@ -182,11 +182,8 @@ impl FilterCriteria {
         }
 
         if !self.ranked_status.is_empty() {
-            let status_names: Vec<String> = self
-                .ranked_status
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            let status_names: Vec<String> =
+                self.ranked_status.iter().map(|s| s.to_string()).collect();
             parts.push(status_names.join("/"));
         }
 

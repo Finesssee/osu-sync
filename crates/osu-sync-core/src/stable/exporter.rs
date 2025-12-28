@@ -19,10 +19,9 @@ impl StableExporter {
 
     /// Export a beatmap set to an .osz file
     pub fn export_to_osz(&self, beatmap_set: &BeatmapSet, output_dir: &Path) -> Result<PathBuf> {
-        let folder_name = beatmap_set
-            .folder_name
-            .as_ref()
-            .ok_or_else(|| crate::error::Error::Other("Beatmap set has no folder name".to_string()))?;
+        let folder_name = beatmap_set.folder_name.as_ref().ok_or_else(|| {
+            crate::error::Error::Other("Beatmap set has no folder name".to_string())
+        })?;
 
         let source_dir = self.songs_path.join(folder_name);
 
@@ -55,10 +54,9 @@ impl StableExporter {
 
     /// Read all files from a beatmap set folder
     pub fn read_beatmap_files(&self, beatmap_set: &BeatmapSet) -> Result<Vec<(String, Vec<u8>)>> {
-        let folder_name = beatmap_set
-            .folder_name
-            .as_ref()
-            .ok_or_else(|| crate::error::Error::Other("Beatmap set has no folder name".to_string()))?;
+        let folder_name = beatmap_set.folder_name.as_ref().ok_or_else(|| {
+            crate::error::Error::Other("Beatmap set has no folder name".to_string())
+        })?;
 
         let source_dir = self.songs_path.join(folder_name);
 

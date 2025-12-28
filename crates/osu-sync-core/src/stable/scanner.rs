@@ -120,7 +120,10 @@ impl StableScanner {
     }
 
     /// Scan all beatmap sets with timing and progress callback
-    pub fn scan_timed_with_progress(&self, progress: Option<ScanProgress>) -> Result<(Vec<BeatmapSet>, ScanTiming)> {
+    pub fn scan_timed_with_progress(
+        &self,
+        progress: Option<ScanProgress>,
+    ) -> Result<(Vec<BeatmapSet>, ScanTiming)> {
         let total_start = Instant::now();
         let mut timing = ScanTiming::default();
 
@@ -303,7 +306,11 @@ impl StableScanner {
 
         // Collect all files in the directory (optionally hash them)
         if !self.skip_hashing {
-            for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(dir)
+                .max_depth(1)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
                 let path = entry.path();
                 if path.is_file() {
                     let hash_start = Instant::now();
@@ -404,9 +411,12 @@ impl BeatmapIndex {
 
     /// Find a beatmap by MD5 hash
     pub fn get_by_md5(&self, md5: &str) -> Option<(&BeatmapSet, &crate::beatmap::BeatmapInfo)> {
-        self.by_md5
-            .get(md5)
-            .map(|&(set_idx, beatmap_idx)| (&self.sets[set_idx], &self.sets[set_idx].beatmaps[beatmap_idx]))
+        self.by_md5.get(md5).map(|&(set_idx, beatmap_idx)| {
+            (
+                &self.sets[set_idx],
+                &self.sets[set_idx].beatmaps[beatmap_idx],
+            )
+        })
     }
 
     /// Check if a beatmap set exists

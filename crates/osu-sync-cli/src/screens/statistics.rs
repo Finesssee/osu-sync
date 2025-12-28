@@ -27,7 +27,13 @@ pub fn render(
         .split(area);
 
     // Tab bar
-    let tab_labels = ["Overview", "Stable", "Lazer", "Duplicates", "Recommendations"];
+    let tab_labels = [
+        "Overview",
+        "Stable",
+        "Lazer",
+        "Duplicates",
+        "Recommendations",
+    ];
     let selected_idx = match tab {
         StatisticsTab::Overview => 0,
         StatisticsTab::Stable => 1,
@@ -194,8 +200,7 @@ fn render_mode_breakdown(
     let lazer_total = lazer_counts.total();
 
     let rows = vec![
-        Row::new(vec!["Mode", "Stable", "%", "Lazer", "%"])
-            .style(Style::default().fg(PINK).bold()),
+        Row::new(vec!["Mode", "Stable", "%", "Lazer", "%"]).style(Style::default().fg(PINK).bold()),
         Row::new(vec![
             "osu!".to_string(),
             stable_counts.osu.to_string(),
@@ -420,20 +425,18 @@ fn render_recommendations(frame: &mut Frame, area: Rect, recommendations: &Recom
         .split(area);
 
     // Sync summary
-    let summary = vec![
-        Line::from(vec![
-            Span::styled("Sync Candidates: ", Style::default().fg(SUBTLE)),
-            Span::styled(
-                format!("{} stable -> lazer", recommendations.stable_to_lazer_count),
-                Style::default().fg(PINK),
-            ),
-            Span::styled(" | ", Style::default().fg(SUBTLE)),
-            Span::styled(
-                format!("{} lazer -> stable", recommendations.lazer_to_stable_count),
-                Style::default().fg(TEXT),
-            ),
-        ]),
-    ];
+    let summary = vec![Line::from(vec![
+        Span::styled("Sync Candidates: ", Style::default().fg(SUBTLE)),
+        Span::styled(
+            format!("{} stable -> lazer", recommendations.stable_to_lazer_count),
+            Style::default().fg(PINK),
+        ),
+        Span::styled(" | ", Style::default().fg(SUBTLE)),
+        Span::styled(
+            format!("{} lazer -> stable", recommendations.lazer_to_stable_count),
+            Style::default().fg(TEXT),
+        ),
+    ])];
 
     let summary_widget = Paragraph::new(summary).block(
         Block::default()
@@ -478,10 +481,7 @@ fn render_top_star_maps(frame: &mut Frame, area: Rect, recommendations: &Recomme
                 .unwrap_or_else(|| "?*".to_string());
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", star_str), Style::default().fg(WARNING)),
-                Span::styled(
-                    truncate_str(&rec.artist, 12),
-                    Style::default().fg(SUBTLE),
-                ),
+                Span::styled(truncate_str(&rec.artist, 12), Style::default().fg(SUBTLE)),
                 Span::styled(" - ", Style::default().fg(SUBTLE)),
                 Span::styled(truncate_str(&rec.title, 15), Style::default().fg(TEXT)),
             ]));
@@ -508,10 +508,7 @@ fn render_top_star_maps(frame: &mut Frame, area: Rect, recommendations: &Recomme
                 .unwrap_or_else(|| "?*".to_string());
             lines.push(Line::from(vec![
                 Span::styled(format!("  {} ", star_str), Style::default().fg(WARNING)),
-                Span::styled(
-                    truncate_str(&rec.artist, 12),
-                    Style::default().fg(SUBTLE),
-                ),
+                Span::styled(truncate_str(&rec.artist, 12), Style::default().fg(SUBTLE)),
                 Span::styled(" - ", Style::default().fg(SUBTLE)),
                 Span::styled(truncate_str(&rec.title, 15), Style::default().fg(TEXT)),
             ]));
@@ -544,7 +541,10 @@ fn render_popular_artists(frame: &mut Frame, area: Rect, recommendations: &Recom
     } else {
         for (artist, count) in recommendations.unsynced_artist_counts.iter().take(8) {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:>4} maps: ", count), Style::default().fg(SUBTLE)),
+                Span::styled(
+                    format!("  {:>4} maps: ", count),
+                    Style::default().fg(SUBTLE),
+                ),
                 Span::styled(truncate_str(artist, 20), Style::default().fg(TEXT)),
             ]));
         }

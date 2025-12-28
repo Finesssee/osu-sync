@@ -124,7 +124,12 @@ pub fn render_config(
 }
 
 /// Render the filter panel overlay
-fn render_filter_panel(frame: &mut Frame, area: Rect, filter: &ReplayFilter, selected_field: usize) {
+fn render_filter_panel(
+    frame: &mut Frame,
+    area: Rect,
+    filter: &ReplayFilter,
+    selected_field: usize,
+) {
     let panel_width = 40;
     let panel_height = 10;
     let panel_area = centered_rect(panel_width, panel_height, area);

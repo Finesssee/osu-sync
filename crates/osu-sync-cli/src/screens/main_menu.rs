@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, pink, subtle_color, text_color, selection_bg};
+use crate::app::{pink, selection_bg, subtle_color, text_color, App};
 use crate::widgets::render_status_bar;
 
 /// Menu item with icon

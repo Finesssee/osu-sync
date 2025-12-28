@@ -96,8 +96,7 @@ pub fn create_osz(source_dir: &Path, dest_path: &Path) -> Result<PathBuf> {
     let file = File::create(dest_path)?;
     let mut zip = ZipWriter::new(file);
 
-    let options = FileOptions::<()>::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
 
     // Walk through all files in the source directory
     for entry in walkdir::WalkDir::new(source_dir)
@@ -123,12 +122,15 @@ pub fn create_osz(source_dir: &Path, dest_path: &Path) -> Result<PathBuf> {
 }
 
 /// Create an .osz archive from a BeatmapSet with files already loaded
-pub fn create_osz_from_set(_beatmap_set: &BeatmapSet, files: &[(String, Vec<u8>)], dest_path: &Path) -> Result<PathBuf> {
+pub fn create_osz_from_set(
+    _beatmap_set: &BeatmapSet,
+    files: &[(String, Vec<u8>)],
+    dest_path: &Path,
+) -> Result<PathBuf> {
     let file = File::create(dest_path)?;
     let mut zip = ZipWriter::new(file);
 
-    let options = FileOptions::<()>::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
 
     for (filename, content) in files {
         zip.start_file(filename.as_str(), options)?;

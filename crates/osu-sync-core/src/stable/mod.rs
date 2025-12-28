@@ -1,9 +1,9 @@
 //! osu!stable Songs folder integration
 
-mod scanner;
-mod importer;
 mod exporter;
+mod importer;
+mod scanner;
 
-pub use scanner::*;
-pub use importer::*;
 pub use exporter::*;
+pub use importer::*;
+pub use scanner::*;

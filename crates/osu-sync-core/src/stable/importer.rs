@@ -44,7 +44,11 @@ impl StableImporter {
     }
 
     /// Import an already extracted beatmap set
-    pub fn import_extracted(&self, source_dir: &Path, beatmap_set: &BeatmapSet) -> Result<ImportResult> {
+    pub fn import_extracted(
+        &self,
+        source_dir: &Path,
+        beatmap_set: &BeatmapSet,
+    ) -> Result<ImportResult> {
         let folder_name = beatmap_set
             .folder_name
             .clone()

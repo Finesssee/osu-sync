@@ -90,12 +90,7 @@ impl BackupUIState {
 }
 
 /// Render the backup screen (target selection) - legacy version
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    selected: usize,
-    status_message: &str,
-) {
+pub fn render(frame: &mut Frame, area: Rect, selected: usize, status_message: &str) {
     let state = BackupUIState {
         selected_target: selected,
         ..Default::default()
@@ -113,9 +108,9 @@ pub fn render_with_state(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Title
-            Constraint::Min(0),     // Content (targets + options)
-            Constraint::Length(2),  // Status
+            Constraint::Length(3), // Title
+            Constraint::Min(0),    // Content (targets + options)
+            Constraint::Length(2), // Status
         ])
         .split(area);
 
@@ -138,7 +133,11 @@ pub fn render_with_state(
 
     // Backup targets - left side
     let targets_height = (BACKUP_TARGETS.len() * 2 + 2) as u16;
-    let targets_area = centered_rect(42, targets_height.min(content_chunks[0].height), content_chunks[0]);
+    let targets_area = centered_rect(
+        42,
+        targets_height.min(content_chunks[0].height),
+        content_chunks[0],
+    );
 
     let targets_border_style = if state.focused_option == 0 {
         Style::default().fg(PINK)
@@ -184,10 +183,7 @@ pub fn render_with_state(
                 Style::default().fg(TEXT).bold(),
             )
         } else {
-            (
-                Style::default().fg(SUBTLE),
-                Style::default().fg(TEXT),
-            )
+            (Style::default().fg(SUBTLE), Style::default().fg(TEXT))
         };
 
         let item_line = Line::from(vec![
@@ -204,7 +200,10 @@ pub fn render_with_state(
     let options_area = centered_rect(35, 8, content_chunks[1]);
 
     let options_block = Block::default()
-        .title(Span::styled(" Options ", Style::default().fg(SUBTLE).bold()))
+        .title(Span::styled(
+            " Options ",
+            Style::default().fg(SUBTLE).bold(),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(SUBTLE))
         .border_type(ratatui::widgets::BorderType::Rounded);
@@ -253,19 +252,13 @@ pub fn render_with_state(
     let mode_line = Line::from(vec![
         Span::styled(mode_prefix, mode_style),
         Span::styled("Mode: ", Style::default().fg(SUBTLE)),
-        Span::styled(
-            format!("[{}]", state.mode.short_label()),
-            mode_style,
-        ),
+        Span::styled(format!("[{}]", state.mode.short_label()), mode_style),
     ]);
     frame.render_widget(Paragraph::new(mode_line), option_chunks[2]);
 
     // Status message
-    let status = Paragraph::new(Span::styled(
-        status_message,
-        Style::default().fg(SUBTLE),
-    ))
-    .alignment(Alignment::Center);
+    let status = Paragraph::new(Span::styled(status_message, Style::default().fg(SUBTLE)))
+        .alignment(Alignment::Center);
     frame.render_widget(status, chunks[2]);
 }
 
@@ -325,7 +318,11 @@ pub fn render_progress(
 
     let gauge_area = centered_rect(50, 3, chunks[2]);
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(SUBTLE)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(SUBTLE)),
+        )
         .gauge_style(Style::default().fg(PINK))
         .percent(progress_percent);
     frame.render_widget(gauge, gauge_area);
@@ -333,22 +330,14 @@ pub fn render_progress(
     // Current file
     if let Some(ref current_file) = progress.current_file {
         let truncated = truncate_path(current_file, 60);
-        let current = Paragraph::new(Span::styled(
-            truncated,
-            Style::default().fg(SUBTLE),
-        ))
-        .alignment(Alignment::Center);
+        let current = Paragraph::new(Span::styled(truncated, Style::default().fg(SUBTLE)))
+            .alignment(Alignment::Center);
         frame.render_widget(current, chunks[3]);
     }
 }
 
 /// Render the backup complete screen
-pub fn render_complete(
-    frame: &mut Frame,
-    area: Rect,
-    backup_path: &str,
-    size_bytes: u64,
-) {
+pub fn render_complete(frame: &mut Frame, area: Rect, backup_path: &str, size_bytes: u64) {
     render_complete_with_type(frame, area, backup_path, size_bytes, false);
 }
 
@@ -396,7 +385,11 @@ pub fn render_complete_with_type(
 
     let size_display = format_size(size_bytes);
     let path_display = truncate_path(backup_path, 45);
-    let type_display = if is_incremental { "Incremental" } else { "Full" };
+    let type_display = if is_incremental {
+        "Incremental"
+    } else {
+        "Full"
+    };
 
     let results = Paragraph::new(vec![
         Line::from(""),
@@ -419,11 +412,11 @@ pub fn render_complete_with_type(
 /// Get icon for backup target
 fn get_target_icon(target: &BackupTarget) -> &'static str {
     match target {
-        BackupTarget::StableSongs => "\u{1F3B5}",      // Musical note
+        BackupTarget::StableSongs => "\u{1F3B5}", // Musical note
         BackupTarget::StableCollections => "\u{1F4C1}", // Folder
-        BackupTarget::StableScores => "\u{1F3C6}",     // Trophy
-        BackupTarget::LazerData => "\u{2728}",          // Sparkles
-        BackupTarget::All => "\u{1F4E6}",              // Package
+        BackupTarget::StableScores => "\u{1F3C6}", // Trophy
+        BackupTarget::LazerData => "\u{2728}",    // Sparkles
+        BackupTarget::All => "\u{1F4E6}",         // Package
     }
 }
 

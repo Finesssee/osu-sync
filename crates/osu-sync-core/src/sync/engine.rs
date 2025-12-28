@@ -253,7 +253,11 @@ impl SyncEngine {
         let total = filtered_indices.len();
 
         if self.filter.is_some() {
-            tracing::info!("Filter applied: {} of {} beatmap sets match", total, stable_sets.len());
+            tracing::info!(
+                "Filter applied: {} of {} beatmap sets match",
+                total,
+                stable_sets.len()
+            );
         }
 
         // Get lazer beatmaps for duplicate detection
@@ -327,7 +331,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Analyzing osu!lazer beatmaps...".to_string(),
             phase: SyncPhase::Scanning,
-                ..Default::default()
+            ..Default::default()
         });
 
         // Get lazer beatmaps
@@ -434,7 +438,7 @@ impl SyncEngine {
             total: result.total(),
             current_name: String::new(),
             phase: SyncPhase::Complete,
-                ..Default::default()
+            ..Default::default()
         });
 
         tracing::info!(
@@ -457,7 +461,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Scanning osu!stable...".to_string(),
             phase: SyncPhase::Scanning,
-                ..Default::default()
+            ..Default::default()
         });
 
         let stable_sets = self.stable_scanner.scan()?;
@@ -483,7 +487,7 @@ impl SyncEngine {
             total,
             current_name: "Loading osu!lazer database...".to_string(),
             phase: SyncPhase::Deduplicating,
-                ..Default::default()
+            ..Default::default()
         });
 
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
@@ -549,7 +553,9 @@ impl SyncEngine {
                 Err(e) => {
                     tracing::error!("Failed to import {}: {}", set_name, e);
                     result.failed += 1;
-                    result.errors.push(SyncError::new(Some(set_name), e.to_string()));
+                    result
+                        .errors
+                        .push(SyncError::new(Some(set_name), e.to_string()));
                 }
             }
         }
@@ -567,7 +573,7 @@ impl SyncEngine {
             total: 0,
             current_name: "Loading osu!lazer database...".to_string(),
             phase: SyncPhase::Scanning,
-                ..Default::default()
+            ..Default::default()
         });
 
         let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
@@ -581,7 +587,7 @@ impl SyncEngine {
             total,
             current_name: "Scanning osu!stable...".to_string(),
             phase: SyncPhase::Deduplicating,
-                ..Default::default()
+            ..Default::default()
         });
 
         let stable_index = self.stable_scanner.build_index()?;
@@ -646,7 +652,9 @@ impl SyncEngine {
                 Err(e) => {
                     tracing::error!("Failed to import {}: {}", set_name, e);
                     result.failed += 1;
-                    result.errors.push(SyncError::new(Some(set_name), e.to_string()));
+                    result
+                        .errors
+                        .push(SyncError::new(Some(set_name), e.to_string()));
                 }
             }
         }

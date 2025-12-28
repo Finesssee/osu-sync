@@ -202,10 +202,34 @@ fn render_filter_panel(
         ])
         .split(rows[1]);
 
-    render_checkbox(frame, mode_cols[0], "osu!", filter.is_mode_enabled(GameMode::Osu), filter_field == FilterField::ModeOsu);
-    render_checkbox(frame, mode_cols[1], "Taiko", filter.is_mode_enabled(GameMode::Taiko), filter_field == FilterField::ModeTaiko);
-    render_checkbox(frame, mode_cols[2], "Catch", filter.is_mode_enabled(GameMode::Catch), filter_field == FilterField::ModeCatch);
-    render_checkbox(frame, mode_cols[3], "Mania", filter.is_mode_enabled(GameMode::Mania), filter_field == FilterField::ModeMania);
+    render_checkbox(
+        frame,
+        mode_cols[0],
+        "osu!",
+        filter.is_mode_enabled(GameMode::Osu),
+        filter_field == FilterField::ModeOsu,
+    );
+    render_checkbox(
+        frame,
+        mode_cols[1],
+        "Taiko",
+        filter.is_mode_enabled(GameMode::Taiko),
+        filter_field == FilterField::ModeTaiko,
+    );
+    render_checkbox(
+        frame,
+        mode_cols[2],
+        "Catch",
+        filter.is_mode_enabled(GameMode::Catch),
+        filter_field == FilterField::ModeCatch,
+    );
+    render_checkbox(
+        frame,
+        mode_cols[3],
+        "Mania",
+        filter.is_mode_enabled(GameMode::Mania),
+        filter_field == FilterField::ModeMania,
+    );
 
     // Star Rating title
     let star_title = Paragraph::new(Span::styled(
@@ -217,17 +241,32 @@ fn render_filter_panel(
     // Star rating inputs
     let star_cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 2),
-            Constraint::Ratio(1, 2),
-        ])
+        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
         .split(rows[3]);
 
-    let min_str = filter.star_rating_min.map(|v| format!("{:.1}", v)).unwrap_or_else(|| "—".to_string());
-    let max_str = filter.star_rating_max.map(|v| format!("{:.1}", v)).unwrap_or_else(|| "—".to_string());
+    let min_str = filter
+        .star_rating_min
+        .map(|v| format!("{:.1}", v))
+        .unwrap_or_else(|| "—".to_string());
+    let max_str = filter
+        .star_rating_max
+        .map(|v| format!("{:.1}", v))
+        .unwrap_or_else(|| "—".to_string());
 
-    render_value_input(frame, star_cols[0], "Min:", &min_str, filter_field == FilterField::StarMin);
-    render_value_input(frame, star_cols[1], "Max:", &max_str, filter_field == FilterField::StarMax);
+    render_value_input(
+        frame,
+        star_cols[0],
+        "Min:",
+        &min_str,
+        filter_field == FilterField::StarMin,
+    );
+    render_value_input(
+        frame,
+        star_cols[1],
+        "Max:",
+        &max_str,
+        filter_field == FilterField::StarMax,
+    );
 
     // Ranked Status title
     let status_title = Paragraph::new(Span::styled(
@@ -246,9 +285,27 @@ fn render_filter_panel(
         ])
         .split(rows[5]);
 
-    render_checkbox(frame, status_cols1[0], "Ranked", filter.is_status_enabled(RankedStatus::Ranked), filter_field == FilterField::StatusRanked);
-    render_checkbox(frame, status_cols1[1], "Approved", filter.is_status_enabled(RankedStatus::Approved), filter_field == FilterField::StatusApproved);
-    render_checkbox(frame, status_cols1[2], "Qualified", filter.is_status_enabled(RankedStatus::Qualified), filter_field == FilterField::StatusQualified);
+    render_checkbox(
+        frame,
+        status_cols1[0],
+        "Ranked",
+        filter.is_status_enabled(RankedStatus::Ranked),
+        filter_field == FilterField::StatusRanked,
+    );
+    render_checkbox(
+        frame,
+        status_cols1[1],
+        "Approved",
+        filter.is_status_enabled(RankedStatus::Approved),
+        filter_field == FilterField::StatusApproved,
+    );
+    render_checkbox(
+        frame,
+        status_cols1[2],
+        "Qualified",
+        filter.is_status_enabled(RankedStatus::Qualified),
+        filter_field == FilterField::StatusQualified,
+    );
 
     // Status checkboxes row 2
     let status_cols2 = Layout::default()
@@ -260,8 +317,20 @@ fn render_filter_panel(
         ])
         .split(rows[6]);
 
-    render_checkbox(frame, status_cols2[0], "Loved", filter.is_status_enabled(RankedStatus::Loved), filter_field == FilterField::StatusLoved);
-    render_checkbox(frame, status_cols2[1], "Pending", filter.is_status_enabled(RankedStatus::Pending), filter_field == FilterField::StatusPending);
+    render_checkbox(
+        frame,
+        status_cols2[0],
+        "Loved",
+        filter.is_status_enabled(RankedStatus::Loved),
+        filter_field == FilterField::StatusLoved,
+    );
+    render_checkbox(
+        frame,
+        status_cols2[1],
+        "Pending",
+        filter.is_status_enabled(RankedStatus::Pending),
+        filter_field == FilterField::StatusPending,
+    );
 
     // Instructions
     let instructions = Paragraph::new(Span::styled(

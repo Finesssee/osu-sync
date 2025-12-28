@@ -80,7 +80,13 @@ pub fn render(
             Span::styled("osu!stable: ", Style::default().fg(subtle)),
             Span::styled(
                 stable_content,
-                Style::default().fg(if is_editing_stable { Color::White } else if selected == 0 { accent } else { text }),
+                Style::default().fg(if is_editing_stable {
+                    Color::White
+                } else if selected == 0 {
+                    accent
+                } else {
+                    text
+                }),
             ),
         ]),
         Line::from(""),
@@ -92,7 +98,13 @@ pub fn render(
             Span::styled("osu!lazer:  ", Style::default().fg(subtle)),
             Span::styled(
                 lazer_content,
-                Style::default().fg(if is_editing_lazer { Color::White } else if selected == 1 { accent } else { text }),
+                Style::default().fg(if is_editing_lazer {
+                    Color::White
+                } else if selected == 1 {
+                    accent
+                } else {
+                    text
+                }),
             ),
         ]),
     ]);
@@ -120,7 +132,9 @@ pub fn render(
             Span::styled("Theme:              ", Style::default().fg(subtle)),
             Span::styled(
                 theme_indicator,
-                Style::default().fg(if selected == 2 { accent } else { text }).bold(),
+                Style::default()
+                    .fg(if selected == 2 { accent } else { text })
+                    .bold(),
             ),
         ]),
         Line::from(""),
@@ -136,15 +150,21 @@ pub fn render(
     frame.render_widget(settings, settings_inner);
 
     // Status message
-    let status_color = if status_message.contains("detected!") || status_message.contains("saved") || status_message.contains("applied") {
+    let status_color = if status_message.contains("detected!")
+        || status_message.contains("saved")
+        || status_message.contains("applied")
+    {
         success
     } else if status_message.contains("not found") || status_message.contains("No installations") {
         accent
     } else {
         subtle
     };
-    let status = Paragraph::new(Span::styled(status_message, Style::default().fg(status_color)))
-        .alignment(Alignment::Center);
+    let status = Paragraph::new(Span::styled(
+        status_message,
+        Style::default().fg(status_color),
+    ))
+    .alignment(Alignment::Center);
     frame.render_widget(status, chunks[3]);
 
     // About

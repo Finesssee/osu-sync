@@ -44,8 +44,8 @@ impl Theme {
             success: Color::Green,
             warning: Color::Yellow,
             error: Color::Red,
-            border: Color::Rgb(147, 153, 178),           // same as subtle
-            selection_bg: Color::Rgb(45, 45, 60),        // same as highlight
+            border: Color::Rgb(147, 153, 178),    // same as subtle
+            selection_bg: Color::Rgb(45, 45, 60), // same as highlight
         }
     }
 

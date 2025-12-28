@@ -59,10 +59,7 @@ const SYNC_SHORTCUTS: ShortcutCategory = ShortcutCategory {
 /// Statistics shortcuts
 const STATS_SHORTCUTS: ShortcutCategory = ShortcutCategory {
     name: "Statistics",
-    shortcuts: &[
-        ("Tab/h/l", "Switch tabs"),
-        ("e", "Export statistics"),
-    ],
+    shortcuts: &[("Tab/h/l", "Switch tabs"), ("e", "Export statistics")],
 };
 
 /// Config screen shortcuts
@@ -78,10 +75,7 @@ const CONFIG_SHORTCUTS: ShortcutCategory = ShortcutCategory {
 /// Backup/Restore shortcuts
 const BACKUP_SHORTCUTS: ShortcutCategory = ShortcutCategory {
     name: "Backup/Restore",
-    shortcuts: &[
-        ("Enter", "Start operation"),
-        ("Esc", "Cancel operation"),
-    ],
+    shortcuts: &[("Enter", "Start operation"), ("Esc", "Cancel operation")],
 };
 
 pub fn render(frame: &mut Frame, area: Rect) {

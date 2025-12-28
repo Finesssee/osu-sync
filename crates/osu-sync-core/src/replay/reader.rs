@@ -123,10 +123,14 @@ impl StableReplayReader {
                 };
 
                 // Calculate grade from accuracy (Replay struct doesn't have grade field)
-                let total_hits = score.count_300 + score.count_100 + score.count_50 + score.count_miss;
+                let total_hits =
+                    score.count_300 + score.count_100 + score.count_50 + score.count_miss;
                 let accuracy = if total_hits > 0 {
-                    (score.count_300 as f32 * 300.0 + score.count_100 as f32 * 100.0 + score.count_50 as f32 * 50.0)
-                        / (total_hits as f32 * 300.0) * 100.0
+                    (score.count_300 as f32 * 300.0
+                        + score.count_100 as f32 * 100.0
+                        + score.count_50 as f32 * 50.0)
+                        / (total_hits as f32 * 300.0)
+                        * 100.0
                 } else {
                     0.0
                 };
@@ -212,4 +216,3 @@ pub struct ReplayStats {
     /// Number of scores without .osr files
     pub without_replay_files: usize,
 }
-

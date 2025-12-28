@@ -40,16 +40,16 @@ impl ActivityType {
     /// Get the display icon for this activity type
     pub fn icon(&self) -> &'static str {
         match self {
-            ActivityType::Scan => "\u{1F50D}",       // magnifying glass
-            ActivityType::Sync => "\u{1F504}",       // refresh
-            ActivityType::Export => "\u{1F4E4}",     // outbox
-            ActivityType::Backup => "\u{1F4BE}",     // floppy disk
-            ActivityType::Restore => "\u{1F4E5}",    // inbox
-            ActivityType::MediaExtract => "\u{1F3B5}", // music note
-            ActivityType::ReplayExport => "\u{1F3AE}", // game controller
+            ActivityType::Scan => "\u{1F50D}",           // magnifying glass
+            ActivityType::Sync => "\u{1F504}",           // refresh
+            ActivityType::Export => "\u{1F4E4}",         // outbox
+            ActivityType::Backup => "\u{1F4BE}",         // floppy disk
+            ActivityType::Restore => "\u{1F4E5}",        // inbox
+            ActivityType::MediaExtract => "\u{1F3B5}",   // music note
+            ActivityType::ReplayExport => "\u{1F3AE}",   // game controller
             ActivityType::CollectionSync => "\u{1F4C1}", // folder
-            ActivityType::Error => "\u{274C}",       // cross mark
-            ActivityType::Info => "\u{2139}",        // info
+            ActivityType::Error => "\u{274C}",           // cross mark
+            ActivityType::Info => "\u{2139}",            // info
         }
     }
 
@@ -198,7 +198,11 @@ impl ActivityLog {
         description: impl Into<String>,
         details: impl Into<String>,
     ) {
-        self.add(ActivityEntry::with_details(activity_type, description, details));
+        self.add(ActivityEntry::with_details(
+            activity_type,
+            description,
+            details,
+        ));
     }
 
     /// Get all entries

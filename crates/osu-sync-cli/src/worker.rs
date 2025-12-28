@@ -8,7 +8,9 @@ use std::time::Instant;
 use osu_sync_core::backup::{
     BackupManager, BackupMode, BackupOptions, BackupTarget, CompressionLevel,
 };
-use osu_sync_core::collection::{CollectionSyncEngine, CollectionSyncStrategy, StableCollectionReader};
+use osu_sync_core::collection::{
+    CollectionSyncEngine, CollectionSyncStrategy, StableCollectionReader,
+};
 use osu_sync_core::config::Config;
 use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
@@ -113,7 +115,12 @@ fn run_worker(
             Ok(WorkerMessage::LoadReplays) => {
                 handle_load_replays(&app_tx);
             }
-            Ok(WorkerMessage::StartReplayExport { organization, output_path, filter, rename_pattern }) => {
+            Ok(WorkerMessage::StartReplayExport {
+                organization,
+                output_path,
+                filter,
+                rename_pattern,
+            }) => {
                 handle_replay_export(&app_tx, organization, output_path, filter, rename_pattern);
             }
             Ok(WorkerMessage::Cancel) => {
@@ -146,7 +153,10 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
             });
 
             // Use fast mode (skip hashing) for browsing - 5x faster
-            match StableScanner::new(songs_path).skip_hashing().scan_parallel_timed() {
+            match StableScanner::new(songs_path)
+                .skip_hashing()
+                .scan_parallel_timed()
+            {
                 Ok((sets, timing)) => {
                     let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
                     stable_result = Some(ScanResult {
@@ -193,37 +203,35 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
 
             let lazer_start = Instant::now();
             match LazerDatabase::open(path) {
-                Ok(db) => {
-                    match db.get_all_beatmap_sets() {
-                        Ok(sets) => {
-                            let lazer_time = lazer_start.elapsed();
-                            let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
-                            let timing_report = format!(
-                                "Lazer scan completed in {:.2}s ({} sets, {} beatmaps)",
-                                lazer_time.as_secs_f64(),
-                                sets.len(),
-                                total_beatmaps
-                            );
-                            lazer_result = Some(ScanResult {
-                                path: Some(path.display().to_string()),
-                                detected: true,
-                                beatmap_sets: sets.len(),
-                                total_beatmaps,
-                                timing_report: Some(timing_report),
-                            });
-                        }
-                        Err(e) => {
-                            let _ = app_tx.send(AppMessage::Error(format!("Lazer query error: {}", e)));
-                            lazer_result = Some(ScanResult {
-                                path: Some(path.display().to_string()),
-                                detected: false,
-                                beatmap_sets: 0,
-                                total_beatmaps: 0,
-                                timing_report: None,
-                            });
-                        }
+                Ok(db) => match db.get_all_beatmap_sets() {
+                    Ok(sets) => {
+                        let lazer_time = lazer_start.elapsed();
+                        let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
+                        let timing_report = format!(
+                            "Lazer scan completed in {:.2}s ({} sets, {} beatmaps)",
+                            lazer_time.as_secs_f64(),
+                            sets.len(),
+                            total_beatmaps
+                        );
+                        lazer_result = Some(ScanResult {
+                            path: Some(path.display().to_string()),
+                            detected: true,
+                            beatmap_sets: sets.len(),
+                            total_beatmaps,
+                            timing_report: Some(timing_report),
+                        });
                     }
-                }
+                    Err(e) => {
+                        let _ = app_tx.send(AppMessage::Error(format!("Lazer query error: {}", e)));
+                        lazer_result = Some(ScanResult {
+                            path: Some(path.display().to_string()),
+                            detected: false,
+                            beatmap_sets: 0,
+                            total_beatmaps: 0,
+                            timing_report: None,
+                        });
+                    }
+                },
                 Err(e) => {
                     let _ = app_tx.send(AppMessage::Error(format!("Lazer open error: {}", e)));
                     lazer_result = Some(ScanResult {
@@ -259,7 +267,9 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let stable_path = match config.stable_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!stable path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -267,7 +277,9 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let lazer_path = match config.lazer_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!lazer path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!lazer path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -278,7 +290,10 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Failed to open lazer database: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Failed to open lazer database: {}",
+                e
+            )));
             return;
         }
     };
@@ -299,7 +314,10 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Failed to create sync engine: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Failed to create sync engine: {}",
+                e
+            )));
             return;
         }
     };
@@ -321,12 +339,17 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
 fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
     let config = Config::load();
 
-    let _ = app_tx.send(AppMessage::StatsProgress("Scanning osu!stable...".to_string()));
+    let _ = app_tx.send(AppMessage::StatsProgress(
+        "Scanning osu!stable...".to_string(),
+    ));
 
     // Scan stable (fast mode - no hashing needed for stats)
     let stable_sets = if let Some(path) = config.stable_path.as_ref() {
         let songs_path = path.join("Songs");
-        match StableScanner::new(songs_path).skip_hashing().scan_parallel() {
+        match StableScanner::new(songs_path)
+            .skip_hashing()
+            .scan_parallel()
+        {
             Ok(sets) => sets,
             Err(_) => Vec::new(),
         }
@@ -334,7 +357,9 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
         Vec::new()
     };
 
-    let _ = app_tx.send(AppMessage::StatsProgress("Scanning osu!lazer...".to_string()));
+    let _ = app_tx.send(AppMessage::StatsProgress(
+        "Scanning osu!lazer...".to_string(),
+    ));
 
     // Scan lazer
     let lazer_sets = if let Some(path) = config.lazer_path.as_ref() {
@@ -346,7 +371,9 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>) {
         Vec::new()
     };
 
-    let _ = app_tx.send(AppMessage::StatsProgress("Calculating statistics...".to_string()));
+    let _ = app_tx.send(AppMessage::StatsProgress(
+        "Calculating statistics...".to_string(),
+    ));
 
     // Calculate comparison stats
     let stats = StatsAnalyzer::compare(&stable_sets, &lazer_sets);
@@ -445,7 +472,9 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let stable_path = match config.stable_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!stable path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -453,7 +482,9 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let lazer_path = match config.lazer_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!lazer path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!lazer path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -464,7 +495,10 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Failed to open lazer database: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Failed to open lazer database: {}",
+                e
+            )));
             return;
         }
     };
@@ -485,7 +519,10 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Failed to create sync engine: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Failed to create sync engine: {}",
+                e
+            )));
             return;
         }
     };
@@ -512,24 +549,20 @@ fn handle_create_backup(
 
     // Determine source path based on target
     let source_path = match target {
-        BackupTarget::StableSongs => {
-            match config.stable_path.as_ref().map(|p| p.join("Songs")) {
-                Some(path) if path.exists() => path,
-                _ => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu!stable Songs folder not found".to_string(),
-                    ));
-                    return;
-                }
+        BackupTarget::StableSongs => match config.stable_path.as_ref().map(|p| p.join("Songs")) {
+            Some(path) if path.exists() => path,
+            _ => {
+                let _ = app_tx.send(AppMessage::Error(
+                    "osu!stable Songs folder not found".to_string(),
+                ));
+                return;
             }
-        }
+        },
         BackupTarget::StableCollections => {
             match config.stable_path.as_ref().map(|p| p.join("collection.db")) {
                 Some(path) if path.exists() => path,
                 _ => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "collection.db not found".to_string(),
-                    ));
+                    let _ = app_tx.send(AppMessage::Error("collection.db not found".to_string()));
                     return;
                 }
             }
@@ -538,32 +571,27 @@ fn handle_create_backup(
             match config.stable_path.as_ref().map(|p| p.join("scores.db")) {
                 Some(path) if path.exists() => path,
                 _ => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "scores.db not found".to_string(),
-                    ));
+                    let _ = app_tx.send(AppMessage::Error("scores.db not found".to_string()));
                     return;
                 }
             }
         }
-        BackupTarget::LazerData => {
-            match config.lazer_path.as_ref() {
-                Some(path) if path.exists() => path.clone(),
-                _ => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu!lazer data folder not found".to_string(),
-                    ));
-                    return;
-                }
+        BackupTarget::LazerData => match config.lazer_path.as_ref() {
+            Some(path) if path.exists() => path.clone(),
+            _ => {
+                let _ = app_tx.send(AppMessage::Error(
+                    "osu!lazer data folder not found".to_string(),
+                ));
+                return;
             }
-        }
+        },
         BackupTarget::All => {
             // For "All", we backup stable folder (which contains Songs, collection.db, scores.db)
             match config.stable_path.as_ref() {
                 Some(path) if path.exists() => path.clone(),
                 _ => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu!stable folder not found".to_string(),
-                    ));
+                    let _ =
+                        app_tx.send(AppMessage::Error("osu!stable folder not found".to_string()));
                     return;
                 }
             }
@@ -630,21 +658,22 @@ fn handle_restore_backup(app_tx: &Sender<AppMessage>, backup_path: PathBuf) {
         Err(_) => None,
     };
 
-    let target = backup_info.as_ref().map(|b| b.target).unwrap_or(BackupTarget::All);
+    let target = backup_info
+        .as_ref()
+        .map(|b| b.target)
+        .unwrap_or(BackupTarget::All);
 
     // Determine destination path based on target
     let dest_path = match target {
-        BackupTarget::StableSongs => {
-            match config.stable_path.as_ref().map(|p| p.join("Songs")) {
-                Some(path) => path,
-                None => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu!stable Songs folder not configured".to_string(),
-                    ));
-                    return;
-                }
+        BackupTarget::StableSongs => match config.stable_path.as_ref().map(|p| p.join("Songs")) {
+            Some(path) => path,
+            None => {
+                let _ = app_tx.send(AppMessage::Error(
+                    "osu!stable Songs folder not configured".to_string(),
+                ));
+                return;
             }
-        }
+        },
         BackupTarget::StableCollections | BackupTarget::StableScores => {
             match config.stable_path.as_ref() {
                 Some(path) => path.clone(),
@@ -656,28 +685,22 @@ fn handle_restore_backup(app_tx: &Sender<AppMessage>, backup_path: PathBuf) {
                 }
             }
         }
-        BackupTarget::LazerData => {
-            match config.lazer_path.as_ref() {
-                Some(path) => path.clone(),
-                None => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu!lazer folder not configured".to_string(),
-                    ));
-                    return;
-                }
+        BackupTarget::LazerData => match config.lazer_path.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                let _ = app_tx.send(AppMessage::Error(
+                    "osu!lazer folder not configured".to_string(),
+                ));
+                return;
             }
-        }
-        BackupTarget::All => {
-            match config.stable_path.as_ref() {
-                Some(path) => path.clone(),
-                None => {
-                    let _ = app_tx.send(AppMessage::Error(
-                        "osu! folder not configured".to_string(),
-                    ));
-                    return;
-                }
+        },
+        BackupTarget::All => match config.stable_path.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                let _ = app_tx.send(AppMessage::Error("osu! folder not configured".to_string()));
+                return;
             }
-        }
+        },
     };
 
     // Create progress callback
@@ -687,7 +710,11 @@ fn handle_restore_backup(app_tx: &Sender<AppMessage>, backup_path: PathBuf) {
     });
 
     // Restore backup
-    match backup_manager.restore_backup_with_progress(&backup_path, &dest_path, Some(progress_callback)) {
+    match backup_manager.restore_backup_with_progress(
+        &backup_path,
+        &dest_path,
+        Some(progress_callback),
+    ) {
         Ok(()) => {
             // Get file count from last progress or estimate
             let files_restored = 0; // We don't track this currently
@@ -718,7 +745,9 @@ fn handle_media_extraction(
     let stable_path = match config.stable_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!stable path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -768,7 +797,9 @@ fn handle_load_replays(app_tx: &Sender<AppMessage>) {
     let stable_path = match config.stable_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!stable path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
             return;
         }
     };
@@ -782,7 +813,10 @@ fn handle_load_replays(app_tx: &Sender<AppMessage>) {
     match reader.read_replays() {
         Ok(replays) => {
             let exportable_count = replays.iter().filter(|r| r.has_replay_file).count();
-            let _ = app_tx.send(AppMessage::ReplaysLoaded { replays, exportable_count });
+            let _ = app_tx.send(AppMessage::ReplaysLoaded {
+                replays,
+                exportable_count,
+            });
         }
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!("Failed to load replays: {}", e)));
@@ -805,7 +839,9 @@ fn handle_replay_export(
     let stable_path = match config.stable_path.as_ref() {
         Some(p) => p.clone(),
         None => {
-            let _ = app_tx.send(AppMessage::Error("osu!stable path not configured".to_string()));
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
             return;
         }
     };

@@ -12,7 +12,6 @@ pub use conflict::{
 pub use direction::SyncDirection;
 pub use dry_run::{format_bytes, DryRunAction, DryRunItem, DryRunResult};
 pub use engine::{
-    ProgressCallback, SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress,
-    SyncResult,
+    ProgressCallback, SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress, SyncResult,
 };
 pub use skip_list::SkipList;

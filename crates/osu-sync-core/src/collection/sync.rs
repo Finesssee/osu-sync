@@ -6,8 +6,11 @@
 
 use std::collections::HashMap;
 
+use super::{
+    Collection, CollectionPreviewItem, CollectionSyncDirection, CollectionSyncResult,
+    CollectionSyncStrategy,
+};
 use crate::error::Result;
-use super::{Collection, CollectionPreviewItem, CollectionSyncDirection, CollectionSyncResult, CollectionSyncStrategy};
 
 /// Engine for synchronizing beatmap collections between installations
 pub struct CollectionSyncEngine;
@@ -52,9 +55,7 @@ impl CollectionSyncEngine {
             beatmaps_skipped: 0,
             missing_beatmaps: Vec::new(),
             success: false,
-            error_message: Some(
-                "Lazer to Stable collection sync not yet implemented.".to_string(),
-            ),
+            error_message: Some("Lazer to Stable collection sync not yet implemented.".to_string()),
         })
     }
 
@@ -96,7 +97,10 @@ impl CollectionSyncEngine {
         let mut seen_names: HashMap<&str, bool> = HashMap::new();
 
         for collection in collections {
-            let count = name_counts.get(collection.name.as_str()).copied().unwrap_or(1);
+            let count = name_counts
+                .get(collection.name.as_str())
+                .copied()
+                .unwrap_or(1);
             let is_first = !seen_names.contains_key(collection.name.as_str());
             seen_names.insert(&collection.name, true);
 
@@ -117,7 +121,8 @@ impl CollectionSyncEngine {
             CollectionSyncDirection::StableToLazer => (
                 true,
                 Some(
-                    "After sync, drag collection.db into osu!lazer or use File > Import".to_string(),
+                    "After sync, drag collection.db into osu!lazer or use File > Import"
+                        .to_string(),
                 ),
             ),
             CollectionSyncDirection::LazerToStable => (
@@ -189,12 +194,14 @@ mod tests {
 
     #[test]
     fn test_sync_to_lazer_placeholder() {
-        let collections = vec![
-            Collection::with_hashes("Test", vec!["hash1".to_string(), "hash2".to_string()]),
-        ];
+        let collections = vec![Collection::with_hashes(
+            "Test",
+            vec!["hash1".to_string(), "hash2".to_string()],
+        )];
 
-        let result = CollectionSyncEngine::sync_to_lazer(&collections, CollectionSyncStrategy::Merge)
-            .unwrap();
+        let result =
+            CollectionSyncEngine::sync_to_lazer(&collections, CollectionSyncStrategy::Merge)
+                .unwrap();
 
         assert!(!result.success);
         assert!(result.error_message.is_some());
@@ -208,10 +215,8 @@ mod tests {
             Collection::with_hashes("Training", vec!["h3".to_string()]),
         ];
 
-        let preview = CollectionSyncEngine::preview(
-            &collections,
-            CollectionSyncDirection::StableToLazer,
-        );
+        let preview =
+            CollectionSyncEngine::preview(&collections, CollectionSyncDirection::StableToLazer);
 
         assert_eq!(preview.source, "osu!stable");
         assert_eq!(preview.target, "osu!lazer");
@@ -230,13 +235,11 @@ mod tests {
             Collection::with_hashes("Training", vec!["h4".to_string()]),
         ];
 
-        let preview = CollectionSyncEngine::preview(
-            &collections,
-            CollectionSyncDirection::StableToLazer,
-        );
+        let preview =
+            CollectionSyncEngine::preview(&collections, CollectionSyncDirection::StableToLazer);
 
         assert_eq!(preview.unique_collections, 2); // Favorites + Training
-        assert_eq!(preview.duplicates_merged, 1);  // One duplicate Favorites
+        assert_eq!(preview.duplicates_merged, 1); // One duplicate Favorites
         assert_eq!(preview.total_beatmaps, 4);
 
         // Check collection preview items
@@ -248,19 +251,19 @@ mod tests {
 
     #[test]
     fn test_preview_lazer_to_stable_warning() {
-        let collections = vec![
-            Collection::with_hashes("Test", vec!["h1".to_string()]),
-        ];
+        let collections = vec![Collection::with_hashes("Test", vec!["h1".to_string()])];
 
-        let preview = CollectionSyncEngine::preview(
-            &collections,
-            CollectionSyncDirection::LazerToStable,
-        );
+        let preview =
+            CollectionSyncEngine::preview(&collections, CollectionSyncDirection::LazerToStable);
 
         assert_eq!(preview.source, "osu!lazer");
         assert_eq!(preview.target, "osu!stable");
         assert!(preview.requires_manual_steps);
-        assert!(preview.manual_steps_message.as_ref().unwrap().contains("Realm"));
+        assert!(preview
+            .manual_steps_message
+            .as_ref()
+            .unwrap()
+            .contains("Realm"));
     }
 
     #[test]

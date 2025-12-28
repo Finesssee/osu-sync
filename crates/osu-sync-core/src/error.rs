@@ -10,10 +10,7 @@ pub enum Error {
     Io(#[from] std::io::Error),
 
     #[error("Failed to parse beatmap file {path}: {message}")]
-    BeatmapParse {
-        path: PathBuf,
-        message: String,
-    },
+    BeatmapParse { path: PathBuf, message: String },
 
     #[error("Failed to read/write ZIP archive: {0}")]
     Zip(#[from] zip::result::ZipError),

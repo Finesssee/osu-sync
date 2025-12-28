@@ -1,15 +1,18 @@
 //! Filter engine for matching beatmaps against criteria
 
+use super::FilterCriteria;
 use crate::beatmap::BeatmapSet;
 use crate::lazer::LazerBeatmapSet;
-use super::FilterCriteria;
 
 /// Engine for filtering beatmap sets against criteria
 pub struct FilterEngine;
 
 impl FilterEngine {
     /// Filter stable beatmap sets, returning references to matching sets
-    pub fn filter_stable<'a>(sets: &'a [BeatmapSet], criteria: &FilterCriteria) -> Vec<&'a BeatmapSet> {
+    pub fn filter_stable<'a>(
+        sets: &'a [BeatmapSet],
+        criteria: &FilterCriteria,
+    ) -> Vec<&'a BeatmapSet> {
         if criteria.is_empty() {
             return sets.iter().collect();
         }
@@ -19,7 +22,10 @@ impl FilterEngine {
     }
 
     /// Filter lazer beatmap sets, returning references to matching sets
-    pub fn filter_lazer<'a>(sets: &'a [LazerBeatmapSet], criteria: &FilterCriteria) -> Vec<&'a LazerBeatmapSet> {
+    pub fn filter_lazer<'a>(
+        sets: &'a [LazerBeatmapSet],
+        criteria: &FilterCriteria,
+    ) -> Vec<&'a LazerBeatmapSet> {
         if criteria.is_empty() {
             return sets.iter().collect();
         }
@@ -89,7 +95,10 @@ impl FilterEngine {
                 if !artist_filter.is_empty() {
                     let filter_lower = artist_filter.to_lowercase();
                     let matches_artist = meta.artist.to_lowercase().contains(&filter_lower)
-                        || meta.artist_unicode.as_ref().map_or(false, |a| a.to_lowercase().contains(&filter_lower));
+                        || meta
+                            .artist_unicode
+                            .as_ref()
+                            .map_or(false, |a| a.to_lowercase().contains(&filter_lower));
                     if !matches_artist {
                         return false;
                     }
@@ -114,18 +123,31 @@ impl FilterEngine {
                 let matches_metadata = set.metadata().map_or(false, |meta| {
                     meta.title.to_lowercase().contains(&query_lower)
                         || meta.artist.to_lowercase().contains(&query_lower)
-                        || meta.title_unicode.as_ref().map_or(false, |t| t.to_lowercase().contains(&query_lower))
-                        || meta.artist_unicode.as_ref().map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        || meta
+                            .title_unicode
+                            .as_ref()
+                            .map_or(false, |t| t.to_lowercase().contains(&query_lower))
+                        || meta
+                            .artist_unicode
+                            .as_ref()
+                            .map_or(false, |a| a.to_lowercase().contains(&query_lower))
                         || meta.creator.to_lowercase().contains(&query_lower)
-                        || meta.source.as_ref().map_or(false, |s| s.to_lowercase().contains(&query_lower))
-                        || meta.tags.iter().any(|tag| tag.to_lowercase().contains(&query_lower))
+                        || meta
+                            .source
+                            .as_ref()
+                            .map_or(false, |s| s.to_lowercase().contains(&query_lower))
+                        || meta
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query_lower))
                 });
 
                 if !matches_metadata {
                     // Also check folder name
-                    let matches_folder = set.folder_name.as_ref().map_or(false, |f| {
-                        f.to_lowercase().contains(&query_lower)
-                    });
+                    let matches_folder = set
+                        .folder_name
+                        .as_ref()
+                        .map_or(false, |f| f.to_lowercase().contains(&query_lower));
 
                     if !matches_folder {
                         return false;
@@ -198,7 +220,10 @@ impl FilterEngine {
                 if !artist_filter.is_empty() {
                     let filter_lower = artist_filter.to_lowercase();
                     let matches_artist = meta.artist.to_lowercase().contains(&filter_lower)
-                        || meta.artist_unicode.as_ref().map_or(false, |a| a.to_lowercase().contains(&filter_lower));
+                        || meta
+                            .artist_unicode
+                            .as_ref()
+                            .map_or(false, |a| a.to_lowercase().contains(&filter_lower));
                     if !matches_artist {
                         return false;
                     }
@@ -226,11 +251,23 @@ impl FilterEngine {
                     let meta = &beatmap.metadata;
                     meta.title.to_lowercase().contains(&query_lower)
                         || meta.artist.to_lowercase().contains(&query_lower)
-                        || meta.title_unicode.as_ref().map_or(false, |t| t.to_lowercase().contains(&query_lower))
-                        || meta.artist_unicode.as_ref().map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                        || meta
+                            .title_unicode
+                            .as_ref()
+                            .map_or(false, |t| t.to_lowercase().contains(&query_lower))
+                        || meta
+                            .artist_unicode
+                            .as_ref()
+                            .map_or(false, |a| a.to_lowercase().contains(&query_lower))
                         || meta.creator.to_lowercase().contains(&query_lower)
-                        || meta.source.as_ref().map_or(false, |s| s.to_lowercase().contains(&query_lower))
-                        || meta.tags.iter().any(|tag| tag.to_lowercase().contains(&query_lower))
+                        || meta
+                            .source
+                            .as_ref()
+                            .map_or(false, |s| s.to_lowercase().contains(&query_lower))
+                        || meta
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query_lower))
                 });
 
                 if !matches_metadata {
@@ -266,7 +303,7 @@ impl FilterEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::beatmap::{BeatmapInfo, BeatmapMetadata, BeatmapDifficulty, GameMode};
+    use crate::beatmap::{BeatmapDifficulty, BeatmapInfo, BeatmapMetadata, GameMode};
     use crate::stats::RankedStatus;
 
     fn create_test_set(title: &str, artist: &str, mode: GameMode) -> BeatmapSet {
@@ -386,7 +423,9 @@ mod tests {
     #[test]
     fn test_star_rating_filter_min() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             Some(5.5),
             None,
@@ -404,7 +443,9 @@ mod tests {
     #[test]
     fn test_star_rating_filter_max() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             Some(3.5),
             None,
@@ -422,7 +463,9 @@ mod tests {
     #[test]
     fn test_star_rating_filter_range() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             Some(5.0),
             None,
@@ -440,7 +483,9 @@ mod tests {
     #[test]
     fn test_star_rating_filter_no_data() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             None, // No star rating
             None,
@@ -454,7 +499,9 @@ mod tests {
     #[test]
     fn test_ranked_status_filter() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             None,
             Some(RankedStatus::Ranked),
@@ -472,7 +519,9 @@ mod tests {
     #[test]
     fn test_ranked_status_filter_multiple() {
         let set = create_test_set_with_details(
-            "Test", "Artist", "Creator",
+            "Test",
+            "Artist",
+            "Creator",
             GameMode::Osu,
             None,
             Some(RankedStatus::Approved),
@@ -505,7 +554,9 @@ mod tests {
     #[test]
     fn test_mapper_filter() {
         let set = create_test_set_with_details(
-            "TestTitle", "TestArtist", "MapperName",
+            "TestTitle",
+            "TestArtist",
+            "MapperName",
             GameMode::Osu,
             None,
             None,
@@ -527,7 +578,9 @@ mod tests {
     #[test]
     fn test_combined_filters() {
         let set = create_test_set_with_details(
-            "TestTitle", "TestArtist", "TestCreator",
+            "TestTitle",
+            "TestArtist",
+            "TestCreator",
             GameMode::Osu,
             Some(5.0),
             Some(RankedStatus::Ranked),
@@ -566,7 +619,9 @@ mod tests {
     #[test]
     fn test_search_matches_creator() {
         let set = create_test_set_with_details(
-            "SongTitle", "SongArtist", "UniqueCreatorName",
+            "SongTitle",
+            "SongArtist",
+            "UniqueCreatorName",
             GameMode::Osu,
             None,
             None,

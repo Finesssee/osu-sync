@@ -111,7 +111,15 @@ pub fn render(frame: &mut Frame, app: &App) {
             status_message,
             editing,
         } => {
-            config::render(frame, chunks[1], *selected, stable_path, lazer_path, status_message, editing.as_deref());
+            config::render(
+                frame,
+                chunks[1],
+                *selected,
+                stable_path,
+                lazer_path,
+                status_message,
+                editing.as_deref(),
+            );
         }
         AppState::Statistics {
             stats,
@@ -200,7 +208,14 @@ pub fn render(frame: &mut Frame, app: &App) {
             loading,
             status_message,
         } => {
-            restore::render(frame, chunks[1], backups, *selected, *loading, status_message);
+            restore::render(
+                frame,
+                chunks[1],
+                backups,
+                *selected,
+                *loading,
+                status_message,
+            );
         }
         AppState::RestoreConfirm {
             backup,
@@ -371,7 +386,15 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             status_message,
             editing,
         } => {
-            config::render(frame, area, *selected, stable_path, lazer_path, status_message, editing.as_deref());
+            config::render(
+                frame,
+                area,
+                *selected,
+                stable_path,
+                lazer_path,
+                status_message,
+                editing.as_deref(),
+            );
         }
         AppState::Statistics {
             stats,
@@ -604,8 +627,12 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
             ("j/k", "Navigate"),
         ],
         AppState::SyncComplete { .. } => vec![("Enter", "Back to Menu")],
-        AppState::Config { editing: Some(_), .. } => vec![("Enter", "Save"), ("Esc", "Cancel")],
-        AppState::Config { editing: None, .. } => vec![("Enter", "Edit"), ("d", "Auto-detect"), ("Esc", "Back")],
+        AppState::Config {
+            editing: Some(_), ..
+        } => vec![("Enter", "Save"), ("Esc", "Cancel")],
+        AppState::Config { editing: None, .. } => {
+            vec![("Enter", "Edit"), ("d", "Auto-detect"), ("Esc", "Back")]
+        }
         AppState::Statistics { loading: true, .. } => vec![("Esc", "Cancel")],
         AppState::Statistics {
             loading: false,
@@ -646,11 +673,9 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         AppState::BackupProgress { .. } => vec![("Esc", "Cancel")],
         AppState::BackupComplete { .. } => vec![("Enter", "Back to Menu")],
         AppState::RestoreConfig { loading: true, .. } => vec![("Esc", "Cancel")],
-        AppState::RestoreConfig { loading: false, .. } => vec![
-            ("Enter", "Select"),
-            ("j/k", "Navigate"),
-            ("Esc", "Back"),
-        ],
+        AppState::RestoreConfig { loading: false, .. } => {
+            vec![("Enter", "Select"), ("j/k", "Navigate"), ("Esc", "Back")]
+        }
         AppState::RestoreConfirm { .. } => vec![
             ("Enter", "Confirm"),
             ("Left/Right", "Select"),

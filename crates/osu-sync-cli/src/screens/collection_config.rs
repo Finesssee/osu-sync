@@ -5,7 +5,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{PINK, SUBTLE, SUCCESS, TEXT, WARNING};
 use crate::widgets::get_spinner_frame;
-use osu_sync_core::collection::{Collection, CollectionSyncDirection, CollectionSyncEngine, CollectionSyncStrategy};
+use osu_sync_core::collection::{
+    Collection, CollectionSyncDirection, CollectionSyncEngine, CollectionSyncStrategy,
+};
 
 pub fn render(
     frame: &mut Frame,
@@ -17,7 +19,8 @@ pub fn render(
     status_message: &str,
 ) {
     // Calculate preview for duplicate detection
-    let preview = CollectionSyncEngine::preview(collections, CollectionSyncDirection::StableToLazer);
+    let preview =
+        CollectionSyncEngine::preview(collections, CollectionSyncDirection::StableToLazer);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -84,7 +87,8 @@ pub fn render(
     } else {
         // Show collections list with duplicate indicators
         let num_collections = collections.len();
-        let items: Vec<ListItem> = preview.collections
+        let items: Vec<ListItem> = preview
+            .collections
             .iter()
             .enumerate()
             .map(|(i, preview_item)| {
@@ -105,7 +109,10 @@ pub fn render(
                 let mut spans = vec![
                     Span::styled(prefix, style),
                     Span::styled(&preview_item.name, style),
-                    Span::styled(format!("  ({} beatmaps)", preview_item.beatmap_count), count_style),
+                    Span::styled(
+                        format!("  ({} beatmaps)", preview_item.beatmap_count),
+                        count_style,
+                    ),
                 ];
 
                 // Add duplicate/merge indicators
@@ -152,7 +159,11 @@ pub fn render(
 
         // Update title to show unique count vs total if duplicates exist
         let title = if preview.duplicates_merged > 0 {
-            format!(" {} Collections ({} unique) ", collections.len(), preview.unique_collections)
+            format!(
+                " {} Collections ({} unique) ",
+                collections.len(),
+                preview.unique_collections
+            )
         } else {
             format!(" {} Collections ", collections.len())
         };
@@ -222,13 +233,12 @@ pub fn render(
             ]));
         }
 
-        let preview_widget = Paragraph::new(preview_lines)
-            .block(
-                Block::default()
-                    .title(" Sync Preview ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(SUBTLE)),
-            );
+        let preview_widget = Paragraph::new(preview_lines).block(
+            Block::default()
+                .title(" Sync Preview ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(SUBTLE)),
+        );
 
         frame.render_widget(preview_widget, chunks[3]);
     }

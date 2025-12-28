@@ -43,7 +43,9 @@ impl LazerImporter {
         // Generate filename
         let filename = format!(
             "{}.osz",
-            beatmap_set.folder_name.as_ref()
+            beatmap_set
+                .folder_name
+                .as_ref()
                 .map(|s| s.as_str())
                 .unwrap_or(&beatmap_set.generate_folder_name())
         );

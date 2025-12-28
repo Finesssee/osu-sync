@@ -376,16 +376,16 @@ impl StatsAnalyzer {
         let popular_artists_unsynced: Vec<BeatmapRecommendation> = top_artists
             .iter()
             .filter_map(|(artist, count)| {
-                artist_best_map.get(artist).map(|(set, beatmap)| {
-                    BeatmapRecommendation {
+                artist_best_map
+                    .get(artist)
+                    .map(|(set, beatmap)| BeatmapRecommendation {
                         set_id: set.id,
                         artist: beatmap.metadata.artist.clone(),
                         title: beatmap.metadata.title.clone(),
                         star_rating: beatmap.star_rating,
                         mode: beatmap.mode,
                         reason: format!("{} unsynced maps by this artist", count),
-                    }
-                })
+                    })
             })
             .collect();
 

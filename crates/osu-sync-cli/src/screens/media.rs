@@ -59,7 +59,11 @@ pub fn render_config(
     };
 
     let skip_dup_str = if skip_duplicates { "[x] Yes" } else { "[ ] No" };
-    let metadata_str = if include_metadata { "[x] Yes" } else { "[ ] No" };
+    let metadata_str = if include_metadata {
+        "[x] Yes"
+    } else {
+        "[ ] No"
+    };
 
     let options = [
         format!("Media Type: {}", media_type_str),
@@ -131,10 +135,7 @@ pub fn render_progress(
     frame.render_widget(title, chunks[0]);
 
     // Progress bar
-    let percentage = progress
-        .as_ref()
-        .map(|p| p.percentage())
-        .unwrap_or(0.0);
+    let percentage = progress.as_ref().map(|p| p.percentage()).unwrap_or(0.0);
 
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL))
@@ -146,11 +147,8 @@ pub fn render_progress(
     frame.render_widget(gauge, gauge_area);
 
     // Current file
-    let current = Paragraph::new(Span::styled(
-        current_set,
-        Style::default().fg(TEXT),
-    ))
-    .alignment(Alignment::Center);
+    let current = Paragraph::new(Span::styled(current_set, Style::default().fg(TEXT)))
+        .alignment(Alignment::Center);
     frame.render_widget(current, chunks[2]);
 
     // Stats
@@ -203,7 +201,10 @@ pub fn render_complete(frame: &mut Frame, area: Rect, result: &ExtractionResult)
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(
-            format!("Background images extracted: {}", result.backgrounds_extracted),
+            format!(
+                "Background images extracted: {}",
+                result.backgrounds_extracted
+            ),
             Style::default().fg(TEXT),
         )),
         Line::from(Span::styled(

@@ -12,7 +12,9 @@
 //! 2. Scan the lazer files directory and reconstruct from .osu files
 //! 3. Use FFI to realm-cpp (requires C++ build)
 
-use crate::beatmap::{BeatmapDifficulty, BeatmapFile, BeatmapInfo, BeatmapMetadata, BeatmapSet, GameMode};
+use crate::beatmap::{
+    BeatmapDifficulty, BeatmapFile, BeatmapInfo, BeatmapMetadata, BeatmapSet, GameMode,
+};
 use crate::error::{Error, Result};
 use crate::lazer::LazerFileStore;
 use crate::stats::RankedStatus;
@@ -121,7 +123,10 @@ impl LazerDatabase {
     }
 
     /// Get a beatmap by its MD5 hash
-    pub fn get_beatmap_by_md5(&self, md5: &str) -> Result<Option<(LazerBeatmapSet, LazerBeatmapInfo)>> {
+    pub fn get_beatmap_by_md5(
+        &self,
+        md5: &str,
+    ) -> Result<Option<(LazerBeatmapSet, LazerBeatmapInfo)>> {
         let sets = self.get_all_beatmap_sets()?;
         for set in sets {
             for beatmap in &set.beatmaps {
@@ -315,7 +320,8 @@ impl StableDatabase {
 
         for beatmap in &self.listing.beatmaps {
             if beatmap.beatmapset_id > 0 {
-                sets_map.entry(beatmap.beatmapset_id)
+                sets_map
+                    .entry(beatmap.beatmapset_id)
                     .or_default()
                     .push(beatmap);
             } else {
@@ -328,10 +334,8 @@ impl StableDatabase {
 
         // Convert grouped beatmaps to LazerBeatmapSet
         for (set_id, beatmaps) in sets_map {
-            let lazer_beatmaps: Vec<LazerBeatmapInfo> = beatmaps
-                .iter()
-                .map(|b| self.convert_beatmap(b))
-                .collect();
+            let lazer_beatmaps: Vec<LazerBeatmapInfo> =
+                beatmaps.iter().map(|b| self.convert_beatmap(b)).collect();
 
             // Extract files from the first beatmap's folder
             let files = if let Some(first) = beatmaps.first() {
@@ -380,11 +384,21 @@ impl StableDatabase {
             artist_unicode: beatmap.artist_unicode.clone(),
             creator: beatmap.creator.clone().unwrap_or_default(),
             source: beatmap.song_source.clone(),
-            tags: beatmap.tags.clone()
+            tags: beatmap
+                .tags
+                .clone()
                 .map(|t| t.split_whitespace().map(String::from).collect())
                 .unwrap_or_default(),
-            beatmap_id: if beatmap.beatmap_id > 0 { Some(beatmap.beatmap_id) } else { None },
-            beatmap_set_id: if beatmap.beatmapset_id > 0 { Some(beatmap.beatmapset_id) } else { None },
+            beatmap_id: if beatmap.beatmap_id > 0 {
+                Some(beatmap.beatmap_id)
+            } else {
+                None
+            },
+            beatmap_set_id: if beatmap.beatmapset_id > 0 {
+                Some(beatmap.beatmapset_id)
+            } else {
+                None
+            },
         };
 
         let difficulty = BeatmapDifficulty {
@@ -407,7 +421,11 @@ impl StableDatabase {
 
         LazerBeatmapInfo {
             id: format!("stable-{}", beatmap.beatmap_id),
-            online_id: if beatmap.beatmap_id > 0 { Some(beatmap.beatmap_id) } else { None },
+            online_id: if beatmap.beatmap_id > 0 {
+                Some(beatmap.beatmap_id)
+            } else {
+                None
+            },
             hash: String::new(), // osu!.db only has MD5, not SHA-256
             md5_hash: beatmap.hash.clone().unwrap_or_default(),
             metadata,
@@ -498,7 +516,10 @@ impl StableDatabase {
     }
 
     /// Get a beatmap by its MD5 hash
-    pub fn get_beatmap_by_md5(&self, md5: &str) -> Result<Option<(LazerBeatmapSet, LazerBeatmapInfo)>> {
+    pub fn get_beatmap_by_md5(
+        &self,
+        md5: &str,
+    ) -> Result<Option<(LazerBeatmapSet, LazerBeatmapInfo)>> {
         let sets = self.get_all_beatmap_sets()?;
         for set in sets {
             for beatmap in &set.beatmaps {
@@ -556,7 +577,10 @@ impl StableDatabase {
 
     /// Get the full path to a beatmap folder
     pub fn get_beatmap_folder_path(&self, beatmap: &osu_db::listing::Beatmap) -> Option<PathBuf> {
-        beatmap.folder_name.as_ref().map(|f| self.songs_path().join(f))
+        beatmap
+            .folder_name
+            .as_ref()
+            .map(|f| self.songs_path().join(f))
     }
 }
 
@@ -605,7 +629,9 @@ impl StableIndex {
 
     /// Get a beatmap set by online ID
     pub fn get_set(&self, online_id: i32) -> Option<&LazerBeatmapSet> {
-        self.by_online_id.get(&online_id).map(|&idx| &self.sets[idx])
+        self.by_online_id
+            .get(&online_id)
+            .map(|&idx| &self.sets[idx])
     }
 
     /// Get a beatmap by MD5 hash

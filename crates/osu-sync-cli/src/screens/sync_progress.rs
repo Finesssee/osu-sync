@@ -159,8 +159,7 @@ pub fn render(
     };
     let hint_line = Line::from(Span::styled(hint_text, Style::default().fg(SUBTLE)));
 
-    let stats_widget =
-        Paragraph::new(vec![stats_line, hint_line]).alignment(Alignment::Center);
+    let stats_widget = Paragraph::new(vec![stats_line, hint_line]).alignment(Alignment::Center);
     frame.render_widget(stats_widget, chunks[5]);
 }
 

@@ -12,8 +12,8 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use crate::error::{Error, Result};
 use super::Collection;
+use crate::error::{Error, Result};
 
 /// Reader for osu!stable collection.db files
 pub struct StableCollectionReader;
@@ -52,13 +52,15 @@ impl StableCollectionReader {
 
         for _ in 0..count {
             // Read collection name
-            let name = Self::read_string(reader)?
-                .unwrap_or_else(|| "Unnamed Collection".to_string());
+            let name =
+                Self::read_string(reader)?.unwrap_or_else(|| "Unnamed Collection".to_string());
 
             // Read beatmap count for this collection
             let beatmap_count = Self::read_i32(reader)?;
             if beatmap_count < 0 {
-                return Err(Error::Other("Invalid beatmap count in collection".to_string()));
+                return Err(Error::Other(
+                    "Invalid beatmap count in collection".to_string(),
+                ));
             }
 
             // Read beatmap hashes
@@ -110,7 +112,10 @@ impl StableCollectionReader {
             }
             other => {
                 // Some older formats might have different markers
-                Err(Error::Other(format!("Unknown string marker: 0x{:02x}", other)))
+                Err(Error::Other(format!(
+                    "Unknown string marker: 0x{:02x}",
+                    other
+                )))
             }
         }
     }
@@ -205,8 +210,14 @@ mod tests {
         assert_eq!(collections.len(), 1);
         assert_eq!(collections[0].name, "My Collection");
         assert_eq!(collections[0].beatmap_hashes.len(), 2);
-        assert_eq!(collections[0].beatmap_hashes[0], "d41d8cd98f00b204e9800998ecf8427e");
-        assert_eq!(collections[0].beatmap_hashes[1], "098f6bcd4621d373cade4e832627b4f6");
+        assert_eq!(
+            collections[0].beatmap_hashes[0],
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+        assert_eq!(
+            collections[0].beatmap_hashes[1],
+            "098f6bcd4621d373cade4e832627b4f6"
+        );
     }
 
     #[test]
@@ -239,7 +250,10 @@ mod tests {
         // Test small values (single byte)
         let data = vec![127u8]; // 127
         let mut cursor = Cursor::new(data);
-        assert_eq!(StableCollectionReader::read_uleb128(&mut cursor).unwrap(), 127);
+        assert_eq!(
+            StableCollectionReader::read_uleb128(&mut cursor).unwrap(),
+            127
+        );
     }
 
     #[test]
@@ -248,6 +262,9 @@ mod tests {
         // ULEB128: 0xAC 0x02 (172, 2)
         let data = vec![0xAC, 0x02];
         let mut cursor = Cursor::new(data);
-        assert_eq!(StableCollectionReader::read_uleb128(&mut cursor).unwrap(), 300);
+        assert_eq!(
+            StableCollectionReader::read_uleb128(&mut cursor).unwrap(),
+            300
+        );
     }
 }

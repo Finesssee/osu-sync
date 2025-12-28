@@ -110,9 +110,9 @@ impl AudioInfo {
         let file_size = content.len() as u64;
 
         // Estimate bitrate if we have duration
-        let bitrate_kbps = duration_ms.filter(|&d| d > 0).map(|d| {
-            ((file_size * 8) / (d / 1000).max(1)) as u32 / 1000
-        });
+        let bitrate_kbps = duration_ms
+            .filter(|&d| d > 0)
+            .map(|d| ((file_size * 8) / (d / 1000).max(1)) as u32 / 1000);
 
         Self {
             format,
@@ -339,7 +339,9 @@ mod tests {
         let mut result = ExtractionResult::new();
         assert!(!result.has_errors());
 
-        result.errors.push(("file.mp3".to_string(), "error".to_string()));
+        result
+            .errors
+            .push(("file.mp3".to_string(), "error".to_string()));
         assert!(result.has_errors());
     }
 

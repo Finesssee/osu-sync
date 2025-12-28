@@ -22,10 +22,7 @@ pub struct TuiResolver {
 impl TuiResolver {
     /// Create a new TUI resolver with the given channels
     #[allow(dead_code)]
-    pub fn new(
-        ui_tx: Sender<AppMessage>,
-        resolution_rx: Receiver<DuplicateResolution>,
-    ) -> Self {
+    pub fn new(ui_tx: Sender<AppMessage>, resolution_rx: Receiver<DuplicateResolution>) -> Self {
         Self {
             ui_tx,
             resolution_rx: Mutex::new(resolution_rx),
@@ -46,7 +43,11 @@ impl ConflictResolver for TuiResolver {
         }
 
         // Send duplicate info to UI thread
-        if self.ui_tx.send(AppMessage::DuplicateFound(duplicate.clone())).is_err() {
+        if self
+            .ui_tx
+            .send(AppMessage::DuplicateFound(duplicate.clone()))
+            .is_err()
+        {
             // Channel closed, default to skip
             return DuplicateResolution {
                 action: DuplicateAction::Skip,

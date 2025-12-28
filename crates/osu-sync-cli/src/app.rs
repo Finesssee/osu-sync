@@ -46,21 +46,35 @@ pub const SELECTION_BG: Color = Color::Rgb(69, 71, 90);
 // Helper functions for color access
 
 /// Get the pink accent color
-pub fn pink() -> Color { PINK }
+pub fn pink() -> Color {
+    PINK
+}
 /// Get the text color
-pub fn text_color() -> Color { TEXT }
+pub fn text_color() -> Color {
+    TEXT
+}
 /// Get the subtle/dimmed text color
-pub fn subtle_color() -> Color { SUBTLE }
+pub fn subtle_color() -> Color {
+    SUBTLE
+}
 /// Get the success color
-pub fn success_color() -> Color { SUCCESS }
+pub fn success_color() -> Color {
+    SUCCESS
+}
 /// Get the warning color
 #[allow(dead_code)]
-pub fn warning_color() -> Color { WARNING }
+pub fn warning_color() -> Color {
+    WARNING
+}
 /// Get the error color
 #[allow(dead_code)]
-pub fn error_color() -> Color { ERROR }
+pub fn error_color() -> Color {
+    ERROR
+}
 /// Get the selection background color
-pub fn selection_bg() -> Color { SELECTION_BG }
+pub fn selection_bg() -> Color {
+    SELECTION_BG
+}
 
 /// Log entry for sync operations
 #[derive(Debug, Clone)]
@@ -188,20 +202,31 @@ pub enum AppMessage {
 /// Messages from the UI to the background worker
 #[derive(Debug)]
 pub enum WorkerMessage {
-    StartScan { stable: bool, lazer: bool },
-    StartSync { direction: SyncDirection },
-    StartDryRun { direction: SyncDirection },
+    StartScan {
+        stable: bool,
+        lazer: bool,
+    },
+    StartSync {
+        direction: SyncDirection,
+    },
+    StartDryRun {
+        direction: SyncDirection,
+    },
     CalculateStats,
     ResolveDuplicate(osu_sync_core::dedup::DuplicateResolution),
     LoadCollections,
-    SyncCollections { strategy: CollectionSyncStrategy },
+    SyncCollections {
+        strategy: CollectionSyncStrategy,
+    },
     CreateBackup {
         target: BackupTarget,
         compression: CompressionLevel,
         mode: BackupMode,
     },
     LoadBackups,
-    RestoreBackup { backup_path: PathBuf },
+    RestoreBackup {
+        backup_path: PathBuf,
+    },
     // Media extraction
     StartMediaExtraction {
         media_type: MediaType,
@@ -481,7 +506,9 @@ impl App {
             AppState::BackupProgress { .. } => Some(("backup_progress", 0, false)),
             AppState::BackupComplete { .. } => Some(("backup_complete", 0, false)),
             AppState::RestoreConfig { selected, .. } => Some(("restore_config", *selected, false)),
-            AppState::RestoreConfirm { selected, .. } => Some(("restore_confirm", *selected, false)),
+            AppState::RestoreConfirm { selected, .. } => {
+                Some(("restore_confirm", *selected, false))
+            }
             AppState::RestoreProgress { .. } => Some(("restore_progress", 0, false)),
             AppState::RestoreComplete { .. } => Some(("restore_complete", 0, false)),
             AppState::MediaConfig { selected, .. } => Some(("media_config", *selected, false)),
@@ -689,7 +716,10 @@ impl App {
             FilterField::Search,
         ];
 
-        let current_idx = ALL_FIELDS.iter().position(|&f| f == filter_field).unwrap_or(0);
+        let current_idx = ALL_FIELDS
+            .iter()
+            .position(|&f| f == filter_field)
+            .unwrap_or(0);
 
         if event::is_down(&key) || event::is_right(&key) {
             // Navigate to next filter field
@@ -704,7 +734,11 @@ impl App {
             };
         } else if event::is_up(&key) || event::is_left(&key) {
             // Navigate to previous filter field
-            let prev_idx = if current_idx == 0 { ALL_FIELDS.len() - 1 } else { current_idx - 1 };
+            let prev_idx = if current_idx == 0 {
+                ALL_FIELDS.len() - 1
+            } else {
+                current_idx - 1
+            };
             self.state = AppState::SyncConfig {
                 selected,
                 stable_count,
@@ -739,7 +773,8 @@ impl App {
         } else {
             // Handle star rating adjustments
             match (filter_field, key.code) {
-                (FilterField::StarMin, KeyCode::Char('+')) | (FilterField::StarMin, KeyCode::Char('=')) => {
+                (FilterField::StarMin, KeyCode::Char('+'))
+                | (FilterField::StarMin, KeyCode::Char('=')) => {
                     let current = filter.star_rating_min.unwrap_or(0.0);
                     filter.star_rating_min = Some((current + 0.5).min(10.0));
                 }
@@ -752,7 +787,8 @@ impl App {
                         }
                     }
                 }
-                (FilterField::StarMax, KeyCode::Char('+')) | (FilterField::StarMax, KeyCode::Char('=')) => {
+                (FilterField::StarMax, KeyCode::Char('+'))
+                | (FilterField::StarMax, KeyCode::Char('=')) => {
                     let current = filter.star_rating_max.unwrap_or(0.0);
                     filter.star_rating_max = Some((current + 0.5).min(15.0));
                 }
@@ -1458,7 +1494,11 @@ impl App {
         let stable_path = saved_config
             .stable_path
             .map(|p| p.to_string_lossy().to_string())
-            .or_else(|| self.cached_stable_scan.as_ref().and_then(|s| s.path.clone()));
+            .or_else(|| {
+                self.cached_stable_scan
+                    .as_ref()
+                    .and_then(|s| s.path.clone())
+            });
 
         let lazer_path = saved_config
             .lazer_path
@@ -1619,12 +1659,10 @@ impl App {
                 .stable_path
                 .map(|p| p.join("Songs"))
                 .unwrap_or_else(|| PathBuf::from("Songs")),
-            BackupTarget::StableCollections | BackupTarget::StableScores => config
-                .stable_path
-                .unwrap_or_else(|| PathBuf::from(".")),
-            BackupTarget::LazerData => config
-                .lazer_path
-                .unwrap_or_else(|| PathBuf::from(".")),
+            BackupTarget::StableCollections | BackupTarget::StableScores => {
+                config.stable_path.unwrap_or_else(|| PathBuf::from("."))
+            }
+            BackupTarget::LazerData => config.lazer_path.unwrap_or_else(|| PathBuf::from(".")),
             BackupTarget::All => PathBuf::from("."),
         }
     }
@@ -1765,7 +1803,10 @@ impl App {
         if event::is_escape(&key) {
             self.go_to_restore_config();
         } else if event::is_left(&key) || event::is_right(&key) {
-            if let AppState::RestoreConfirm { backup, dest_path, .. } = &self.state {
+            if let AppState::RestoreConfirm {
+                backup, dest_path, ..
+            } = &self.state
+            {
                 self.state = AppState::RestoreConfirm {
                     backup: backup.clone(),
                     dest_path: dest_path.clone(),
@@ -2085,9 +2126,18 @@ impl App {
                     }
                     4 => {
                         // Start export
-                        let exportable: Vec<_> = replays.iter().filter(|r| r.has_replay_file).cloned().collect();
+                        let exportable: Vec<_> = replays
+                            .iter()
+                            .filter(|r| r.has_replay_file)
+                            .cloned()
+                            .collect();
                         if !exportable.is_empty() {
-                            self.start_replay_export(organization, &output_path, filter, &rename_pattern);
+                            self.start_replay_export(
+                                organization,
+                                &output_path,
+                                filter,
+                                &rename_pattern,
+                            );
                         }
                     }
                     _ => {}
@@ -2125,7 +2175,11 @@ impl App {
                 filter_field: next_field,
             };
         } else if event::is_up(&key) || event::is_left(&key) {
-            let prev_field = if filter_field == 0 { FILTER_FIELDS - 1 } else { filter_field - 1 };
+            let prev_field = if filter_field == 0 {
+                FILTER_FIELDS - 1
+            } else {
+                filter_field - 1
+            };
             self.state = AppState::ReplayConfig {
                 selected,
                 organization,
@@ -2432,15 +2486,14 @@ impl App {
                     };
                 }
                 AppMessage::RestoreProgress(progress) => {
-                    if let AppState::RestoreProgress {
-                        progress: p,
-                        ..
-                    } = &mut self.state
-                    {
+                    if let AppState::RestoreProgress { progress: p, .. } = &mut self.state {
                         *p = progress;
                     }
                 }
-                AppMessage::RestoreComplete { dest_path, files_restored } => {
+                AppMessage::RestoreComplete {
+                    dest_path,
+                    files_restored,
+                } => {
                     self.state = AppState::RestoreComplete {
                         dest_path,
                         files_restored,

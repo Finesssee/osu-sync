@@ -30,7 +30,6 @@ pub fn render_tabs(frame: &mut Frame, area: Rect, labels: &[&str], selected: usi
         })
         .collect();
 
-    let tabs = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Center);
+    let tabs = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
     frame.render_widget(tabs, area);
 }

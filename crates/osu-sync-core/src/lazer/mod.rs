@@ -21,12 +21,12 @@
 //! # Ok::<(), osu_sync_core::error::Error>(())
 //! ```
 
-mod file_store;
 mod database;
-mod importer;
 mod exporter;
+mod file_store;
+mod importer;
 
-pub use file_store::*;
 pub use database::*;
-pub use importer::*;
 pub use exporter::*;
+pub use file_store::*;
+pub use importer::*;

@@ -99,7 +99,11 @@ impl DuplicateDetector {
     }
 
     /// Find duplicates by beatmap set ID
-    fn find_by_set_id(&self, source: &BeatmapSet, existing: &[BeatmapSet]) -> Option<DuplicateInfo> {
+    fn find_by_set_id(
+        &self,
+        source: &BeatmapSet,
+        existing: &[BeatmapSet],
+    ) -> Option<DuplicateInfo> {
         if let Some(source_id) = source.id {
             for existing_set in existing {
                 if existing_set.id == Some(source_id) {
@@ -116,7 +120,11 @@ impl DuplicateDetector {
     }
 
     /// Find duplicates by metadata (title + artist + creator)
-    fn find_by_metadata(&self, source: &BeatmapSet, existing: &[BeatmapSet]) -> Option<DuplicateInfo> {
+    fn find_by_metadata(
+        &self,
+        source: &BeatmapSet,
+        existing: &[BeatmapSet],
+    ) -> Option<DuplicateInfo> {
         let source_meta = source.metadata()?;
 
         for existing_set in existing {
@@ -135,7 +143,11 @@ impl DuplicateDetector {
     }
 
     /// Composite detection: try all methods
-    fn find_composite(&self, source: &BeatmapSet, existing: &[BeatmapSet]) -> Option<DuplicateInfo> {
+    fn find_composite(
+        &self,
+        source: &BeatmapSet,
+        existing: &[BeatmapSet],
+    ) -> Option<DuplicateInfo> {
         // Try in order of confidence
         self.find_by_hash(source, existing)
             .or_else(|| self.find_by_set_id(source, existing))
