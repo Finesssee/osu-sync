@@ -1,9 +1,10 @@
 //! osu-sync - Beatmap synchronization tool for osu!stable and osu!lazer
 //!
 //! Usage:
-//!   osu-sync          Run TUI mode (default)
-//!   osu-sync --gui    Run GUI mode (requires 'gui' feature)
-//!   osu-sync --help   Show help
+//!   osu-sync              Run TUI mode (default)
+//!   osu-sync --gui        Run GUI mode (requires 'gui' feature)
+//!   osu-sync --cli <cmd>  Run CLI mode (headless)
+//!   osu-sync --help       Show help
 
 use std::fs::File;
 use std::sync::mpsc;
@@ -14,6 +15,7 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::FmtSubscriber;
 
 mod app;
+mod cli;
 mod event;
 mod gui;
 mod resolver;
@@ -33,6 +35,29 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
         return Ok(());
+    }
+
+    // Check for --cli flag
+    if let Some(cli_pos) = args.iter().position(|a| a == "--cli") {
+        // Get args after --cli
+        let cli_args: Vec<String> = args.iter().skip(cli_pos + 1).cloned().collect();
+
+        if cli_args.is_empty() || cli_args.iter().any(|a| a == "--help" || a == "-h") {
+            cli::print_help();
+            return Ok(());
+        }
+
+        match cli::parse_args(&cli_args) {
+            Ok((command, options)) => {
+                return cli::run(command, options);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                eprintln!();
+                cli::print_help();
+                std::process::exit(1);
+            }
+        }
     }
 
     // Check for --gui flag
@@ -66,10 +91,13 @@ fn print_help() {
     println!("    osu-sync [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    --gui     Run in GUI mode (requires 'gui' feature)");
-    println!("    --help    Show this help message");
+    println!("    --gui           Run in GUI mode (requires 'gui' feature)");
+    println!("    --cli <cmd>     Run in CLI mode (headless, for scripting)");
+    println!("    --help          Show this help message");
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
+    println!();
+    println!("For CLI mode help: osu-sync --cli --help");
 }
 
 fn init_logging() {
@@ -100,8 +128,11 @@ fn run() -> anyhow::Result<()> {
     let (app_tx, app_rx) = mpsc::channel();
     let worker = Worker::spawn(app_tx);
 
-    // Create app with channels
-    let mut app = App::new().with_channels(worker.sender(), app_rx);
+    // Create app with channels and cancellation flag
+    let mut app = App::new().with_channels(worker.sender(), app_rx, worker.cancellation_flag());
+
+    // Auto-scan installations on startup
+    app.start_scan();
 
     // Main event loop
     loop {
