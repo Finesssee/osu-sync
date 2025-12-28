@@ -172,6 +172,7 @@ impl StableReplayReader {
                     } else {
                         Some(beatmap_artist)
                     },
+                    beatmap_version: None, // Not available from scores.db
                 };
 
                 replays.push(replay_info);

@@ -3,10 +3,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::beatmap::GameMode;
 use crate::error::Result;
 
+use super::filter::ReplayFilter;
 use super::model::{
-    ExportOrganization, ReplayExportResult, ReplayInfo, ReplayProgress, ReplayProgressCallback,
+    ExportOrganization, ReplayExportResult, ReplayExportStats, ReplayInfo, ReplayProgress,
+    ReplayProgressCallback,
 };
 
 /// Exporter for replay files
@@ -17,6 +20,10 @@ pub struct ReplayExporter {
     organization: ExportOrganization,
     /// Progress callback
     progress_callback: Option<ReplayProgressCallback>,
+    /// Optional filter to apply before export
+    filter: Option<ReplayFilter>,
+    /// Optional rename pattern for output files
+    rename_pattern: Option<String>,
 }
 
 impl ReplayExporter {
@@ -26,6 +33,8 @@ impl ReplayExporter {
             output_path: output_path.as_ref().to_path_buf(),
             organization: ExportOrganization::default(),
             progress_callback: None,
+            filter: None,
+            rename_pattern: None,
         }
     }
 
@@ -41,15 +50,48 @@ impl ReplayExporter {
         self
     }
 
+    /// Set filter to apply before export
+    pub fn with_filter(mut self, filter: ReplayFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Set rename pattern for output files
+    ///
+    /// Supported placeholders:
+    /// - {artist} - Beatmap artist
+    /// - {title} - Beatmap title
+    /// - {diff} - Difficulty name
+    /// - {grade} - Grade achieved (SS, S, A, etc.)
+    /// - {date} - Date of the play (YYYY-MM-DD)
+    /// - {player} - Player name
+    /// - {score} - Score achieved
+    /// - {mode} - Game mode (osu, taiko, catch, mania)
+    /// - {hash} - Beatmap hash (first 8 chars)
+    pub fn with_rename_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.rename_pattern = Some(pattern.into());
+        self
+    }
+
     /// Export replays
     pub fn export(&self, replays: &[ReplayInfo]) -> Result<ReplayExportResult> {
+        // Apply filter if set
+        let original_count = replays.len();
+        let filtered_replays: Vec<ReplayInfo> = if let Some(ref filter) = self.filter {
+            filter.apply(replays)
+        } else {
+            replays.to_vec()
+        };
+        let filtered_count = original_count - filtered_replays.len();
+
         // Create output directory
         fs::create_dir_all(&self.output_path)?;
 
         let mut result = ReplayExportResult::new();
-        let total = replays.len();
+        result.replays_filtered = filtered_count;
+        let total = filtered_replays.len();
 
-        for (i, replay) in replays.iter().enumerate() {
+        for (i, replay) in filtered_replays.iter().enumerate() {
             // Report progress
             if let Some(ref callback) = self.progress_callback {
                 let display_name = replay
@@ -116,6 +158,9 @@ impl ReplayExporter {
             });
         }
 
+        // Build statistics
+        result.stats = Some(ReplayExportStats::from_replays(&filtered_replays, &result));
+
         Ok(result)
     }
 
@@ -156,6 +201,12 @@ impl ReplayExporter {
 
     /// Generate a filename for a replay
     fn generate_filename(&self, replay: &ReplayInfo) -> String {
+        // Use custom pattern if set
+        if let Some(ref pattern) = self.rename_pattern {
+            return self.apply_rename_pattern(pattern, replay);
+        }
+
+        // Default naming
         let base_name = if let Some(ref title) = replay.beatmap_title {
             let artist = replay.beatmap_artist.as_deref().unwrap_or("Unknown");
             format!(
@@ -177,10 +228,47 @@ impl ReplayExporter {
 
         base_name
     }
+
+    /// Apply rename pattern to generate filename
+    fn apply_rename_pattern(&self, pattern: &str, replay: &ReplayInfo) -> String {
+        let artist = replay.beatmap_artist.as_deref().unwrap_or("Unknown");
+        let title = replay.beatmap_title.as_deref().unwrap_or("Unknown");
+        let diff = replay.beatmap_version.as_deref().unwrap_or("Unknown");
+        let date = format_date(replay.timestamp);
+        let mode = match replay.mode {
+            GameMode::Osu => "osu",
+            GameMode::Taiko => "taiko",
+            GameMode::Catch => "catch",
+            GameMode::Mania => "mania",
+        };
+        let hash_short = if replay.beatmap_hash.len() >= 8 {
+            &replay.beatmap_hash[..8]
+        } else {
+            &replay.beatmap_hash
+        };
+
+        let mut result = pattern.to_string();
+        result = result.replace("{artist}", &sanitize_filename(artist));
+        result = result.replace("{title}", &sanitize_filename(title));
+        result = result.replace("{diff}", &sanitize_filename(diff));
+        result = result.replace("{grade}", replay.grade.as_str());
+        result = result.replace("{date}", &date);
+        result = result.replace("{player}", &sanitize_filename(&replay.player_name));
+        result = result.replace("{score}", &replay.score.to_string());
+        result = result.replace("{mode}", mode);
+        result = result.replace("{hash}", hash_short);
+
+        // Ensure .osr extension
+        if !result.ends_with(".osr") {
+            result.push_str(".osr");
+        }
+
+        result
+    }
 }
 
 /// Sanitize a string for use as a filename
-fn sanitize_filename(name: &str) -> String {
+pub fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
@@ -231,7 +319,6 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::beatmap::GameMode;
     use crate::replay::Grade;
 
     #[test]
@@ -297,6 +384,7 @@ mod tests {
             replay_path: Some("/path/to/replay.osr".to_string()),
             beatmap_title: title.map(String::from),
             beatmap_artist: artist.map(String::from),
+            beatmap_version: Some("Hard".to_string()),
         }
     }
 
@@ -337,6 +425,30 @@ mod tests {
     }
 
     #[test]
+    fn test_rename_pattern() {
+        let exporter =
+            ReplayExporter::new("/output").with_rename_pattern("{artist} - {title} [{grade}]");
+        let replay = make_test_replay(Some("Test Song"), Some("Test Artist"), Grade::S, 1000000);
+
+        let filename = exporter.generate_filename(&replay);
+        assert_eq!(filename, "Test Artist - Test Song [S].osr");
+    }
+
+    #[test]
+    fn test_rename_pattern_all_placeholders() {
+        let exporter = ReplayExporter::new("/output")
+            .with_rename_pattern("{player}_{date}_{mode}_{grade}_{score}");
+        let replay = make_test_replay(Some("Test Song"), Some("Test Artist"), Grade::SS, 12345);
+
+        let filename = exporter.generate_filename(&replay);
+        assert!(filename.contains("TestPlayer"));
+        assert!(filename.contains("2023-12-31"));
+        assert!(filename.contains("osu"));
+        assert!(filename.contains("SS"));
+        assert!(filename.contains("12345"));
+    }
+
+    #[test]
     fn test_get_output_path_flat() {
         let exporter = ReplayExporter::new("/output").with_organization(ExportOrganization::Flat);
         let replay = make_test_replay(Some("Song"), Some("Artist"), Grade::A, 100);
@@ -348,7 +460,8 @@ mod tests {
 
     #[test]
     fn test_get_output_path_by_grade() {
-        let exporter = ReplayExporter::new("/output").with_organization(ExportOrganization::ByGrade);
+        let exporter =
+            ReplayExporter::new("/output").with_organization(ExportOrganization::ByGrade);
         let replay = make_test_replay(Some("Song"), Some("Artist"), Grade::SS, 100);
 
         let path = exporter.get_output_path(&replay).unwrap();
@@ -357,7 +470,8 @@ mod tests {
 
     #[test]
     fn test_get_output_path_by_player() {
-        let exporter = ReplayExporter::new("/output").with_organization(ExportOrganization::ByPlayer);
+        let exporter =
+            ReplayExporter::new("/output").with_organization(ExportOrganization::ByPlayer);
         let replay = make_test_replay(Some("Song"), Some("Artist"), Grade::A, 100);
 
         let path = exporter.get_output_path(&replay).unwrap();
@@ -366,8 +480,8 @@ mod tests {
 
     #[test]
     fn test_exporter_builder_pattern() {
-        let exporter = ReplayExporter::new("/output")
-            .with_organization(ExportOrganization::ByBeatmap);
+        let exporter =
+            ReplayExporter::new("/output").with_organization(ExportOrganization::ByBeatmap);
 
         // Verify the exporter was constructed correctly
         let replay = make_test_replay(Some("TestSong"), Some("Artist"), Grade::A, 100);
@@ -411,5 +525,22 @@ mod tests {
         let result = exporter.export(&[replay]).unwrap();
         assert_eq!(result.replays_exported, 0);
         assert_eq!(result.replays_skipped, 1);
+    }
+
+    #[test]
+    fn test_export_with_filter() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let filter = ReplayFilter::new().with_min_grade(Grade::S);
+        let exporter = ReplayExporter::new(temp_dir.path()).with_filter(filter);
+
+        let ss_replay = make_test_replay(Some("Song1"), Some("Artist"), Grade::SS, 100);
+        let a_replay = make_test_replay(Some("Song2"), Some("Artist"), Grade::A, 200);
+
+        let replays = vec![ss_replay, a_replay];
+        let result = exporter.export(&replays).unwrap();
+
+        // Only SS replay should pass filter, but since file doesn't exist, it'll be skipped
+        // The A replay should be filtered out
+        assert_eq!(result.replays_filtered, 1); // A was filtered
     }
 }
