@@ -37,6 +37,7 @@ impl OsuSyncApp {
 
 /// Stub when GUI feature is not enabled
 #[cfg(not(feature = "gui"))]
+#[allow(dead_code)]
 pub fn run() -> anyhow::Result<()> {
     eprintln!("GUI mode requires the 'gui' feature. Build with: cargo build --features gui");
     eprintln!("Or use the TUI mode (default): osu-sync");
