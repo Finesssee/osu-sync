@@ -7,6 +7,44 @@ pub use paths::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Theme name for UI customization
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeName {
+    /// Default osu! pink theme
+    #[default]
+    Default,
+    /// Ocean blue theme
+    Ocean,
+    /// Monochrome grayscale theme
+    Monochrome,
+}
+
+impl ThemeName {
+    /// Get the display name for this theme
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ThemeName::Default => "Default (Pink)",
+            ThemeName::Ocean => "Ocean (Blue)",
+            ThemeName::Monochrome => "Monochrome",
+        }
+    }
+
+    /// Cycle to the next theme
+    pub fn next(&self) -> ThemeName {
+        match self {
+            ThemeName::Default => ThemeName::Ocean,
+            ThemeName::Ocean => ThemeName::Monochrome,
+            ThemeName::Monochrome => ThemeName::Default,
+        }
+    }
+}
+
+impl std::fmt::Display for ThemeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
 /// Configuration for osu-sync
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -16,6 +54,9 @@ pub struct Config {
     pub lazer_path: Option<PathBuf>,
     /// Default duplicate handling strategy
     pub duplicate_strategy: DuplicateStrategy,
+    /// UI theme preference
+    #[serde(default)]
+    pub theme: ThemeName,
 }
 
 /// Strategy for handling duplicate beatmaps
@@ -38,6 +79,7 @@ impl Default for Config {
             stable_path: detect_stable_path(),
             lazer_path: detect_lazer_path(),
             duplicate_strategy: DuplicateStrategy::Ask,
+            theme: ThemeName::Default,
         }
     }
 }

@@ -37,6 +37,7 @@
 //! ```
 
 // Module declarations
+pub mod activity;
 pub mod backup;
 pub mod beatmap;
 pub mod collection;
@@ -89,14 +90,14 @@ pub use dedup::{
 // Sync engine
 pub use sync::{
     format_bytes, AutoResolver, ConfigBasedResolver, ConflictResolver, DryRunAction, DryRunItem,
-    DryRunResult, InteractiveResolver, ProgressCallback, SmartResolver, SyncDirection, SyncEngine,
-    SyncEngineBuilder, SyncError, SyncPhase, SyncProgress, SyncResult,
+    DryRunResult, InteractiveResolver, ProgressCallback, SkipList, SmartResolver, SyncDirection,
+    SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress, SyncResult,
 };
 
 // Statistics
 pub use stats::{
-    export_csv, export_json, ComparisonStats, DuplicateStats, ExportFormat, InstallationStats,
-    RankedStatus, StarRatingBucket, StatsAnalyzer,
+    export_csv, export_html, export_json, ComparisonStats, DuplicateStats, ExportFormat,
+    HtmlExport, InstallationStats, RankedStatus, StarRatingBucket, StatsAnalyzer,
 };
 
 // Filtering
@@ -110,7 +111,9 @@ pub use collection::{
 
 // Backup
 pub use backup::{
-    BackupInfo, BackupManager, BackupPhase, BackupProgress, BackupProgressCallback, BackupTarget,
+    BackupFileInfo, BackupInfo, BackupManager, BackupPhase, BackupProgress, BackupProgressCallback,
+    BackupTarget, BackupVerificationResult, IssueSeverity, RestoreMode, RestoreOptions,
+    RestorePreview, VerificationIssue, VerificationStatus,
 };
 
 // Media extraction
@@ -124,3 +127,6 @@ pub use replay::{
     ExportOrganization as ReplayOrganization, Grade, ReplayExportResult, ReplayExporter,
     ReplayInfo, ReplayProgress, ReplayProgressCallback, ReplayStats, StableReplayReader,
 };
+
+// Activity log
+pub use activity::{ActivityEntry, ActivityLog, ActivityType, MAX_LOG_ENTRIES};
