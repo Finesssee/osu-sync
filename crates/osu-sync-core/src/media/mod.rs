@@ -5,6 +5,6 @@ mod types;
 
 pub use extractor::MediaExtractor;
 pub use types::{
-    ExtractionProgress, ExtractionProgressCallback, ExtractionResult, ExtractionSource, MediaType,
-    OutputOrganization,
+    AudioFormat, AudioInfo, AudioMetadata, ExtractionProgress, ExtractionProgressCallback,
+    ExtractionResult, ExtractionSource, ImageSizeCategory, MediaType, OutputOrganization,
 };
