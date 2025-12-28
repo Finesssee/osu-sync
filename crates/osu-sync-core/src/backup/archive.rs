@@ -4,11 +4,25 @@ use crate::error::{Error, Result};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use super::{BackupPhase, BackupProgress, BackupProgressCallback, BackupTarget};
+use super::{
+    compute_simple_hash, BackupManifest, BackupMetadata, BackupMode, BackupOptions, BackupPhase,
+    BackupProgress, BackupProgressCallback, BackupTarget, CompressionLevel, ManifestEntry,
+};
+
+/// Result of a backup operation including the generated manifest
+pub struct BackupResult {
+    /// The manifest for this backup
+    pub manifest: BackupManifest,
+    /// Number of files included
+    pub files_included: usize,
+    /// Total bytes of original files
+    pub total_size: u64,
+}
 
 /// Create a backup archive from a source directory
 pub fn create_backup_archive(
@@ -158,6 +172,221 @@ pub fn create_backup_archive(
     }
 
     Ok(())
+}
+
+/// Create a backup archive with full options support
+pub fn create_backup_archive_with_options(
+    source: &Path,
+    dest: &Path,
+    target: BackupTarget,
+    options: &BackupOptions,
+    previous_manifest: Option<&BackupManifest>,
+    progress: Option<BackupProgressCallback>,
+) -> Result<BackupResult> {
+    // Notify scanning phase
+    if let Some(ref cb) = progress {
+        cb(BackupProgress {
+            phase: BackupPhase::Scanning,
+            files_processed: 0,
+            total_files: None,
+            bytes_written: 0,
+            current_file: None,
+        });
+    }
+
+    // Check if source is a file or directory
+    let is_file = source.is_file();
+
+    // Collect files to backup and compute hashes for incremental comparison
+    let files_to_backup: Vec<(std::path::PathBuf, String, u64, String)> = if is_file {
+        let hash = compute_simple_hash(source).unwrap_or_default();
+        let modified = source
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filename = source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("backup")
+            .to_string();
+
+        // Check if file changed for incremental
+        let should_include = match (options.mode, previous_manifest) {
+            (BackupMode::Incremental, Some(manifest)) => {
+                manifest.file_changed(&filename, modified, &hash)
+            }
+            _ => true,
+        };
+
+        if should_include {
+            vec![(source.to_path_buf(), filename, modified, hash)]
+        } else {
+            vec![]
+        }
+    } else if source.is_dir() {
+        let mut files = Vec::new();
+        for entry in WalkDir::new(source) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                let relative_path = path
+                    .strip_prefix(source)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                let hash = compute_simple_hash(path).unwrap_or_default();
+                let modified = path
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                // Check if file changed for incremental
+                let should_include = match (options.mode, previous_manifest) {
+                    (BackupMode::Incremental, Some(manifest)) => {
+                        manifest.file_changed(&relative_path, modified, &hash)
+                    }
+                    _ => true,
+                };
+
+                if should_include {
+                    files.push((path.to_path_buf(), relative_path, modified, hash));
+                }
+            }
+        }
+        files
+    } else {
+        return Err(Error::Other(format!(
+            "Source path does not exist: {}",
+            source.display()
+        )));
+    };
+
+    let total_files = files_to_backup.len();
+
+    // Create the zip file
+    let file = File::create(dest)?;
+    let mut zip = ZipWriter::new(file);
+
+    // Set compression options based on compression level
+    let compression_method = match options.compression {
+        CompressionLevel::Fast => CompressionMethod::Stored,
+        _ => CompressionMethod::Deflated,
+    };
+
+    let zip_options = SimpleFileOptions::default()
+        .compression_method(compression_method)
+        .compression_level(Some(options.compression.to_zip_level() as i64));
+
+    let mut files_processed = 0usize;
+    let mut bytes_written = 0u64;
+    let mut total_size = 0u64;
+
+    // Create manifest for this backup
+    let base_backup = previous_manifest
+        .and_then(|m| m.base_backup.clone())
+        .or_else(|| {
+            if options.mode == BackupMode::Incremental && previous_manifest.is_some() {
+                Some("previous_backup".to_string())
+            } else {
+                None
+            }
+        });
+
+    let mut manifest =
+        BackupManifest::new(target, options.mode == BackupMode::Incremental, base_backup.clone());
+
+    // Notify archiving phase
+    if let Some(ref cb) = progress {
+        cb(BackupProgress {
+            phase: BackupPhase::Archiving,
+            files_processed: 0,
+            total_files: Some(total_files),
+            bytes_written: 0,
+            current_file: None,
+        });
+    }
+
+    // Add files to archive
+    for (path, relative_path, modified, hash) in &files_to_backup {
+        let file_size = add_file_to_zip(&mut zip, path, relative_path, zip_options)?;
+        files_processed += 1;
+        bytes_written += file_size;
+        total_size += file_size;
+
+        // Add to manifest
+        manifest.add_entry(ManifestEntry {
+            path: relative_path.clone(),
+            modified: *modified,
+            hash: hash.clone(),
+            size: file_size,
+        });
+
+        if let Some(ref cb) = progress {
+            cb(BackupProgress {
+                phase: BackupPhase::Archiving,
+                files_processed,
+                total_files: Some(total_files),
+                bytes_written,
+                current_file: Some(relative_path.clone()),
+            });
+        }
+    }
+
+    // Add backup_info.json metadata file
+    let metadata = BackupMetadata::new(
+        target,
+        options.mode,
+        options.compression,
+        files_processed,
+        total_size,
+        base_backup,
+    );
+
+    let metadata_json = metadata.to_json_bytes()?;
+    zip.start_file("backup_info.json", zip_options)?;
+    zip.write_all(&metadata_json)?;
+
+    // Notify finalizing phase
+    if let Some(ref cb) = progress {
+        cb(BackupProgress {
+            phase: BackupPhase::Finalizing,
+            files_processed,
+            total_files: Some(total_files),
+            bytes_written,
+            current_file: None,
+        });
+    }
+
+    // Finish the archive
+    zip.finish()?;
+
+    // Notify complete
+    if let Some(ref cb) = progress {
+        cb(BackupProgress {
+            phase: BackupPhase::Complete,
+            files_processed,
+            total_files: Some(total_files),
+            bytes_written,
+            current_file: None,
+        });
+    }
+
+    Ok(BackupResult {
+        manifest,
+        files_included: files_processed,
+        total_size,
+    })
 }
 
 /// Add a file to a zip archive
