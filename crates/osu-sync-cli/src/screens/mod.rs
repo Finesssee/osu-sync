@@ -6,7 +6,7 @@ mod collection_config;
 mod collection_summary;
 mod collection_sync;
 mod config;
-mod dry_run_preview;
+pub mod dry_run_preview;
 mod duplicate_dialog;
 mod help;
 mod main_menu;
@@ -18,6 +18,9 @@ mod statistics;
 mod sync_config;
 mod sync_progress;
 mod sync_summary;
+pub mod unified_config;
+pub mod unified_setup;
+pub mod unified_status;
 
 use crate::app::{App, AppState};
 use crate::widgets;
@@ -170,6 +173,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             direction,
             selected_item,
             scroll_offset,
+            checked_items,
+            filter_text,
+            filter_mode,
         } => {
             dry_run_preview::render(
                 frame,
@@ -178,6 +184,9 @@ pub fn render(frame: &mut Frame, app: &App) {
                 *direction,
                 *selected_item,
                 *scroll_offset,
+                checked_items,
+                filter_text,
+                *filter_mode,
             );
         }
         AppState::BackupConfig {
@@ -314,6 +323,15 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppState::ReplayComplete { result, stats } => {
             replay::render_complete(frame, chunks[1], result, stats);
         }
+        AppState::UnifiedConfig { screen } => {
+            unified_config::render(frame, chunks[1], screen);
+        }
+        AppState::UnifiedSetup { screen } => {
+            screen.render(frame, chunks[1]);
+        }
+        AppState::UnifiedStatus { screen } => {
+            unified_status::render(frame, chunks[1], screen);
+        }
         AppState::Help { previous_state } => {
             // Render the previous screen behind the help modal
             render_state(frame, chunks[1], previous_state, app);
@@ -445,6 +463,9 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             direction,
             selected_item,
             scroll_offset,
+            checked_items,
+            filter_text,
+            filter_mode,
         } => {
             dry_run_preview::render(
                 frame,
@@ -453,6 +474,9 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
                 *direction,
                 *selected_item,
                 *scroll_offset,
+                checked_items,
+                filter_text,
+                *filter_mode,
             );
         }
         AppState::BackupConfig {
@@ -582,6 +606,15 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
         AppState::ReplayComplete { result, stats } => {
             replay::render_complete(frame, area, result, stats);
         }
+        AppState::UnifiedConfig { screen } => {
+            unified_config::render(frame, area, screen);
+        }
+        AppState::UnifiedSetup { screen } => {
+            screen.render(frame, area);
+        }
+        AppState::UnifiedStatus { screen } => {
+            unified_status::render(frame, area, screen);
+        }
         AppState::Help { previous_state } => {
             // Recursively render the previous state
             render_state(frame, area, previous_state, app);
@@ -653,14 +686,31 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         ],
         AppState::CollectionSync { .. } => vec![("Esc", "Cancel")],
         AppState::CollectionSummary { .. } => vec![("Enter", "Back to Menu")],
-        AppState::DryRunPreview { result, .. } => {
-            if result.has_imports() {
+        AppState::DryRunPreview { result, filter_mode, checked_items, .. } => {
+            if *filter_mode {
                 vec![
-                    ("Enter", "Proceed"),
-                    ("j/k", "Navigate"),
-                    ("PgUp/PgDn", "Page"),
-                    ("Esc", "Cancel"),
+                    ("Enter", "Apply"),
+                    ("Esc", "Clear"),
+                    ("", "Type to search..."),
                 ]
+            } else if result.has_imports() {
+                if checked_items.is_empty() {
+                    vec![
+                        ("Enter", "Sync Current"),
+                        ("Space", "Toggle"),
+                        ("/", "Search"),
+                        ("Ctrl+A", "Select All"),
+                        ("Esc", "Back"),
+                    ]
+                } else {
+                    vec![
+                        ("Enter", "Sync Selected"),
+                        ("Space", "Toggle"),
+                        ("/", "Search"),
+                        ("Ctrl+D", "Clear"),
+                        ("Esc", "Back"),
+                    ]
+                }
             } else {
                 vec![("Enter/Esc", "Back")]
             }
@@ -707,6 +757,18 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         ],
         AppState::ReplayProgress { .. } => vec![("Esc", "Cancel")],
         AppState::ReplayComplete { .. } => vec![("Enter", "Back to Menu")],
+        AppState::UnifiedConfig { .. } => vec![
+            ("Enter", "Select/Toggle"),
+            ("Tab", "Next Section"),
+            ("j/k", "Navigate"),
+            ("Esc", "Back"),
+        ],
+        AppState::UnifiedSetup { .. } => vec![("Esc", "Cancel")],
+        AppState::UnifiedStatus { .. } => vec![
+            ("Enter", "Action"),
+            ("←/→", "Navigate"),
+            ("Esc", "Back"),
+        ],
         AppState::Help { .. } => vec![("Any key", "Close")],
         AppState::Exiting => vec![],
     }

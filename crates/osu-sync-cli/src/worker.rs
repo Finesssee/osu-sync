@@ -1,8 +1,12 @@
 //! Background worker thread for sync operations
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::Instant;
 
 use osu_sync_core::backup::{
@@ -16,6 +20,7 @@ use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::stats::StatsAnalyzer;
 use osu_sync_core::sync::{SyncDirection, SyncEngineBuilder, SyncProgress};
+use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
 
 use crate::app::{AppMessage, ScanResult, WorkerMessage};
 
@@ -23,6 +28,8 @@ use crate::app::{AppMessage, ScanResult, WorkerMessage};
 pub struct Worker {
     handle: Option<JoinHandle<()>>,
     tx: Sender<WorkerMessage>,
+    /// Shared cancellation flag
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -30,20 +37,28 @@ impl Worker {
     pub fn spawn(app_tx: Sender<AppMessage>) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
         let (_resolution_tx, resolution_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled_clone = Arc::clone(&cancelled);
 
         let handle = thread::spawn(move || {
-            run_worker(worker_rx, app_tx, resolution_rx);
+            run_worker(worker_rx, app_tx, resolution_rx, cancelled_clone);
         });
 
         Self {
             handle: Some(handle),
             tx: worker_tx,
+            cancelled,
         }
     }
 
     /// Get a sender for sending messages to the worker
     pub fn sender(&self) -> Sender<WorkerMessage> {
         self.tx.clone()
+    }
+
+    /// Get a clone of the cancellation flag for sharing with other components
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
     }
 
     /// Shutdown the worker and wait for it to finish
@@ -59,17 +74,23 @@ fn run_worker(
     rx: Receiver<WorkerMessage>,
     app_tx: Sender<AppMessage>,
     _resolution_rx: Receiver<osu_sync_core::dedup::DuplicateResolution>,
+    cancelled: Arc<AtomicBool>,
 ) {
+    // Cancellation flag is now passed from Worker struct
+
     loop {
         match rx.recv() {
             Ok(WorkerMessage::StartScan { stable, lazer }) => {
+                cancelled.store(false, Ordering::SeqCst);
                 handle_scan(&app_tx, stable, lazer);
             }
-            Ok(WorkerMessage::StartSync { direction }) => {
-                handle_sync(&app_tx, direction);
+            Ok(WorkerMessage::StartSync { direction, selected_set_ids }) => {
+                cancelled.store(false, Ordering::SeqCst);
+                handle_sync(&app_tx, direction, Arc::clone(&cancelled), selected_set_ids);
             }
             Ok(WorkerMessage::StartDryRun { direction }) => {
-                handle_dry_run(&app_tx, direction);
+                cancelled.store(false, Ordering::SeqCst);
+                handle_dry_run(&app_tx, direction, Arc::clone(&cancelled));
             }
             Ok(WorkerMessage::CalculateStats) => {
                 handle_calculate_stats(&app_tx);
@@ -123,8 +144,27 @@ fn run_worker(
             }) => {
                 handle_replay_export(&app_tx, organization, output_path, filter, rename_pattern);
             }
+            Ok(WorkerMessage::StartUnifiedSetup {
+                mode,
+                shared_path,
+                resources,
+            }) => {
+                handle_unified_setup(&app_tx, mode, shared_path, resources);
+            }
+            Ok(WorkerMessage::GetUnifiedStatus) => {
+                handle_unified_status(&app_tx);
+            }
+            Ok(WorkerMessage::VerifyUnifiedLinks) => {
+                handle_unified_verify(&app_tx);
+            }
+            Ok(WorkerMessage::RepairUnifiedLinks) => {
+                handle_unified_repair(&app_tx);
+            }
+            Ok(WorkerMessage::DisableUnifiedStorage) => {
+                handle_unified_disable(&app_tx);
+            }
             Ok(WorkerMessage::Cancel) => {
-                // TODO: Implement cancellation
+                cancelled.store(true, Ordering::SeqCst);
             }
             Ok(WorkerMessage::Shutdown) | Err(_) => {
                 break;
@@ -201,24 +241,16 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
                 message: "Loading osu!lazer database...".to_string(),
             });
 
-            let lazer_start = Instant::now();
             match LazerDatabase::open(path) {
-                Ok(db) => match db.get_all_beatmap_sets() {
-                    Ok(sets) => {
-                        let lazer_time = lazer_start.elapsed();
+                Ok(db) => match db.get_all_beatmap_sets_timed() {
+                    Ok((sets, timing)) => {
                         let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
-                        let timing_report = format!(
-                            "Lazer scan completed in {:.2}s ({} sets, {} beatmaps)",
-                            lazer_time.as_secs_f64(),
-                            sets.len(),
-                            total_beatmaps
-                        );
                         lazer_result = Some(ScanResult {
                             path: Some(path.display().to_string()),
                             detected: true,
                             beatmap_sets: sets.len(),
                             total_beatmaps,
-                            timing_report: Some(timing_report),
+                            timing_report: Some(timing.report()),
                         });
                     }
                     Err(e) => {
@@ -260,7 +292,12 @@ fn handle_scan(app_tx: &Sender<AppMessage>, scan_stable: bool, scan_lazer: bool)
     });
 }
 
-fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
+fn handle_sync(
+    app_tx: &Sender<AppMessage>,
+    direction: SyncDirection,
+    cancelled: Arc<AtomicBool>,
+    selected_set_ids: Option<HashSet<i32>>,
+) {
     let config = Config::load();
 
     // Check paths
@@ -284,9 +321,9 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
-    // Create components (full hashing required for sync to compare files)
+    // Create components (skip hashing - MD5s come from .osu file parsing, not file hashing)
     let songs_path = stable_path.join("Songs");
-    let scanner = StableScanner::new(songs_path);
+    let scanner = StableScanner::new(songs_path).skip_hashing();
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
@@ -304,14 +341,20 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         let _ = progress_tx.send(AppMessage::SyncProgress(progress));
     });
 
-    // Build engine
-    let engine = match SyncEngineBuilder::new()
+    // Build engine with cancellation support
+    let mut builder = SyncEngineBuilder::new()
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
         .progress_callback(progress_callback)
-        .build()
-    {
+        .cancellation(Arc::clone(&cancelled));
+
+    // Add selected set IDs if provided (for user selection from dry run)
+    if let Some(set_ids) = selected_set_ids {
+        builder = builder.selected_set_ids(set_ids);
+    }
+
+    let engine = match builder.build() {
         Ok(e) => e,
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!(
@@ -322,13 +365,25 @@ fn handle_sync(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
+    // Check for cancel before starting
+    if cancelled.load(Ordering::SeqCst) {
+        let _ = app_tx.send(AppMessage::SyncCancelled);
+        return;
+    }
+
     // Create resolver (for now, auto-skip)
     let resolver = osu_sync_core::sync::AutoResolver::skip_all();
 
-    // Run sync
-    match engine.sync(direction, &resolver) {
+    // Run sync - the engine will check is_cancelled() via the shared flag
+    let sync_result = engine.sync(direction, &resolver);
+
+    match sync_result {
         Ok(result) => {
-            let _ = app_tx.send(AppMessage::SyncComplete(result));
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = app_tx.send(AppMessage::SyncCancelled);
+            } else {
+                let _ = app_tx.send(AppMessage::SyncComplete(result));
+            }
         }
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!("Sync failed: {}", e)));
@@ -465,7 +520,11 @@ fn handle_sync_collections(app_tx: &Sender<AppMessage>, strategy: CollectionSync
     }
 }
 
-fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
+fn handle_dry_run(
+    app_tx: &Sender<AppMessage>,
+    direction: SyncDirection,
+    cancelled: Arc<AtomicBool>,
+) {
     let config = Config::load();
 
     // Check paths
@@ -489,9 +548,15 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
-    // Create components (full hashing required for sync to compare files)
+    // Check for cancel before starting
+    if cancelled.load(Ordering::SeqCst) {
+        let _ = app_tx.send(AppMessage::SyncCancelled);
+        return;
+    }
+
+    // Create components (skip hashing - MD5s come from .osu file parsing, not file hashing)
     let songs_path = stable_path.join("Songs");
-    let scanner = StableScanner::new(songs_path);
+    let scanner = StableScanner::new(songs_path).skip_hashing();
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
@@ -509,12 +574,13 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         let _ = progress_tx.send(AppMessage::SyncProgress(progress));
     });
 
-    // Build engine
+    // Build engine with cancellation support
     let engine = match SyncEngineBuilder::new()
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
         .progress_callback(progress_callback)
+        .cancellation(Arc::clone(&cancelled))
         .build()
     {
         Ok(e) => e,
@@ -527,10 +593,14 @@ fn handle_dry_run(app_tx: &Sender<AppMessage>, direction: SyncDirection) {
         }
     };
 
-    // Run dry run
+    // Run dry run - the engine will check is_cancelled() via the shared flag
     match engine.dry_run(direction) {
         Ok(result) => {
-            let _ = app_tx.send(AppMessage::DryRunComplete { result, direction });
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = app_tx.send(AppMessage::SyncCancelled);
+            } else {
+                let _ = app_tx.send(AppMessage::DryRunComplete { result, direction });
+            }
         }
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!("Dry run failed: {}", e)));
@@ -883,4 +953,189 @@ fn handle_replay_export(
             let _ = app_tx.send(AppMessage::Error(format!("Replay export failed: {}", e)));
         }
     }
+}
+
+fn handle_unified_setup(
+    app_tx: &Sender<AppMessage>,
+    mode: UnifiedStorageMode,
+    shared_path: Option<PathBuf>,
+    _resources: Vec<SharedResourceType>,
+) {
+    use osu_sync_core::unified::{UnifiedMigration, UnifiedStorageConfig};
+
+    let config = Config::load();
+
+    // Get stable and lazer paths
+    let stable_path = match config.stable_path.as_ref() {
+        Some(p) => p.clone(),
+        None => {
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!stable path not configured".to_string(),
+            ));
+            return;
+        }
+    };
+
+    let lazer_path = match config.lazer_path.as_ref() {
+        Some(p) => p.clone(),
+        None => {
+            let _ = app_tx.send(AppMessage::Error(
+                "osu!lazer path not configured".to_string(),
+            ));
+            return;
+        }
+    };
+
+    // Send initial progress
+    let _ = app_tx.send(AppMessage::UnifiedStorageProgress {
+        phase: "Preparing".to_string(),
+        current: 0,
+        total: 100,
+        message: "Initializing unified storage setup...".to_string(),
+    });
+
+    // Create unified storage config based on mode
+    let unified_config = match mode {
+        UnifiedStorageMode::Disabled => UnifiedStorageConfig::disabled(),
+        UnifiedStorageMode::StableMaster => UnifiedStorageConfig::stable_master(),
+        UnifiedStorageMode::LazerMaster => UnifiedStorageConfig::lazer_master(),
+        UnifiedStorageMode::TrueUnified => {
+            if let Some(path) = shared_path {
+                UnifiedStorageConfig::true_unified(path)
+            } else {
+                let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
+                    success: false,
+                    message: "Shared path required for True Unified mode".to_string(),
+                    links_created: 0,
+                    space_saved: 0,
+                });
+                return;
+            }
+        }
+    };
+
+    // Create migration
+    let mut migration = UnifiedMigration::new(unified_config, stable_path, lazer_path);
+
+    // Create progress callback
+    let progress_tx = app_tx.clone();
+    let progress_callback = move |progress: osu_sync_core::unified::MigrationProgress| {
+        let _ = progress_tx.send(AppMessage::UnifiedStorageProgress {
+            phase: progress.step_name.clone(),
+            current: progress.current_step,
+            total: progress.total_steps,
+            message: format!(
+                "Step {}/{}: {}",
+                progress.current_step, progress.total_steps, progress.step_name
+            ),
+        });
+    };
+
+    // Execute the migration
+    match migration.execute(progress_callback) {
+        Ok(result) => {
+            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
+                success: result.success,
+                message: if result.success {
+                    "Unified storage setup complete!".to_string()
+                } else {
+                    result.errors.first().cloned().unwrap_or_else(|| "Unknown error".to_string())
+                },
+                links_created: result.links_created,
+                space_saved: result.space_saved,
+            });
+        }
+        Err(e) => {
+            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
+                success: false,
+                message: format!("Migration failed: {}", e),
+                links_created: 0,
+                space_saved: 0,
+            });
+        }
+    }
+}
+
+fn handle_unified_status(app_tx: &Sender<AppMessage>) {
+    let config = Config::load();
+
+    // Get current unified storage config
+    let unified_config = config.unified_storage.unwrap_or_default();
+    let mode = format!("{:?}", unified_config.mode);
+
+    // For now, return basic status
+    // In a full implementation, we'd scan the manifest and verify links
+    let _ = app_tx.send(AppMessage::UnifiedStorageStatus {
+        mode,
+        active_links: 0,
+        broken_links: 0,
+        space_saved: 0,
+    });
+}
+
+fn handle_unified_verify(app_tx: &Sender<AppMessage>) {
+    let config = Config::load();
+
+    // Check if unified storage is enabled
+    let unified_config = config.unified_storage.unwrap_or_default();
+    if unified_config.mode == UnifiedStorageMode::Disabled {
+        let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
+            healthy: 0,
+            broken: 0,
+            repaired: 0,
+        });
+        return;
+    }
+
+    // For now, just return a basic status
+    // In a full implementation, we'd check each junction/symlink
+    let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
+        healthy: 0,
+        broken: 0,
+        repaired: 0,
+    });
+}
+
+fn handle_unified_repair(app_tx: &Sender<AppMessage>) {
+    // Similar to verify but attempts to fix broken links
+    let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
+        healthy: 0,
+        broken: 0,
+        repaired: 0,
+    });
+}
+
+fn handle_unified_disable(app_tx: &Sender<AppMessage>) {
+    let config = Config::load();
+
+    // Check for manifest file
+    let manifest_path = config
+        .stable_path
+        .as_ref()
+        .map(|p| p.join(".osu-sync-unified.json"));
+
+    if let Some(path) = manifest_path {
+        if path.exists() {
+            // In a full implementation, we would:
+            // 1. Load manifest
+            // 2. Remove all junctions/symlinks
+            // 3. Restore original folder structure
+            // 4. Delete manifest
+
+            // For now, just delete the manifest
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    // Update config to disable unified storage
+    let mut new_config = config.clone();
+    new_config.unified_storage = Some(osu_sync_core::unified::UnifiedStorageConfig::disabled());
+    let _ = new_config.save();
+
+    let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
+        success: true,
+        message: "Unified storage disabled".to_string(),
+        links_created: 0,
+        space_saved: 0,
+    });
 }

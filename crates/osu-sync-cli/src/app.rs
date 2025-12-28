@@ -1,6 +1,9 @@
 //! Application state and logic
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
@@ -162,6 +165,7 @@ pub enum AppMessage {
     SyncProgress(SyncProgress),
     DuplicateFound(DuplicateInfo),
     SyncComplete(SyncResult),
+    SyncCancelled,
     StatsProgress(String),
     StatsComplete(ComparisonStats),
     CollectionsLoaded(Vec<Collection>),
@@ -196,6 +200,30 @@ pub enum AppMessage {
     },
     ReplayProgress(ReplayProgress),
     ReplayComplete(ReplayExportResult),
+    // Unified storage
+    UnifiedStorageProgress {
+        phase: String,
+        current: usize,
+        total: usize,
+        message: String,
+    },
+    UnifiedStorageComplete {
+        success: bool,
+        message: String,
+        links_created: usize,
+        space_saved: u64,
+    },
+    UnifiedStorageStatus {
+        mode: String,
+        active_links: usize,
+        broken_links: usize,
+        space_saved: u64,
+    },
+    UnifiedStorageVerifyComplete {
+        healthy: usize,
+        broken: usize,
+        repaired: usize,
+    },
     Error(String),
 }
 
@@ -208,6 +236,7 @@ pub enum WorkerMessage {
     },
     StartSync {
         direction: SyncDirection,
+        selected_set_ids: Option<HashSet<i32>>,
     },
     StartDryRun {
         direction: SyncDirection,
@@ -243,9 +272,22 @@ pub enum WorkerMessage {
         filter: ReplayFilter,
         rename_pattern: Option<String>,
     },
+    // Unified storage
+    StartUnifiedSetup {
+        mode: UnifiedStorageMode,
+        shared_path: Option<PathBuf>,
+        resources: Vec<SharedResourceType>,
+    },
+    GetUnifiedStatus,
+    VerifyUnifiedLinks,
+    RepairUnifiedLinks,
+    DisableUnifiedStorage,
     Cancel,
     Shutdown,
 }
+
+/// Re-export unified storage types for worker messages
+pub use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
 
 /// Application state enum
 #[derive(Debug, Clone)]
@@ -317,6 +359,9 @@ pub enum AppState {
         direction: SyncDirection,
         selected_item: usize,
         scroll_offset: usize,
+        checked_items: HashSet<usize>,
+        filter_text: String,
+        filter_mode: bool,
     },
     BackupConfig {
         selected: usize,
@@ -396,6 +441,16 @@ pub enum AppState {
         /// The state to return to when help is closed
         previous_state: Box<AppState>,
     },
+    // Unified storage states
+    UnifiedConfig {
+        screen: crate::screens::unified_config::UnifiedConfigScreen,
+    },
+    UnifiedSetup {
+        screen: crate::screens::unified_setup::UnifiedSetupScreen,
+    },
+    UnifiedStatus {
+        screen: crate::screens::unified_status::UnifiedStatusScreen,
+    },
     Exiting,
 }
 
@@ -429,6 +484,9 @@ pub struct App {
     // Worker communication
     pub worker_tx: Sender<WorkerMessage>,
     pub worker_rx: Receiver<AppMessage>,
+
+    // Cancellation flag shared with worker
+    pub cancellation_flag: Arc<AtomicBool>,
 }
 
 impl App {
@@ -446,6 +504,7 @@ impl App {
             cached_stats: None,
             worker_tx,
             worker_rx,
+            cancellation_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -454,10 +513,22 @@ impl App {
         mut self,
         worker_tx: Sender<WorkerMessage>,
         worker_rx: Receiver<AppMessage>,
+        cancellation_flag: Arc<AtomicBool>,
     ) -> Self {
         self.worker_tx = worker_tx;
         self.worker_rx = worker_rx;
+        self.cancellation_flag = cancellation_flag;
         self
+    }
+
+    /// Request cancellation of current operation
+    fn request_cancel(&self) {
+        self.cancellation_flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Reset cancellation flag (called before starting new operations)
+    fn reset_cancel(&self) {
+        self.cancellation_flag.store(false, Ordering::SeqCst);
     }
 
     /// Handle a keyboard event
@@ -517,6 +588,9 @@ impl App {
             AppState::ReplayConfig { selected, .. } => Some(("replay_config", *selected, false)),
             AppState::ReplayProgress { .. } => Some(("replay_progress", 0, false)),
             AppState::ReplayComplete { .. } => Some(("replay_complete", 0, false)),
+            AppState::UnifiedConfig { .. } => Some(("unified_config", 0, false)),
+            AppState::UnifiedSetup { .. } => Some(("unified_setup", 0, false)),
+            AppState::UnifiedStatus { .. } => Some(("unified_status", 0, false)),
             AppState::Help { .. } => None, // Already handled above
             AppState::Exiting => None,
         };
@@ -549,6 +623,9 @@ impl App {
                 "replay_config" => self.handle_replay_config_key(key, selected),
                 "replay_progress" => self.handle_replay_progress_key(key),
                 "replay_complete" => self.handle_replay_complete_key(key),
+                "unified_config" => self.handle_unified_config_key(key),
+                "unified_setup" => self.handle_unified_setup_key(key),
+                "unified_status" => self.handle_unified_status_key(key),
                 _ => {}
             }
         }
@@ -567,15 +644,15 @@ impl App {
             };
         } else if event::is_enter(&key) {
             match selected {
-                0 => self.start_scan(),
-                1 => self.go_to_sync_config(),
-                2 => self.go_to_collection_config(),
-                3 => self.go_to_statistics(),
-                4 => self.go_to_media_config(),
-                5 => self.go_to_replay_config(),
-                6 => self.go_to_backup_config(),
-                7 => self.go_to_restore_config(),
-                8 => self.go_to_config(),
+                0 => self.go_to_sync_config(),
+                1 => self.go_to_collection_config(),
+                2 => self.go_to_statistics(),
+                3 => self.go_to_media_config(),
+                4 => self.go_to_replay_config(),
+                5 => self.go_to_backup_config(),
+                6 => self.go_to_restore_config(),
+                7 => self.go_to_config(),
+                8 => self.go_to_unified_config(),
                 9 => self.should_quit = true,
                 _ => {}
             }
@@ -585,7 +662,7 @@ impl App {
     fn handle_scanning_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
             // Cancel and return to menu
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             self.state = AppState::MainMenu { selected: 0 };
         }
     }
@@ -627,7 +704,7 @@ impl App {
                     filter_field,
                 };
             } else {
-                self.state = AppState::MainMenu { selected: 1 };
+                self.state = AppState::MainMenu { selected: 0 };
             }
         } else if event::is_key(&key, 'f') && !filter_panel_open {
             // Toggle filter panel open
@@ -674,7 +751,7 @@ impl App {
                 2 => SyncDirection::Bidirectional,
                 _ => return,
             };
-            self.start_sync(direction);
+            self.start_sync(direction, None); // Sync all (no selection)
         } else if event::is_key(&key, 'd') {
             // Start dry run
             let direction = match selected {
@@ -816,7 +893,7 @@ impl App {
 
     fn handle_syncing_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             // Will wait for SyncComplete message
         } else if event::is_space(&key) {
             // Toggle pause state
@@ -885,7 +962,7 @@ impl App {
 
     fn handle_config_key(&mut self, key: KeyEvent, selected: usize) {
         use crossterm::event::KeyCode;
-        const OPTIONS: usize = 3; // stable path, lazer path, theme
+        const OPTIONS: usize = 4; // stable path, lazer path, theme, rescan
 
         // Extract current state
         let (stable_path, lazer_path, status_message, editing) = if let AppState::Config {
@@ -948,6 +1025,7 @@ impl App {
                         lazer_path: new_lazer.clone().map(std::path::PathBuf::from),
                         duplicate_strategy: osu_sync_core::config::DuplicateStrategy::Ask,
                         theme: theme::current_theme_name(),
+                        unified_storage: None,
                     };
                     let save_result = config.save();
 
@@ -1000,7 +1078,7 @@ impl App {
 
         // Normal mode (not editing)
         if event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 8 }; // Config is at index 8
+            self.state = AppState::MainMenu { selected: 7 }; // Config is at index 7
         } else if event::is_down(&key) {
             self.state = AppState::Config {
                 selected: (selected + 1) % OPTIONS,
@@ -1018,14 +1096,17 @@ impl App {
                 editing: None,
             };
         } else if event::is_key(&key, 'd') {
-            // Auto-detect paths
-            self.auto_detect_paths();
+            // Auto-detect paths (shortcut)
+            self.start_scan();
         } else if event::is_enter(&key) || event::is_left(&key) || event::is_right(&key) {
             if selected == 2 {
                 // Theme selection - cycle theme
                 self.cycle_theme();
-            } else if event::is_enter(&key) {
-                // Start editing the selected path
+            } else if selected == 3 && event::is_enter(&key) {
+                // Rescan installations
+                self.start_scan();
+            } else if event::is_enter(&key) && selected < 2 {
+                // Start editing the selected path (only for path options)
                 let current_value = if selected == 0 {
                     stable_path.clone().unwrap_or_default()
                 } else {
@@ -1151,7 +1232,7 @@ impl App {
         }
 
         if event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 3 }; // Statistics is now at index 3
+            self.state = AppState::MainMenu { selected: 2 }; // Statistics is at index 2
         } else if event::is_key(&key, 'e') && stats.is_some() && !loading {
             // Open export dialog
             self.state = AppState::Statistics {
@@ -1283,7 +1364,7 @@ impl App {
 
     fn handle_collection_config_key(&mut self, key: KeyEvent, selected: usize) {
         if event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 2 }; // Collection Sync is at index 2
+            self.state = AppState::MainMenu { selected: 1 }; // Collection Sync is at index 1
         } else if let AppState::CollectionConfig {
             collections,
             strategy,
@@ -1353,14 +1434,14 @@ impl App {
 
     fn handle_collection_sync_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
-            self.state = AppState::MainMenu { selected: 2 };
+            self.request_cancel();
+            self.state = AppState::MainMenu { selected: 1 };
         }
     }
 
     fn handle_collection_summary_key(&mut self, key: KeyEvent) {
         if event::is_enter(&key) || event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 2 };
+            self.state = AppState::MainMenu { selected: 1 };
         }
     }
 
@@ -1370,25 +1451,197 @@ impl App {
             direction,
             selected_item,
             scroll_offset,
+            checked_items,
+            filter_text,
+            filter_mode,
         } = &self.state
         {
             let result = result.clone();
             let direction = *direction;
             let selected_item = *selected_item;
             let scroll_offset = *scroll_offset;
+            let mut checked_items = checked_items.clone();
+            let mut filter_text = filter_text.clone();
+            let mut filter_mode = *filter_mode;
             let total_items = result.items.len();
 
-            if event::is_escape(&key) {
+            if filter_mode {
+                // Handle filter mode input
+                match key.code {
+                    KeyCode::Esc => {
+                        filter_mode = false;
+                        filter_text.clear();
+                    }
+                    KeyCode::Enter => {
+                        filter_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        filter_text.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        filter_text.push(c);
+                    }
+                    _ => {}
+                }
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
+            } else if event::is_escape(&key) {
                 // Return to sync config
                 self.go_to_sync_config();
             } else if event::is_enter(&key) {
-                // Start actual sync if there are items to import
-                if result.has_imports() {
-                    self.start_sync(direction);
+                use osu_sync_core::sync::DryRunAction;
+                // Start sync with checked items, or sync just the current item if nothing checked
+                if !checked_items.is_empty() {
+                    // Extract set IDs from checked items
+                    let selected_set_ids: HashSet<i32> = checked_items
+                        .iter()
+                        .filter_map(|&idx| result.items.get(idx).and_then(|item| item.set_id))
+                        .collect();
+                    let selected = if selected_set_ids.is_empty() {
+                        None
+                    } else {
+                        Some(selected_set_ids)
+                    };
+                    self.start_sync(direction, selected);
                 } else {
-                    // Nothing to import, go back
-                    self.go_to_sync_config();
+                    // Get filtered indices to map display index to actual index
+                    let visible_indices =
+                        screens::dry_run_preview::filter_items(&result.items, &filter_text);
+                    if let Some(&actual_idx) = visible_indices.get(selected_item) {
+                        if let Some(item) = result.items.get(actual_idx) {
+                            // If current item is importable, sync just this one
+                            if matches!(item.action, DryRunAction::Import) {
+                                // Get the set ID for this single item
+                                let selected_set_ids = item.set_id.map(|id| {
+                                    let mut set = HashSet::new();
+                                    set.insert(id);
+                                    set
+                                });
+                                // Add just this item to checked and sync
+                                checked_items.insert(actual_idx);
+                                self.state = AppState::DryRunPreview {
+                                    result,
+                                    direction,
+                                    selected_item,
+                                    scroll_offset,
+                                    checked_items,
+                                    filter_text,
+                                    filter_mode,
+                                };
+                                self.start_sync(direction, selected_set_ids);
+                                return;
+                            } else {
+                                // Item not importable, go back
+                                self.go_to_sync_config();
+                            }
+                        } else {
+                            // Item not found, go back
+                            self.go_to_sync_config();
+                        }
+                    } else {
+                        // Nothing selected, go back
+                        self.go_to_sync_config();
+                    }
                 }
+            } else if key.code == KeyCode::Char(' ') {
+                // Toggle selection on current item
+                use osu_sync_core::sync::DryRunAction;
+                // Get filtered indices to map display index to actual index
+                let visible_indices =
+                    screens::dry_run_preview::filter_items(&result.items, &filter_text);
+                if let Some(&actual_idx) = visible_indices.get(selected_item) {
+                    if let Some(item) = result.items.get(actual_idx) {
+                        if matches!(item.action, DryRunAction::Import) {
+                            if checked_items.contains(&actual_idx) {
+                                checked_items.remove(&actual_idx);
+                            } else {
+                                checked_items.insert(actual_idx);
+                            }
+                        }
+                    }
+                }
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
+            } else if event::is_ctrl_a(&key) {
+                // Select all Import items
+                use osu_sync_core::sync::DryRunAction;
+                checked_items = result
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| matches!(item.action, DryRunAction::Import))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
+            } else if event::is_ctrl_d(&key) {
+                // Deselect all
+                checked_items.clear();
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
+            } else if event::is_ctrl_i(&key) {
+                // Invert selection
+                use osu_sync_core::sync::DryRunAction;
+                let all_import_indices: HashSet<usize> = result
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| matches!(item.action, DryRunAction::Import))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                checked_items = all_import_indices
+                    .symmetric_difference(&checked_items)
+                    .copied()
+                    .collect();
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
+            } else if key.code == KeyCode::Char('/') {
+                // Enter filter mode
+                filter_mode = true;
+                self.state = AppState::DryRunPreview {
+                    result,
+                    direction,
+                    selected_item,
+                    scroll_offset,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
+                };
             } else if event::is_down(&key) {
                 // Move selection down
                 let new_selected = if selected_item + 1 < total_items {
@@ -1408,6 +1661,9 @@ impl App {
                     direction,
                     selected_item: new_selected,
                     scroll_offset: new_scroll,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
                 };
             } else if event::is_up(&key) {
                 // Move selection up
@@ -1422,6 +1678,9 @@ impl App {
                     direction,
                     selected_item: new_selected,
                     scroll_offset: new_scroll,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
                 };
             } else if event::is_page_down(&key) {
                 // Page down
@@ -1433,6 +1692,9 @@ impl App {
                     direction,
                     selected_item: new_selected,
                     scroll_offset: new_scroll.min(total_items.saturating_sub(page_size)),
+                    checked_items,
+                    filter_text,
+                    filter_mode,
                 };
             } else if event::is_page_up(&key) {
                 // Page up
@@ -1444,13 +1706,16 @@ impl App {
                     direction,
                     selected_item: new_selected,
                     scroll_offset: new_scroll,
+                    checked_items,
+                    filter_text,
+                    filter_mode,
                 };
             }
         }
     }
 
     /// Start scanning installations
-    fn start_scan(&mut self) {
+    pub fn start_scan(&mut self) {
         self.state = AppState::Scanning {
             in_progress: true,
             stable_result: None,
@@ -1598,6 +1863,126 @@ impl App {
         let _ = self.worker_tx.send(WorkerMessage::LoadReplays);
     }
 
+    /// Go to unified storage configuration screen
+    fn go_to_unified_config(&mut self) {
+        use crate::screens::unified_config::UnifiedConfigScreen;
+        self.state = AppState::UnifiedConfig {
+            screen: UnifiedConfigScreen::new(),
+        };
+    }
+
+    /// Handle key events for unified config screen
+    fn handle_unified_config_key(&mut self, key: KeyEvent) {
+        use crate::screens::unified_config::{ConfigAction, StorageMode};
+
+        if let AppState::UnifiedConfig { screen } = &mut self.state {
+            if let Some(action) = screen.handle_key(key.code) {
+                match action {
+                    ConfigAction::Apply => {
+                        // Convert CLI StorageMode to core UnifiedStorageMode
+                        let mode = match screen.mode {
+                            StorageMode::Disabled => UnifiedStorageMode::Disabled,
+                            StorageMode::StableMaster => UnifiedStorageMode::StableMaster,
+                            StorageMode::LazerMaster => UnifiedStorageMode::LazerMaster,
+                            StorageMode::TrueUnified => UnifiedStorageMode::TrueUnified,
+                        };
+
+                        // Get shared path for TrueUnified mode
+                        let shared_path = if mode == UnifiedStorageMode::TrueUnified {
+                            if screen.shared_path.is_empty() {
+                                screen.status_message =
+                                    Some("Please enter a shared path for True Unified mode".into());
+                                return;
+                            }
+                            Some(std::path::PathBuf::from(&screen.shared_path))
+                        } else {
+                            None
+                        };
+
+                        // Convert resources
+                        let resources: Vec<SharedResourceType> = screen
+                            .shared_resources
+                            .iter()
+                            .map(|r| match r {
+                                crate::screens::unified_config::ResourceType::Beatmaps => {
+                                    SharedResourceType::Beatmaps
+                                }
+                                crate::screens::unified_config::ResourceType::Skins => {
+                                    SharedResourceType::Skins
+                                }
+                                crate::screens::unified_config::ResourceType::Replays => {
+                                    SharedResourceType::Replays
+                                }
+                                crate::screens::unified_config::ResourceType::Screenshots => {
+                                    SharedResourceType::Screenshots
+                                }
+                                crate::screens::unified_config::ResourceType::Exports => {
+                                    SharedResourceType::Exports
+                                }
+                                crate::screens::unified_config::ResourceType::Backgrounds => {
+                                    SharedResourceType::Backgrounds
+                                }
+                            })
+                            .collect();
+
+                        // Send message to worker
+                        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup {
+                            mode,
+                            shared_path,
+                            resources,
+                        });
+
+                        // Transition to setup screen
+                        self.state = AppState::UnifiedSetup {
+                            screen: crate::screens::unified_setup::UnifiedSetupScreen::new(),
+                        };
+                    }
+                    ConfigAction::Cancel => {
+                        self.state = AppState::MainMenu { selected: 8 };
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle key events for unified setup screen
+    fn handle_unified_setup_key(&mut self, key: KeyEvent) {
+        if event::is_escape(&key) {
+            // Cancel setup and return to config
+            self.go_to_unified_config();
+        }
+    }
+
+    /// Handle key events for unified status screen
+    fn handle_unified_status_key(&mut self, key: KeyEvent) {
+        use crate::screens::unified_status::StatusAction;
+
+        if let AppState::UnifiedStatus { screen } = &mut self.state {
+            if let Some(action) = screen.handle_key(key.code) {
+                match action {
+                    StatusAction::Verify => {
+                        screen.loading = true;
+                        let _ = self.worker_tx.send(WorkerMessage::VerifyUnifiedLinks);
+                    }
+                    StatusAction::Repair => {
+                        screen.loading = true;
+                        let _ = self.worker_tx.send(WorkerMessage::RepairUnifiedLinks);
+                    }
+                    StatusAction::SyncNow => {
+                        // Re-run unified setup with current config
+                        let _ = self.worker_tx.send(WorkerMessage::GetUnifiedStatus);
+                    }
+                    StatusAction::Configure => {
+                        self.go_to_unified_config();
+                    }
+                    StatusAction::Back => {
+                        self.state = AppState::MainMenu { selected: 8 };
+                    }
+                }
+            }
+        }
+    }
+
     /// Start a backup operation
     fn start_backup(&mut self, selected: usize) {
         let target = match selected {
@@ -1683,21 +2068,35 @@ impl App {
     }
 
     /// Start sync operation
-    fn start_sync(&mut self, direction: SyncDirection) {
+    fn start_sync(&mut self, direction: SyncDirection, selected_set_ids: Option<HashSet<i32>>) {
+        // Reset cancellation flag before starting
+        self.reset_cancel();
+
+        let count_msg = if let Some(ref ids) = selected_set_ids {
+            format!(" ({} selected)", ids.len())
+        } else {
+            String::new()
+        };
+
         self.state = AppState::Syncing {
             progress: None,
             logs: vec![LogEntry {
-                message: format!("Starting sync: {}", direction),
+                message: format!("Starting sync: {}{}", direction, count_msg),
                 level: LogLevel::Info,
             }],
             stats: SyncStats::default(),
             is_paused: false,
         };
-        let _ = self.worker_tx.send(WorkerMessage::StartSync { direction });
+        let _ = self
+            .worker_tx
+            .send(WorkerMessage::StartSync { direction, selected_set_ids });
     }
 
     /// Start dry run operation
     fn start_dry_run(&mut self, direction: SyncDirection) {
+        // Reset cancellation flag before starting
+        self.reset_cancel();
+
         // Use syncing state to show progress during analysis
         self.state = AppState::Syncing {
             progress: None,
@@ -1717,7 +2116,7 @@ impl App {
         const BACKUP_OPTIONS: usize = 5; // 5 backup targets
 
         if event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 6 };
+            self.state = AppState::MainMenu { selected: 5 };
         } else if event::is_down(&key) {
             if let AppState::BackupConfig { status_message, .. } = &self.state {
                 self.state = AppState::BackupConfig {
@@ -1739,7 +2138,7 @@ impl App {
 
     fn handle_backup_progress_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             self.state = AppState::BackupConfig {
                 selected: 0,
                 status_message: "Backup cancelled".to_string(),
@@ -1749,13 +2148,13 @@ impl App {
 
     fn handle_backup_complete_key(&mut self, key: KeyEvent) {
         if event::is_enter(&key) || event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 6 };
+            self.state = AppState::MainMenu { selected: 5 };
         }
     }
 
     fn handle_restore_config_key(&mut self, key: KeyEvent, selected: usize) {
         if event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 7 };
+            self.state = AppState::MainMenu { selected: 6 };
         } else if let AppState::RestoreConfig {
             backups,
             loading,
@@ -1828,14 +2227,14 @@ impl App {
 
     fn handle_restore_progress_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             self.go_to_restore_config();
         }
     }
 
     fn handle_restore_complete_key(&mut self, key: KeyEvent) {
         if event::is_enter(&key) || event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 7 };
+            self.state = AppState::MainMenu { selected: 6 };
         }
     }
 
@@ -1962,14 +2361,14 @@ impl App {
 
     fn handle_media_progress_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             self.go_to_media_config();
         }
     }
 
     fn handle_media_complete_key(&mut self, key: KeyEvent) {
         if event::is_enter(&key) || event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 4 };
+            self.state = AppState::MainMenu { selected: 3 };
         }
     }
 
@@ -2015,7 +2414,7 @@ impl App {
                         filter_field: 0,
                     };
                 } else {
-                    self.state = AppState::MainMenu { selected: 5 };
+                    self.state = AppState::MainMenu { selected: 4 };
                 }
             } else if loading {
                 return; // Don't process navigation while loading
@@ -2258,14 +2657,14 @@ impl App {
 
     fn handle_replay_progress_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
-            let _ = self.worker_tx.send(WorkerMessage::Cancel);
+            self.request_cancel();
             self.go_to_replay_config();
         }
     }
 
     fn handle_replay_complete_key(&mut self, key: KeyEvent) {
         if event::is_enter(&key) || event::is_escape(&key) {
-            self.state = AppState::MainMenu { selected: 5 };
+            self.state = AppState::MainMenu { selected: 4 };
         }
     }
 
@@ -2391,6 +2790,10 @@ impl App {
                 AppMessage::SyncComplete(result) => {
                     self.state = AppState::SyncComplete { result };
                 }
+                AppMessage::SyncCancelled => {
+                    // Return to main menu when cancelled
+                    self.state = AppState::MainMenu { selected: 0 };
+                }
                 AppMessage::StatsProgress(message) => {
                     if let AppState::Statistics { status_message, .. } = &mut self.state {
                         *status_message = message;
@@ -2449,11 +2852,24 @@ impl App {
                     self.state = AppState::CollectionSummary { result };
                 }
                 AppMessage::DryRunComplete { result, direction } => {
+                    // Default: check all items that have Import action
+                    use osu_sync_core::sync::DryRunAction;
+                    let checked_items: HashSet<usize> = result
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, item)| matches!(item.action, DryRunAction::Import))
+                        .map(|(idx, _)| idx)
+                        .collect();
+
                     self.state = AppState::DryRunPreview {
                         result,
                         direction,
                         selected_item: 0,
                         scroll_offset: 0,
+                        checked_items,
+                        filter_text: String::new(),
+                        filter_mode: false,
                     };
                 }
                 AppMessage::BackupProgress(progress) => {
@@ -2555,6 +2971,64 @@ impl App {
                 AppMessage::ReplayComplete(result) => {
                     let stats = result.stats.clone();
                     self.state = AppState::ReplayComplete { result, stats };
+                }
+                AppMessage::UnifiedStorageProgress {
+                    phase,
+                    current,
+                    total,
+                    message,
+                } => {
+                    if let AppState::UnifiedSetup { screen } = &mut self.state {
+                        screen.current_operation = format!("{}: {}", phase, message);
+                        if total > 0 {
+                            screen.progress = Some(
+                                crate::screens::unified_setup::MigrationProgress {
+                                    phase: crate::screens::unified_setup::MigrationPhase::Preparing,
+                                    current,
+                                    total,
+                                    current_item: message,
+                                    bytes_processed: 0,
+                                    bytes_total: 0,
+                                },
+                            );
+                        }
+                    }
+                }
+                AppMessage::UnifiedStorageComplete {
+                    success,
+                    message,
+                    links_created: _,
+                    space_saved: _,
+                } => {
+                    if let AppState::UnifiedSetup { screen } = &mut self.state {
+                        screen.set_complete(success, Some(message));
+                    }
+                }
+                AppMessage::UnifiedStorageStatus {
+                    mode,
+                    active_links,
+                    broken_links,
+                    space_saved,
+                } => {
+                    if let AppState::UnifiedStatus { screen } = &mut self.state {
+                        screen.mode = mode;
+                        screen.health.total = active_links + broken_links;
+                        screen.health.active = active_links;
+                        screen.health.broken = broken_links;
+                        screen.stats.space_saved = space_saved;
+                    }
+                }
+                AppMessage::UnifiedStorageVerifyComplete {
+                    healthy,
+                    broken,
+                    repaired: _,
+                } => {
+                    if let AppState::UnifiedStatus { screen } = &mut self.state {
+                        screen.health.active = healthy;
+                        screen.health.broken = broken;
+                        screen.health.total = healthy + broken;
+                        screen.loading = false;
+                    }
                 }
                 AppMessage::Error(error) => {
                     self.last_error = Some(error);
