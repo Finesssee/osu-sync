@@ -27,7 +27,7 @@ pub fn render(
         .constraints([
             Constraint::Length(3), // Title
             Constraint::Length(8), // Paths section
-            Constraint::Length(8), // Settings section (increased for theme)
+            Constraint::Length(10), // Settings section (increased for rescan)
             Constraint::Length(3), // Status message
             Constraint::Min(0),    // Spacer
             Constraint::Length(4), // About
@@ -139,12 +139,23 @@ pub fn render(
         ]),
         Line::from(""),
         Line::from(vec![
+            Span::styled(
+                if selected == 3 { "> " } else { "  " },
+                Style::default().fg(if selected == 3 { accent } else { text }),
+            ),
+            Span::styled("\u{1F50D} ", Style::default().fg(if selected == 3 { accent } else { subtle })),
+            Span::styled(
+                "Rescan Installations",
+                Style::default()
+                    .fg(if selected == 3 { accent } else { text })
+                    .bold(),
+            ),
+            Span::styled("  Re-detect osu! paths", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
             Span::styled("  Duplicate Strategy: ", Style::default().fg(subtle)),
             Span::styled("Ask", Style::default().fg(text)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Detection Method:   ", Style::default().fg(subtle)),
-            Span::styled("Composite", Style::default().fg(text)),
         ]),
     ]);
     frame.render_widget(settings, settings_inner);

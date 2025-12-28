@@ -39,6 +39,7 @@ impl Default for BackupUIState {
     }
 }
 
+#[allow(dead_code)]
 impl BackupUIState {
     /// Move focus to next option
     pub fn focus_next(&mut self) {
@@ -337,6 +338,7 @@ pub fn render_progress(
 }
 
 /// Render the backup complete screen
+#[allow(dead_code)]
 pub fn render_complete(frame: &mut Frame, area: Rect, backup_path: &str, size_bytes: u64) {
     render_complete_with_type(frame, area, backup_path, size_bytes, false);
 }

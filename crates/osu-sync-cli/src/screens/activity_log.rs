@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use crate::app::{error_color, pink, subtle_color, success_color, text_color, warning_color};
 use osu_sync_core::activity::{ActivityLog, ActivityType};
 
+#[allow(dead_code)]
 pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: usize) {
     // Get theme colors
     let accent = pink();
@@ -139,6 +140,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &ActivityLog, scroll_offset: u
     frame.render_widget(footer, footer_inner);
 }
 
+#[allow(dead_code)]
 fn centered_rect(width: u16, height: u16, parent: Rect) -> Rect {
     let x = parent.x + (parent.width.saturating_sub(width)) / 2;
     let y = parent.y + (parent.height.saturating_sub(height)) / 2;

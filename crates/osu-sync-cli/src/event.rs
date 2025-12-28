@@ -22,8 +22,8 @@ pub fn is_quit(key: &KeyEvent) -> bool {
     matches!(
         key,
         KeyEvent {
-            code: KeyCode::Char('q'),
-            modifiers: KeyModifiers::NONE,
+            code: KeyCode::Char('q' | 'Q'),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
             ..
         } | KeyEvent {
             code: KeyCode::Char('c'),
@@ -40,12 +40,12 @@ pub fn is_escape(key: &KeyEvent) -> bool {
 
 /// Check if a key event is navigation down
 pub fn is_down(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Down | KeyCode::Char('j'))
+    matches!(key.code, KeyCode::Down | KeyCode::Char('j' | 'J'))
 }
 
 /// Check if a key event is navigation up
 pub fn is_up(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Up | KeyCode::Char('k'))
+    matches!(key.code, KeyCode::Up | KeyCode::Char('k' | 'K'))
 }
 
 /// Check if a key event is enter/select
@@ -65,17 +65,17 @@ pub fn is_tab(key: &KeyEvent) -> bool {
 
 /// Check if a key event is navigation left
 pub fn is_left(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Left | KeyCode::Char('h'))
+    matches!(key.code, KeyCode::Left | KeyCode::Char('h' | 'H'))
 }
 
 /// Check if a key event is navigation right
 pub fn is_right(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Right | KeyCode::Char('l'))
+    matches!(key.code, KeyCode::Right | KeyCode::Char('l' | 'L'))
 }
 
-/// Check if a key event is a specific character
+/// Check if a key event is a specific character (case-insensitive)
 pub fn is_key(key: &KeyEvent, c: char) -> bool {
-    matches!(key.code, KeyCode::Char(ch) if ch == c)
+    matches!(key.code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&c))
 }
 
 /// Check if a key event is page down
@@ -97,9 +97,50 @@ pub fn is_help(key: &KeyEvent) -> bool {
             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
             ..
         } | KeyEvent {
-            code: KeyCode::Char('h'),
-            modifiers: KeyModifiers::NONE,
+            code: KeyCode::Char('h' | 'H'),
+            modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
             ..
         }
     )
+}
+
+/// Check if a key event is Ctrl+A (select all)
+pub fn is_ctrl_a(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+    )
+}
+
+/// Check if a key event is Ctrl+D (deselect all)
+pub fn is_ctrl_d(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('d'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+    )
+}
+
+/// Check if a key event is Ctrl+I (invert selection)
+pub fn is_ctrl_i(key: &KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('i'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        }
+    )
+}
+
+/// Check if a key event is backspace
+pub fn is_backspace(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Backspace)
 }

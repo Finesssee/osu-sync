@@ -15,11 +15,6 @@ struct MenuItem {
 
 const MENU_ITEMS: [MenuItem; 10] = [
     MenuItem {
-        icon: "\u{1F50D}",
-        label: "Scan Installations",
-        description: "Detect osu! installations",
-    },
-    MenuItem {
         icon: "\u{1F504}",
         label: "Sync Beatmaps",
         description: "Synchronize your beatmaps",
@@ -58,6 +53,11 @@ const MENU_ITEMS: [MenuItem; 10] = [
         icon: "\u{2699}",
         label: "Configuration",
         description: "Configure paths and options",
+    },
+    MenuItem {
+        icon: "\u{1F517}",
+        label: "Unified Storage",
+        description: "Share files between games",
     },
     MenuItem {
         icon: "\u{1F6AA}",

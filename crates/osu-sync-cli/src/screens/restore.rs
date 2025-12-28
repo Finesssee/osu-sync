@@ -255,6 +255,7 @@ pub fn render_complete(frame: &mut Frame, area: Rect, dest_path: &str, files_res
 }
 
 /// Render verification status
+#[allow(dead_code)]
 pub fn render_verification(
     frame: &mut Frame,
     area: Rect,
@@ -394,6 +395,7 @@ pub fn render_verification(
 }
 
 /// Render restore preview
+#[allow(dead_code)]
 pub fn render_preview(
     frame: &mut Frame,
     area: Rect,

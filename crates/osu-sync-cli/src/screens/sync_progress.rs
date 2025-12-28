@@ -8,6 +8,7 @@ use crate::widgets::get_spinner_frame;
 use osu_sync_core::sync::SyncProgress;
 
 /// Format seconds as "Xm Ys" or "Xh Ym" for display
+#[allow(dead_code)]
 fn format_duration(seconds: u64) -> String {
     if seconds < 60 {
         format!("{}s", seconds)
