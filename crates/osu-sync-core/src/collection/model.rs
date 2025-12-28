@@ -161,3 +161,39 @@ impl CollectionSyncProgress {
         collection_progress + (beatmap_progress / self.total_collections as f64)
     }
 }
+
+/// Preview information for a single collection before sync
+#[derive(Debug, Clone, Default)]
+pub struct CollectionPreviewItem {
+    /// Name of the collection
+    pub name: String,
+    /// Total beatmaps in this collection
+    pub beatmap_count: usize,
+    /// Whether this is a duplicate (same name as another collection)
+    pub is_duplicate: bool,
+    /// Number of duplicates that will be merged with this collection
+    pub merge_count: usize,
+}
+
+/// Detailed preview information for a collection sync operation
+#[derive(Debug, Clone, Default)]
+pub struct CollectionSyncPreview {
+    /// Source installation name (e.g., "osu!stable")
+    pub source: String,
+    /// Target installation name (e.g., "osu!lazer")
+    pub target: String,
+    /// Sync direction
+    pub direction: CollectionSyncDirection,
+    /// Per-collection preview information
+    pub collections: Vec<CollectionPreviewItem>,
+    /// Total number of unique collections (after merging duplicates)
+    pub unique_collections: usize,
+    /// Total number of beatmaps across all collections
+    pub total_beatmaps: usize,
+    /// Number of duplicate collections that will be merged
+    pub duplicates_merged: usize,
+    /// Whether the direction requires manual steps (e.g., lazer -> stable)
+    pub requires_manual_steps: bool,
+    /// Message explaining manual steps if required
+    pub manual_steps_message: Option<String>,
+}
