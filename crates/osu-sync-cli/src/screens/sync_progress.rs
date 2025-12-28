@@ -7,36 +7,58 @@ use crate::app::{LogEntry, LogLevel, SyncStats, ERROR, PINK, SUBTLE, SUCCESS, TE
 use crate::widgets::get_spinner_frame;
 use osu_sync_core::sync::SyncProgress;
 
+/// Format seconds as "Xm Ys" or "Xh Ym" for display
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        let mins = seconds / 60;
+        let secs = seconds % 60;
+        format!("{}m {}s", mins, secs)
+    } else {
+        let hours = seconds / 3600;
+        let mins = (seconds % 3600) / 60;
+        format!("{}h {}m", hours, mins)
+    }
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     progress: &Option<SyncProgress>,
     logs: &[LogEntry],
     stats: &SyncStats,
+    is_paused: bool,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Title
-            Constraint::Length(5), // Progress info
+            Constraint::Length(6), // Progress info (increased for ETA)
             Constraint::Length(3), // Progress bar
             Constraint::Length(3), // Current item
             Constraint::Min(0),    // Log
-            Constraint::Length(2), // Stats
+            Constraint::Length(3), // Stats + hint
         ])
         .split(area);
 
-    // Title
+    // Title - show "PAUSED" if paused
+    let title_text = if is_paused {
+        "Syncing Beatmaps - PAUSED"
+    } else {
+        "Syncing Beatmaps"
+    };
+    let title_color = if is_paused { WARNING } else { PINK };
     let title = Paragraph::new(Span::styled(
-        "Syncing Beatmaps",
-        Style::default().fg(PINK).bold(),
+        title_text,
+        Style::default().fg(title_color).bold(),
     ))
     .alignment(Alignment::Center);
     frame.render_widget(title, chunks[0]);
 
     // Progress info
     if let Some(prog) = progress {
-        let info = Paragraph::new(vec![
+        let info_lines = vec![
             Line::from(vec![
                 Span::styled("Phase: ", Style::default().fg(SUBTLE)),
                 Span::styled(format!("{}", prog.phase), Style::default().fg(TEXT)),
@@ -48,8 +70,9 @@ pub fn render(
                     Style::default().fg(TEXT),
                 ),
             ]),
-        ])
-        .alignment(Alignment::Center);
+        ];
+
+        let info = Paragraph::new(info_lines).alignment(Alignment::Center);
         frame.render_widget(info, chunks[1]);
 
         // Progress bar
@@ -59,9 +82,10 @@ pub fn render(
             0.0
         };
 
+        let bar_color = if is_paused { WARNING } else { PINK };
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::NONE))
-            .gauge_style(Style::default().fg(PINK).bg(Color::DarkGray))
+            .gauge_style(Style::default().fg(bar_color).bg(Color::DarkGray))
             .ratio(ratio)
             .label(format!("{}%", (ratio * 100.0) as u16));
 
@@ -118,7 +142,7 @@ pub fn render(
 
     frame.render_widget(log, chunks[4]);
 
-    // Stats
+    // Stats + pause hint
     let stats_line = Line::from(vec![
         Span::styled("Imported: ", Style::default().fg(SUBTLE)),
         Span::styled(format!("{}", stats.imported), Style::default().fg(SUCCESS)),
@@ -128,7 +152,15 @@ pub fn render(
         Span::styled(format!("{}", stats.failed), Style::default().fg(ERROR)),
     ]);
 
-    let stats_widget = Paragraph::new(stats_line).alignment(Alignment::Center);
+    let hint_text = if is_paused {
+        "Press Space to resume | Esc to cancel"
+    } else {
+        "Press Space to pause | Esc to cancel"
+    };
+    let hint_line = Line::from(Span::styled(hint_text, Style::default().fg(SUBTLE)));
+
+    let stats_widget =
+        Paragraph::new(vec![stats_line, hint_line]).alignment(Alignment::Center);
     frame.render_widget(stats_widget, chunks[5]);
 }
 

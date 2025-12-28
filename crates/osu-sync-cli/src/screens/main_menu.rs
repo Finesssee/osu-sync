@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::{App, PINK, SUBTLE, TEXT};
+use crate::app::{App, pink, subtle_color, text_color, selection_bg};
 use crate::widgets::render_status_bar;
 
 /// Menu item with icon
@@ -67,6 +67,12 @@ const MENU_ITEMS: [MenuItem; 10] = [
 ];
 
 pub fn render(frame: &mut Frame, area: Rect, selected: usize, app: &App) {
+    // Get theme colors
+    let accent = pink();
+    let subtle = subtle_color();
+    let text = text_color();
+    let sel_bg = selection_bg();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -80,13 +86,13 @@ pub fn render(frame: &mut Frame, area: Rect, selected: usize, app: &App) {
     let title = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("\u{266A} ", Style::default().fg(PINK)), // Music note
-            Span::styled("Welcome to ", Style::default().fg(SUBTLE)),
-            Span::styled("osu-sync", Style::default().fg(PINK).bold()),
+            Span::styled("\u{266A} ", Style::default().fg(accent)), // Music note
+            Span::styled("Welcome to ", Style::default().fg(subtle)),
+            Span::styled("osu-sync", Style::default().fg(accent).bold()),
         ]),
         Line::from(Span::styled(
             "Sync beatmaps between osu!stable and osu!lazer",
-            Style::default().fg(SUBTLE).italic(),
+            Style::default().fg(subtle).italic(),
         )),
     ];
     let title_widget = Paragraph::new(title).alignment(Alignment::Center);
@@ -99,9 +105,9 @@ pub fn render(frame: &mut Frame, area: Rect, selected: usize, app: &App) {
 
     // Render menu box
     let menu_block = Block::default()
-        .title(Span::styled(" Menu ", Style::default().fg(PINK).bold()))
+        .title(Span::styled(" Menu ", Style::default().fg(accent).bold()))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(PINK))
+        .border_style(Style::default().fg(accent))
         .border_type(ratatui::widgets::BorderType::Rounded);
 
     let inner = menu_block.inner(menu_area);
@@ -123,17 +129,19 @@ pub fn render(frame: &mut Frame, area: Rect, selected: usize, app: &App) {
         let is_selected = i == selected;
 
         let prefix = if is_selected { "\u{25B6} " } else { "  " }; // Arrow for selected
-        let (icon_style, label_style, desc_style) = if is_selected {
+        let (icon_style, label_style, desc_style, bg) = if is_selected {
             (
-                Style::default().fg(PINK),
+                Style::default().fg(accent),
                 Style::default().fg(Color::White).bold(),
-                Style::default().fg(SUBTLE),
+                Style::default().fg(subtle),
+                Some(sel_bg),
             )
         } else {
             (
-                Style::default().fg(SUBTLE),
-                Style::default().fg(TEXT),
+                Style::default().fg(subtle),
+                Style::default().fg(text),
                 Style::default().fg(Color::DarkGray),
+                None,
             )
         };
 
@@ -144,7 +152,10 @@ pub fn render(frame: &mut Frame, area: Rect, selected: usize, app: &App) {
             Span::styled(format!("  {}", item.description), desc_style),
         ]);
 
-        let item_widget = Paragraph::new(item_line);
+        let mut item_widget = Paragraph::new(item_line);
+        if let Some(bg_color) = bg {
+            item_widget = item_widget.style(Style::default().bg(bg_color));
+        }
         frame.render_widget(item_widget, *item_area);
     }
 

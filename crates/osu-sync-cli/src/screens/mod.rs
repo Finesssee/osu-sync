@@ -1,5 +1,6 @@
 //! Screen rendering and routing
 
+mod activity_log;
 mod backup;
 mod collection_config;
 mod collection_summary;
@@ -86,8 +87,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             progress,
             logs,
             stats,
+            is_paused,
         } => {
-            sync_progress::render(frame, chunks[1], progress, logs, stats);
+            sync_progress::render(frame, chunks[1], progress, logs, stats, *is_paused);
         }
         AppState::DuplicateDialog {
             info,
@@ -95,7 +97,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             apply_to_all,
         } => {
             // Render dimmed syncing screen behind
-            sync_progress::render(frame, chunks[1], &None, &[], &Default::default());
+            sync_progress::render(frame, chunks[1], &None, &[], &Default::default(), false);
             // Render modal on top
             duplicate_dialog::render(frame, area, info, *selected, *apply_to_all);
         }
@@ -182,12 +184,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         AppState::BackupComplete {
             backup_path,
             size_bytes,
+            is_incremental,
         } => {
-            backup::render_complete(
+            backup::render_complete_with_type(
                 frame,
                 chunks[1],
                 &backup_path.display().to_string(),
                 *size_bytes,
+                *is_incremental,
             );
         }
         AppState::RestoreConfig {
@@ -233,7 +237,10 @@ pub fn render(frame: &mut Frame, app: &App) {
             media_type,
             organization,
             output_path,
+            skip_duplicates,
+            include_metadata,
             status_message,
+            ..
         } => {
             media::render_config(
                 frame,
@@ -242,6 +249,8 @@ pub fn render(frame: &mut Frame, app: &App) {
                 *media_type,
                 *organization,
                 output_path,
+                *skip_duplicates,
+                *include_metadata,
                 status_message,
             );
         }
@@ -261,6 +270,10 @@ pub fn render(frame: &mut Frame, app: &App) {
             replays,
             loading: _,
             status_message,
+            filter,
+            rename_pattern,
+            filter_panel_open,
+            filter_field,
         } => {
             let exportable = replays.iter().filter(|r| r.has_replay_file).count();
             replay::render_config(
@@ -271,6 +284,10 @@ pub fn render(frame: &mut Frame, app: &App) {
                 output_path,
                 exportable,
                 status_message,
+                filter,
+                rename_pattern,
+                *filter_panel_open,
+                *filter_field,
             );
         }
         AppState::ReplayProgress {
@@ -279,8 +296,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         } => {
             replay::render_progress(frame, chunks[1], progress, current_replay);
         }
-        AppState::ReplayComplete { result } => {
-            replay::render_complete(frame, chunks[1], result);
+        AppState::ReplayComplete { result, stats } => {
+            replay::render_complete(frame, chunks[1], result, stats);
         }
         AppState::Help { previous_state } => {
             // Render the previous screen behind the help modal
@@ -336,12 +353,13 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             progress,
             logs,
             stats,
+            is_paused,
         } => {
-            sync_progress::render(frame, area, progress, logs, stats);
+            sync_progress::render(frame, area, progress, logs, stats, *is_paused);
         }
         AppState::DuplicateDialog { .. } => {
             // Just render empty syncing screen behind duplicates
-            sync_progress::render(frame, area, &None, &[], &Default::default());
+            sync_progress::render(frame, area, &None, &[], &Default::default(), false);
         }
         AppState::SyncComplete { result } => {
             sync_summary::render(frame, area, result);
@@ -426,12 +444,14 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
         AppState::BackupComplete {
             backup_path,
             size_bytes,
+            is_incremental,
         } => {
-            backup::render_complete(
+            backup::render_complete_with_type(
                 frame,
                 area,
                 &backup_path.display().to_string(),
                 *size_bytes,
+                *is_incremental,
             );
         }
         AppState::RestoreConfig {
@@ -477,7 +497,10 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             media_type,
             organization,
             output_path,
+            skip_duplicates,
+            include_metadata,
             status_message,
+            ..
         } => {
             media::render_config(
                 frame,
@@ -486,6 +509,8 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
                 *media_type,
                 *organization,
                 output_path,
+                *skip_duplicates,
+                *include_metadata,
                 status_message,
             );
         }
@@ -505,6 +530,10 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             replays,
             loading: _,
             status_message,
+            filter,
+            rename_pattern,
+            filter_panel_open,
+            filter_field,
         } => {
             let exportable = replays.iter().filter(|r| r.has_replay_file).count();
             replay::render_config(
@@ -515,6 +544,10 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
                 output_path,
                 exportable,
                 status_message,
+                filter,
+                rename_pattern,
+                *filter_panel_open,
+                *filter_field,
             );
         }
         AppState::ReplayProgress {
@@ -523,8 +556,8 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
         } => {
             replay::render_progress(frame, area, progress, current_replay);
         }
-        AppState::ReplayComplete { result } => {
-            replay::render_complete(frame, area, result);
+        AppState::ReplayComplete { result, stats } => {
+            replay::render_complete(frame, area, result, stats);
         }
         AppState::Help { previous_state } => {
             // Recursively render the previous state
@@ -558,7 +591,13 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
             ("j/k", "Navigate"),
             ("Esc", "Back"),
         ],
-        AppState::Syncing { .. } => vec![("Esc", "Cancel")],
+        AppState::Syncing { is_paused, .. } => {
+            if *is_paused {
+                vec![("Space", "Resume"), ("Esc", "Cancel")]
+            } else {
+                vec![("Space", "Pause"), ("Esc", "Cancel")]
+            }
+        }
         AppState::DuplicateDialog { .. } => vec![
             ("Enter", "Confirm"),
             ("Space", "Toggle Apply All"),
@@ -627,7 +666,16 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         AppState::MediaProgress { .. } => vec![("Esc", "Cancel")],
         AppState::MediaComplete { .. } => vec![("Enter", "Back to Menu")],
         AppState::ReplayConfig { loading: true, .. } => vec![("Esc", "Cancel")],
-        AppState::ReplayConfig { loading: false, .. } => vec![
+        AppState::ReplayConfig {
+            loading: false,
+            filter_panel_open: true,
+            ..
+        } => vec![("Space", "Toggle"), ("j/k", "Navigate"), ("Esc", "Close")],
+        AppState::ReplayConfig {
+            loading: false,
+            filter_panel_open: false,
+            ..
+        } => vec![
             ("Enter", "Toggle/Start"),
             ("j/k", "Navigate"),
             ("Esc", "Back"),
