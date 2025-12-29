@@ -25,6 +25,11 @@ md-5.workspace = true
 directories.workspace = true
 dirs.workspace = true
 
+# Performance optimizations
+blake3 = "1"              # 5-10x faster than SHA-256
+bincode = "1"             # 5-10x faster than serde_json for cache
+memmap2 = "0.9"           # Memory-mapped file I/O
+
 # Parallel processing
 rayon = "1.10"
 
