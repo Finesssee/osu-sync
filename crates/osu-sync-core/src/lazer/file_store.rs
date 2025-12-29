@@ -44,26 +44,26 @@ impl LazerFileStore {
     /// Read a file by its hash
     pub fn read(&self, hash: &str) -> Result<Vec<u8>> {
         let path = self.hash_to_path(hash);
-        if !path.exists() {
-            return Err(Error::BeatmapNotFound(format!(
-                "File with hash {} not found",
-                hash
-            )));
-        }
-        Ok(fs::read(path)?)
+        fs::read(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::BeatmapNotFound(format!("File with hash {} not found", hash))
+            } else {
+                Error::Io(e)
+            }
+        })
     }
 
     /// Read just the first N bytes of a file (for header detection)
     pub fn read_prefix(&self, hash: &str, len: usize) -> Result<Vec<u8>> {
         use std::io::Read;
         let path = self.hash_to_path(hash);
-        if !path.exists() {
-            return Err(Error::BeatmapNotFound(format!(
-                "File with hash {} not found",
-                hash
-            )));
-        }
-        let mut file = fs::File::open(path)?;
+        let mut file = fs::File::open(&path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Error::BeatmapNotFound(format!("File with hash {} not found", hash))
+            } else {
+                Error::Io(e)
+            }
+        })?;
         let mut buffer = vec![0u8; len];
         let bytes_read = file.read(&mut buffer)?;
         buffer.truncate(bytes_read);

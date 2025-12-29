@@ -15,9 +15,9 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
     let blake3_hash = blake3::hash(&content).to_hex().to_string();
     let md5_hash = format!("{:x}", Md5::digest(&content));
 
-    // Parse with rosu-map
+    // Parse with rosu-map (reuse already-read content)
     let beatmap =
-        rosu_map::from_path::<rosu_map::Beatmap>(path).map_err(|e| Error::BeatmapParse {
+        rosu_map::Beatmap::from_bytes(&content).map_err(|e| Error::BeatmapParse {
             path: path.to_path_buf(),
             message: e.to_string(),
         })?;

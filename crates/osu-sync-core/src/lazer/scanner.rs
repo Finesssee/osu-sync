@@ -82,10 +82,11 @@ impl LazerScanner {
     }
 
     /// Check if the lazer data directory is valid
+    ///
+    /// Checks for files directory and client.realm existence.
+    /// If files_path exists, data_path must also exist (it's the parent).
     pub fn is_valid(&self) -> bool {
-        self.data_path.exists()
-            && self.files_path.exists()
-            && self.data_path.join("client.realm").exists()
+        self.files_path.is_dir() && self.data_path.join("client.realm").is_file()
     }
 
     /// Scan all beatmaps and return timing information
