@@ -183,14 +183,18 @@ pub fn render(
     let visible_height = list_inner.height as usize;
 
     // Create list items from filtered indices
+    // Note: selected_item is the index in visible_indices (0 to total_visible-1)
+    // We render items from scroll_offset to scroll_offset + visible_height
     let items: Vec<ListItem> = visible_indices
         .iter()
-        .enumerate()
         .skip(scroll_offset)
         .take(visible_height)
-        .map(|(display_idx, &actual_idx)| {
+        .enumerate()
+        .map(|(screen_row, &actual_idx)| {
             let item = &result.items[actual_idx];
-            let is_cursor = display_idx == selected_item;
+            // The item at screen_row corresponds to visible_indices[scroll_offset + screen_row]
+            // So it should be highlighted when selected_item == scroll_offset + screen_row
+            let is_cursor = selected_item == scroll_offset + screen_row;
             let is_checked = checked_items.contains(&actual_idx);
             let is_selectable = item.action == DryRunAction::Import;
 
@@ -300,8 +304,10 @@ mod tests {
     use super::*;
 
     fn make_test_item(set_id: Option<i32>, title: &str, artist: &str) -> DryRunItem {
+        let folder_name = set_id.map(|id| format!("{} {} - {}", id, artist, title));
         DryRunItem {
             set_id,
+            folder_name,
             title: title.to_string(),
             artist: artist.to_string(),
             action: DryRunAction::Import,

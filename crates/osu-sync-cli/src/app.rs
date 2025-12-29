@@ -237,6 +237,7 @@ pub enum WorkerMessage {
     StartSync {
         direction: SyncDirection,
         selected_set_ids: Option<HashSet<i32>>,
+        selected_folders: Option<HashSet<String>>,
     },
     StartDryRun {
         direction: SyncDirection,
@@ -546,7 +547,12 @@ impl App {
         }
 
         // Global help key handling (? or h) - available from most screens
-        if event::is_help(&key) && self.can_show_help() {
+        // Skip if we're in filter mode (typing in search box)
+        let in_filter_mode = matches!(
+            &self.state,
+            AppState::DryRunPreview { filter_mode: true, .. }
+        );
+        if event::is_help(&key) && self.can_show_help() && !in_filter_mode {
             self.show_help();
             return;
         }
@@ -751,7 +757,7 @@ impl App {
                 2 => SyncDirection::Bidirectional,
                 _ => return,
             };
-            self.start_sync(direction, None); // Sync all (no selection)
+            self.start_sync(direction, None, None); // Sync all (no selection)
         } else if event::is_key(&key, 'd') {
             // Start dry run
             let direction = match selected {
@@ -1499,17 +1505,41 @@ impl App {
                 use osu_sync_core::sync::DryRunAction;
                 // Start sync with checked items, or sync just the current item if nothing checked
                 if !checked_items.is_empty() {
-                    // Extract set IDs from checked items
-                    let selected_set_ids: HashSet<i32> = checked_items
-                        .iter()
-                        .filter_map(|&idx| result.items.get(idx).and_then(|item| item.set_id))
-                        .collect();
-                    let selected = if selected_set_ids.is_empty() {
+                    // Extract set IDs AND folder names from checked items (Option 1: folder fallback)
+                    let mut selected_set_ids: HashSet<i32> = HashSet::new();
+                    let mut selected_folders: HashSet<String> = HashSet::new();
+
+                    for &idx in &checked_items {
+                        if let Some(item) = result.items.get(idx) {
+                            if let Some(id) = item.set_id {
+                                selected_set_ids.insert(id);
+                            }
+                            if let Some(ref folder) = item.folder_name {
+                                selected_folders.insert(folder.clone());
+                            }
+                        }
+                    }
+
+                    // Option 2: Validate we have at least one identifier
+                    if selected_set_ids.is_empty() && selected_folders.is_empty() {
+                        // Can't identify any selected beatmaps - show error
+                        self.last_error =
+                            Some("Cannot sync: selected beatmaps have no valid identifiers".to_string());
+                        return;
+                    }
+
+                    let set_ids = if selected_set_ids.is_empty() {
                         None
                     } else {
                         Some(selected_set_ids)
                     };
-                    self.start_sync(direction, selected);
+                    let folders = if selected_folders.is_empty() {
+                        None
+                    } else {
+                        Some(selected_folders)
+                    };
+
+                    self.start_sync(direction, set_ids, folders);
                 } else {
                     // Get filtered indices to map display index to actual index
                     let visible_indices =
@@ -1518,12 +1548,25 @@ impl App {
                         if let Some(item) = result.items.get(actual_idx) {
                             // If current item is importable, sync just this one
                             if matches!(item.action, DryRunAction::Import) {
-                                // Get the set ID for this single item
+                                // Get both identifiers for this single item (Option 1: folder fallback)
                                 let selected_set_ids = item.set_id.map(|id| {
                                     let mut set = HashSet::new();
                                     set.insert(id);
                                     set
                                 });
+                                let selected_folders = item.folder_name.clone().map(|folder| {
+                                    let mut set = HashSet::new();
+                                    set.insert(folder);
+                                    set
+                                });
+
+                                // Option 2: Validate we have at least one identifier
+                                if selected_set_ids.is_none() && selected_folders.is_none() {
+                                    self.last_error =
+                                        Some("Cannot sync: beatmap has no valid identifier".to_string());
+                                    return;
+                                }
+
                                 // Add just this item to checked and sync
                                 checked_items.insert(actual_idx);
                                 self.state = AppState::DryRunPreview {
@@ -1535,7 +1578,7 @@ impl App {
                                     filter_text,
                                     filter_mode,
                                 };
-                                self.start_sync(direction, selected_set_ids);
+                                self.start_sync(direction, selected_set_ids, selected_folders);
                                 return;
                             } else {
                                 // Item not importable, go back
@@ -1649,10 +1692,14 @@ impl App {
                 } else {
                     selected_item
                 };
-                // Adjust scroll if needed (assume ~20 visible lines)
-                let visible_lines = 20usize;
+                // Adjust scroll to keep cursor visible (estimate ~15 visible lines for safety margin)
+                let visible_lines = 15usize;
                 let new_scroll = if new_selected >= scroll_offset + visible_lines {
-                    new_selected - visible_lines + 1
+                    // Cursor would be off-screen, scroll to keep it at bottom
+                    new_selected.saturating_sub(visible_lines - 1)
+                } else if new_selected < scroll_offset {
+                    // Cursor above viewport (shouldn't happen on down, but be safe)
+                    new_selected
                 } else {
                     scroll_offset
                 };
@@ -1668,7 +1715,9 @@ impl App {
             } else if event::is_up(&key) {
                 // Move selection up
                 let new_selected = selected_item.saturating_sub(1);
+                // Adjust scroll to keep cursor visible
                 let new_scroll = if new_selected < scroll_offset {
+                    // Cursor would be above viewport, scroll up
                     new_selected
                 } else {
                     scroll_offset
@@ -1683,10 +1732,11 @@ impl App {
                     filter_mode,
                 };
             } else if event::is_page_down(&key) {
-                // Page down
-                let page_size = 20usize;
+                // Page down - move by page_size items
+                let page_size = 15usize;
                 let new_selected = (selected_item + page_size).min(total_items.saturating_sub(1));
-                let new_scroll = new_selected.saturating_sub(page_size / 2);
+                // Keep cursor near top of viewport after page down
+                let new_scroll = new_selected.saturating_sub(2);
                 self.state = AppState::DryRunPreview {
                     result,
                     direction,
@@ -1697,10 +1747,11 @@ impl App {
                     filter_mode,
                 };
             } else if event::is_page_up(&key) {
-                // Page up
-                let page_size = 20usize;
+                // Page up - move by page_size items
+                let page_size = 15usize;
                 let new_selected = selected_item.saturating_sub(page_size);
-                let new_scroll = new_selected.saturating_sub(page_size / 2).max(0);
+                // Keep cursor near bottom of viewport after page up
+                let new_scroll = new_selected.saturating_sub(2);
                 self.state = AppState::DryRunPreview {
                     result,
                     direction,
@@ -2276,14 +2327,24 @@ impl App {
     }
 
     /// Start sync operation
-    fn start_sync(&mut self, direction: SyncDirection, selected_set_ids: Option<HashSet<i32>>) {
+    fn start_sync(
+        &mut self,
+        direction: SyncDirection,
+        selected_set_ids: Option<HashSet<i32>>,
+        selected_folders: Option<HashSet<String>>,
+    ) {
         // Reset cancellation flag before starting
         self.reset_cancel();
 
-        let count_msg = if let Some(ref ids) = selected_set_ids {
-            format!(" ({} selected)", ids.len())
-        } else {
-            String::new()
+        let count_msg = match (&selected_set_ids, &selected_folders) {
+            (Some(ids), Some(folders)) => {
+                // Count unique selections (some may overlap)
+                let total = ids.len().max(folders.len());
+                format!(" ({} selected)", total)
+            }
+            (Some(ids), None) => format!(" ({} selected)", ids.len()),
+            (None, Some(folders)) => format!(" ({} selected)", folders.len()),
+            (None, None) => String::new(),
         };
 
         self.state = AppState::Syncing {
@@ -2295,9 +2356,11 @@ impl App {
             stats: SyncStats::default(),
             is_paused: false,
         };
-        let _ = self
-            .worker_tx
-            .send(WorkerMessage::StartSync { direction, selected_set_ids });
+        let _ = self.worker_tx.send(WorkerMessage::StartSync {
+            direction,
+            selected_set_ids,
+            selected_folders,
+        });
     }
 
     /// Start dry run operation

@@ -29,6 +29,8 @@ impl std::fmt::Display for DryRunAction {
 pub struct DryRunItem {
     /// Online beatmap set ID (if available)
     pub set_id: Option<i32>,
+    /// Folder name in osu!stable (always available for stable sets)
+    pub folder_name: Option<String>,
     /// Title of the beatmap set
     pub title: String,
     /// Artist of the beatmap set
@@ -55,6 +57,7 @@ impl DryRunItem {
 
         Self {
             set_id: set.id,
+            folder_name: set.folder_name.clone(),
             title,
             artist,
             action,
@@ -77,6 +80,7 @@ impl DryRunItem {
 
         Self {
             set_id: set.online_id,
+            folder_name: None, // Lazer doesn't use folder-based storage
             title,
             artist,
             action,
@@ -199,6 +203,7 @@ mod tests {
 
         result.add_item(DryRunItem {
             set_id: Some(1),
+            folder_name: Some("1 Artist - Test".to_string()),
             title: "Test".to_string(),
             artist: "Artist".to_string(),
             action: DryRunAction::Import,
@@ -208,6 +213,7 @@ mod tests {
 
         result.add_item(DryRunItem {
             set_id: Some(2),
+            folder_name: Some("2 Artist 2 - Test 2".to_string()),
             title: "Test 2".to_string(),
             artist: "Artist 2".to_string(),
             action: DryRunAction::Skip,

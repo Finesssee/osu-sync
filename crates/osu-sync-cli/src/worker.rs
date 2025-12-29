@@ -84,9 +84,9 @@ fn run_worker(
                 cancelled.store(false, Ordering::SeqCst);
                 handle_scan(&app_tx, stable, lazer);
             }
-            Ok(WorkerMessage::StartSync { direction, selected_set_ids }) => {
+            Ok(WorkerMessage::StartSync { direction, selected_set_ids, selected_folders }) => {
                 cancelled.store(false, Ordering::SeqCst);
-                handle_sync(&app_tx, direction, Arc::clone(&cancelled), selected_set_ids);
+                handle_sync(&app_tx, direction, Arc::clone(&cancelled), selected_set_ids, selected_folders);
             }
             Ok(WorkerMessage::StartDryRun { direction }) => {
                 cancelled.store(false, Ordering::SeqCst);
@@ -297,6 +297,7 @@ fn handle_sync(
     direction: SyncDirection,
     cancelled: Arc<AtomicBool>,
     selected_set_ids: Option<HashSet<i32>>,
+    selected_folders: Option<HashSet<String>>,
 ) {
     let config = Config::load();
 
@@ -352,6 +353,11 @@ fn handle_sync(
     // Add selected set IDs if provided (for user selection from dry run)
     if let Some(set_ids) = selected_set_ids {
         builder = builder.selected_set_ids(set_ids);
+    }
+
+    // Add selected folders if provided (fallback for sets without IDs)
+    if let Some(folders) = selected_folders {
+        builder = builder.selected_folders(folders);
     }
 
     let engine = match builder.build() {
