@@ -39,3 +39,7 @@ crossterm = "0.28"
 
 # GUI dependencies
 iced = { version = "0.13", features = ["tokio"] }
+
+# Vision/capture dependencies
+image = "0.25"
+base64 = "0.22"

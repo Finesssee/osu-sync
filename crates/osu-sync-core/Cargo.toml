@@ -58,6 +58,10 @@ windows = { version = "0.54", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+# Vision/capture (Windows only)
+windows-capture = "1.3"
+image = "0.25"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3.14"
