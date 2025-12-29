@@ -10,6 +10,7 @@ use md5::{Digest, Md5};
 use crate::beatmap::BeatmapSet;
 use crate::error::Result;
 use crate::lazer::{LazerBeatmapSet, LazerFileStore};
+use crate::utils::sanitize_filename;
 
 use super::types::{
     AudioFormat, AudioInfo, AudioMetadata, ExtractionProgress, ExtractionProgressCallback,
@@ -683,30 +684,9 @@ impl MediaExtractor {
     }
 }
 
-/// Sanitize a filename by removing invalid characters
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("normal_name"), "normal_name");
-        assert_eq!(sanitize_filename("path/with/slashes"), "path_with_slashes");
-        assert_eq!(sanitize_filename("file:name"), "file_name");
-        assert_eq!(sanitize_filename("file*name?"), "file_name_");
-        assert_eq!(sanitize_filename("file<>|name"), "file___name");
-        assert_eq!(sanitize_filename("\"quoted\""), "_quoted_");
-        assert_eq!(sanitize_filename("Artist\\Song"), "Artist_Song");
-    }
 
     #[test]
     fn test_is_audio_file() {

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::beatmap::GameMode;
 use crate::error::Result;
+use crate::utils::sanitize_filename;
 
 use super::filter::ReplayFilter;
 use super::model::{
@@ -267,17 +268,6 @@ impl ReplayExporter {
     }
 }
 
-/// Sanitize a string for use as a filename
-pub fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
 
 /// Format a Unix timestamp as a date string (YYYY-MM-DD)
 fn format_date(timestamp: i64) -> String {
@@ -320,18 +310,6 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 mod tests {
     use super::*;
     use crate::replay::Grade;
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("normal_name"), "normal_name");
-        assert_eq!(sanitize_filename("path/with/slashes"), "path_with_slashes");
-        assert_eq!(sanitize_filename("file:name"), "file_name");
-        assert_eq!(sanitize_filename("file*name?"), "file_name_");
-        assert_eq!(sanitize_filename("file<>|name"), "file___name");
-        assert_eq!(sanitize_filename("\"quoted\""), "_quoted_");
-        assert_eq!(sanitize_filename("  trimmed  "), "trimmed");
-        assert_eq!(sanitize_filename("Artist\\Song"), "Artist_Song");
-    }
 
     #[test]
     fn test_format_date() {

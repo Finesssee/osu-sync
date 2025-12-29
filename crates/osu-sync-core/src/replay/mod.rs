@@ -5,7 +5,8 @@ mod filter;
 mod model;
 mod reader;
 
-pub use exporter::{sanitize_filename, ReplayExporter};
+pub use crate::utils::sanitize_filename;
+pub use exporter::ReplayExporter;
 pub use filter::ReplayFilter;
 pub use model::{
     ExportOrganization, Grade, ReplayExportResult, ReplayExportStats, ReplayInfo, ReplayProgress,

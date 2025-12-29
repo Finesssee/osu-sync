@@ -3,6 +3,7 @@
 use crate::beatmap::BeatmapSet;
 use crate::error::Result;
 use crate::parser::extract_osz;
+use crate::unified::copy_dir_recursive;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -128,25 +129,4 @@ fn uuid_simple() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     format!("{:x}{:x}", duration.as_secs(), duration.subsec_nanos())
-}
-
-/// Recursively copy a directory
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !dst.exists() {
-        fs::create_dir_all(dst)?;
-    }
-
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
 }

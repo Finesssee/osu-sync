@@ -10,6 +10,7 @@
 use crate::beatmap::BeatmapSet;
 use crate::error::{Error, Result};
 use crate::parser::create_osz_from_set;
+use crate::utils::sanitize_filename;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -456,28 +457,5 @@ impl LazerImporter {
     /// Clear tracking of pending imports (after successful batch import)
     pub fn clear_pending(&mut self) {
         self.pending_imports.clear();
-    }
-}
-
-/// Sanitize a filename for safe filesystem use
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c => c,
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("normal"), "normal");
-        assert_eq!(sanitize_filename("a/b\\c:d"), "a_b_c_d");
-        assert_eq!(sanitize_filename("test*file?"), "test_file_");
-        assert_eq!(sanitize_filename("good - name"), "good - name");
     }
 }
