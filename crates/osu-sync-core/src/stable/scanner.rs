@@ -144,22 +144,42 @@ impl Default for StableScanCache {
     }
 }
 
+/// File metadata returned alongside hash to avoid redundant fs::metadata calls
+#[derive(Debug, Clone)]
+struct FileHashResult {
+    /// Blake3 hash as hex string
+    hash: String,
+    /// File size in bytes
+    size: u64,
+    /// Modification time as seconds since UNIX epoch
+    mtime_secs: u64,
+}
+
 /// Hash a file using Blake3 (5-10x faster than SHA-256)
 /// Uses memory-mapping for files > 1MB for better performance
-fn hash_file_blake3(path: &Path) -> std::io::Result<String> {
+/// Returns hash along with file metadata to avoid redundant fs::metadata calls
+fn hash_file_blake3(path: &Path) -> std::io::Result<FileHashResult> {
     let metadata = fs::metadata(path)?;
     let size = metadata.len();
-    
+    let mtime_secs = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     // Use memory-mapping for large files (> 1MB)
-    if size > 1024 * 1024 {
+    let hash = if size > 1024 * 1024 {
         let file = fs::File::open(path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        Ok(blake3::hash(&mmap).to_hex().to_string())
+        blake3::hash(&mmap).to_hex().to_string()
     } else {
         // For small files, regular read is fine
         let content = fs::read(path)?;
-        Ok(blake3::hash(&content).to_hex().to_string())
-    }
+        blake3::hash(&content).to_hex().to_string()
+    };
+
+    Ok(FileHashResult { hash, size, mtime_secs })
 }
 
 /// Check if a file needs rehashing based on mtime/size
@@ -568,15 +588,13 @@ impl StableScanner {
                 let path = entry.path();
                 if path.is_file() {
                     let hash_start = Instant::now();
-                    
+
                     // Use Blake3 for hashing (5-10x faster than SHA-256)
-                    if let Ok(hash) = hash_file_blake3(path) {
-                        let meta = fs::metadata(path).ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        
+                    // hash_file_blake3 returns hash + metadata to avoid redundant fs::metadata calls
+                    if let Ok(result) = hash_file_blake3(path) {
                         timing.file_hashing += hash_start.elapsed();
                         timing.files_hashed += 1;
-                        timing.bytes_hashed += size;
+                        timing.bytes_hashed += result.size;
 
                         let filename = path
                             .file_name()
@@ -584,26 +602,24 @@ impl StableScanner {
                             .unwrap_or_default();
 
                         // Cache the file info for incremental updates
-                        let relative_path = path.strip_prefix(&self.songs_path)
+                        let relative_path = path
+                            .strip_prefix(&self.songs_path)
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_else(|_| filename.clone());
-                        
-                        let mtime_secs = meta
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
 
-                        file_hash_cache.insert(relative_path, CachedFileInfo {
-                            mtime_secs,
-                            size,
-                            hash: hash.clone(),
-                        });
+                        file_hash_cache.insert(
+                            relative_path,
+                            CachedFileInfo {
+                                mtime_secs: result.mtime_secs,
+                                size: result.size,
+                                hash: result.hash.clone(),
+                            },
+                        );
 
                         beatmap_set.files.push(crate::beatmap::BeatmapFile {
                             filename,
-                            hash,
-                            size,
+                            hash: result.hash,
+                            size: result.size,
                         });
                     }
                 }
@@ -726,37 +742,44 @@ mod tests {
     fn test_hash_file_blake3_small_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("small.txt");
-        
+
         // Create a small file (< 1MB, won't use memmap)
         let content = b"Hello, osu-sync!";
         fs::write(&file_path, content).unwrap();
-        
-        let hash = hash_file_blake3(&file_path).unwrap();
-        
+
+        let result = hash_file_blake3(&file_path).unwrap();
+
         // Blake3 produces 64 hex characters
-        assert_eq!(hash.len(), 64);
-        
+        assert_eq!(result.hash.len(), 64);
+
+        // Size should match content length
+        assert_eq!(result.size, content.len() as u64);
+
+        // mtime should be non-zero (file was just created)
+        assert!(result.mtime_secs > 0);
+
         // Hash should be consistent
-        let hash2 = hash_file_blake3(&file_path).unwrap();
-        assert_eq!(hash, hash2);
+        let result2 = hash_file_blake3(&file_path).unwrap();
+        assert_eq!(result.hash, result2.hash);
     }
 
     #[test]
     fn test_hash_file_blake3_large_file_uses_memmap() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("large.bin");
-        
+
         // Create a file > 1MB to trigger memmap path
         let content = vec![0u8; 2 * 1024 * 1024]; // 2MB
         fs::write(&file_path, &content).unwrap();
-        
-        let hash = hash_file_blake3(&file_path).unwrap();
-        
-        assert_eq!(hash.len(), 64);
-        
+
+        let result = hash_file_blake3(&file_path).unwrap();
+
+        assert_eq!(result.hash.len(), 64);
+        assert_eq!(result.size, content.len() as u64);
+
         // Verify it matches expected Blake3 hash of zeros
         let expected = blake3::hash(&content).to_hex().to_string();
-        assert_eq!(hash, expected);
+        assert_eq!(result.hash, expected);
     }
 
     #[test]
@@ -764,14 +787,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file1 = temp_dir.path().join("file1.txt");
         let file2 = temp_dir.path().join("file2.txt");
-        
+
         fs::write(&file1, b"content A").unwrap();
         fs::write(&file2, b"content B").unwrap();
-        
-        let hash1 = hash_file_blake3(&file1).unwrap();
-        let hash2 = hash_file_blake3(&file2).unwrap();
-        
-        assert_ne!(hash1, hash2);
+
+        let result1 = hash_file_blake3(&file1).unwrap();
+        let result2 = hash_file_blake3(&file2).unwrap();
+
+        assert_ne!(result1.hash, result2.hash);
     }
 
     #[test]
