@@ -884,7 +884,7 @@ impl UnifiedMigration {
             let entry = entry?;
             count += 1;
 
-            if entry.path().is_dir() {
+            if entry.file_type()?.is_dir() {
                 size += Self::calculate_directory_size(&entry.path())?;
             } else {
                 size += entry.metadata()?.len();

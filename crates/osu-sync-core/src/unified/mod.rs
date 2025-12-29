@@ -90,6 +90,7 @@ pub use manifest::{
 };
 
 pub use link::{
+    copy_dir_recursive,
     LinkCapability,
     LinkCheckInfo,
     LinkInfo,

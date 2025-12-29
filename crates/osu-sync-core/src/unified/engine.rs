@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use crate::error::{Error, Result};
 
 use super::config::{SharedResourceType, UnifiedStorageConfig, UnifiedStorageMode};
-use super::link::LinkManager;
+use super::link::{copy_dir_recursive, LinkManager};
 use super::manifest::{LinkedResource, LinkStatus, UnifiedManifest};
 
 /// Result of a setup operation.
@@ -1107,43 +1107,7 @@ impl UnifiedStorageEngine {
             }
 
             if src_path.is_dir() {
-                Self::copy_dir_recursive(&src_path, &dst_path)?;
-            } else {
-                fs::copy(&src_path, &dst_path).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to copy {} to {}: {}",
-                        src_path.display(),
-                        dst_path.display(),
-                        e
-                    ))
-                })?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Recursively copies a directory and its contents.
-    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-        fs::create_dir_all(dst).map_err(|e| {
-            Error::Other(format!(
-                "Failed to create directory {}: {}",
-                dst.display(),
-                e
-            ))
-        })?;
-
-        for entry in fs::read_dir(src).map_err(|e| {
-            Error::Other(format!("Failed to read directory {}: {}", src.display(), e))
-        })? {
-            let entry = entry.map_err(|e| {
-                Error::Other(format!("Failed to read directory entry: {}", e))
-            })?;
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-
-            if src_path.is_dir() {
-                Self::copy_dir_recursive(&src_path, &dst_path)?;
+                copy_dir_recursive(&src_path, &dst_path)?;
             } else {
                 fs::copy(&src_path, &dst_path).map_err(|e| {
                     Error::Other(format!(
