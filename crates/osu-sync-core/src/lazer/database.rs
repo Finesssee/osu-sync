@@ -980,12 +980,40 @@ impl LazerDatabase {
     }
 
     /// Get a beatmap set by its online ID
+    ///
+    /// # Deprecated
+    /// This method loads ALL beatmap sets to find one, which is O(n).
+    /// For efficient O(1) lookups, use [`LazerIndex::get_set`] instead:
+    /// ```ignore
+    /// let index = LazerIndex::build(&db)?;
+    /// if let Some(set) = index.get_set(online_id) {
+    ///     // use set
+    /// }
+    /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "Inefficient O(n) lookup. Use LazerIndex::get_set() for O(1) lookups."
+    )]
     pub fn get_set_by_online_id(&self, online_id: i32) -> Result<Option<LazerBeatmapSet>> {
         let sets = self.get_all_beatmap_sets()?;
         Ok(sets.into_iter().find(|s| s.online_id == Some(online_id)))
     }
 
     /// Get a beatmap by its MD5 hash
+    ///
+    /// # Deprecated
+    /// This method loads ALL beatmap sets to find one beatmap, which is O(n).
+    /// For efficient O(1) lookups, use [`LazerIndex::get_beatmap`] instead:
+    /// ```ignore
+    /// let index = LazerIndex::build(&db)?;
+    /// if let Some((set, beatmap)) = index.get_beatmap(md5) {
+    ///     // use set and beatmap
+    /// }
+    /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "Inefficient O(n) lookup. Use LazerIndex::get_beatmap() for O(1) lookups."
+    )]
     pub fn get_beatmap_by_md5(
         &self,
         md5: &str,
@@ -1082,6 +1110,22 @@ impl LazerIndex {
         self.by_md5.contains_key(md5)
     }
 
+    /// Get a beatmap set by online ID (O(1) lookup)
+    pub fn get_set(&self, online_id: i32) -> Option<&LazerBeatmapSet> {
+        self.by_online_id
+            .get(&online_id)
+            .map(|&idx| &self.sets[idx])
+    }
+
+    /// Get a beatmap by MD5 hash (O(1) lookup)
+    pub fn get_beatmap(&self, md5: &str) -> Option<(&LazerBeatmapSet, &LazerBeatmapInfo)> {
+        self.by_md5.get(md5).map(|&(set_idx, beatmap_idx)| {
+            let set = &self.sets[set_idx];
+            let beatmap = &set.beatmaps[beatmap_idx];
+            (set, beatmap)
+        })
+    }
+
     /// Get number of sets
     pub fn len(&self) -> usize {
         self.sets.len()
@@ -1090,6 +1134,11 @@ impl LazerIndex {
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.sets.is_empty()
+    }
+
+    /// Get total number of beatmaps (difficulties)
+    pub fn beatmap_count(&self) -> usize {
+        self.sets.iter().map(|s| s.beatmaps.len()).sum()
     }
 }
 
@@ -1373,12 +1422,40 @@ impl StableDatabase {
     }
 
     /// Get a beatmap set by its online ID
+    ///
+    /// # Deprecated
+    /// This method loads ALL beatmap sets to find one, which is O(n).
+    /// For efficient O(1) lookups, use [`StableIndex::get_set`] instead:
+    /// ```ignore
+    /// let index = StableIndex::build(&db)?;
+    /// if let Some(set) = index.get_set(online_id) {
+    ///     // use set
+    /// }
+    /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "Inefficient O(n) lookup. Use StableIndex::get_set() for O(1) lookups."
+    )]
     pub fn get_set_by_online_id(&self, online_id: i32) -> Result<Option<LazerBeatmapSet>> {
         let sets = self.get_all_beatmap_sets()?;
         Ok(sets.into_iter().find(|s| s.online_id == Some(online_id)))
     }
 
     /// Get a beatmap by its MD5 hash
+    ///
+    /// # Deprecated
+    /// This method loads ALL beatmap sets to find one beatmap, which is O(n).
+    /// For efficient O(1) lookups, use [`StableIndex::get_beatmap`] instead:
+    /// ```ignore
+    /// let index = StableIndex::build(&db)?;
+    /// if let Some((set, beatmap)) = index.get_beatmap(md5) {
+    ///     // use set and beatmap
+    /// }
+    /// ```
+    #[deprecated(
+        since = "0.1.0",
+        note = "Inefficient O(n) lookup. Use StableIndex::get_beatmap() for O(1) lookups."
+    )]
     pub fn get_beatmap_by_md5(
         &self,
         md5: &str,
