@@ -851,19 +851,49 @@ impl LinkManager {
 }
 
 /// Recursively copies a directory and its contents.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
+///
+/// This is a utility function used by the link manager for fallback copying
+/// when symlinks/junctions cannot be created, and also by other modules
+/// that need to copy directory trees.
+///
+/// # Arguments
+/// * `src` - Source directory to copy from
+/// * `dst` - Destination directory to copy to (will be created if needed)
+///
+/// # Errors
+/// Returns an error if any file operation fails (read, write, or create directory).
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst).map_err(|e| {
+        Error::Other(format!(
+            "Failed to create directory {}: {}",
+            dst.display(),
+            e
+        ))
+    })?;
 
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
+    for entry in fs::read_dir(src).map_err(|e| {
+        Error::Other(format!("Failed to read directory {}: {}", src.display(), e))
+    })? {
+        let entry = entry.map_err(|e| {
+            Error::Other(format!("Failed to read directory entry: {}", e))
+        })?;
+        let ty = entry.file_type().map_err(|e| {
+            Error::Other(format!("Failed to get file type: {}", e))
+        })?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
         if ty.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            fs::copy(&src_path, &dst_path)?;
+            fs::copy(&src_path, &dst_path).map_err(|e| {
+                Error::Other(format!(
+                    "Failed to copy {} to {}: {}",
+                    src_path.display(),
+                    dst_path.display(),
+                    e
+                ))
+            })?;
         }
     }
 
