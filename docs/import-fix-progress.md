@@ -1,7 +1,7 @@
 # Lazer Import Fix - Progress Documentation
 
 **Date:** 2025-12-29  
-**Status:** Implementation Plan Ready
+**Status:** ✅ IMPLEMENTED (commit 4f8d8b5)
 
 ---
 
@@ -248,28 +248,13 @@ pub fn trigger_batch_import(&self) -> Result<bool> {
 
 ---
 
-## Testing Checklist
-
-After implementing the fix:
-
-- [ ] Build: `cargo build --release -p osu-sync-cli`
-- [ ] Test with normal filename: `123456 Artist - Title.osz`
-- [ ] Test with `!` in filename: `123456 Artist - Song!.osz`
-- [ ] Test with `[]` in filename: `123456 Artist - Song [TV Size].osz`
-- [ ] Test with `&` in filename: `123456 A & B - Song.osz`
-- [ ] Test batch import of 100+ files
-- [ ] Verify no error dialogs appear
-- [ ] Verify beatmaps appear in lazer song select
-
----
-
 ## Files Modified This Session
 
 | File | Changes |
 |------|---------|
 | `core/src/sync/dry_run.rs` | Added `folder_name` field |
 | `core/src/sync/engine.rs` | Added `selected_folders` filtering logic |
-| `core/src/lazer/importer.rs` | Batch import with args (needs Windows fix) |
+| `core/src/lazer/importer.rs` | Windows special character fix with `raw_arg()` |
 | `cli/src/app.rs` | Filter mode fix, selection extraction |
 | `cli/src/worker.rs` | Pass `selected_folders` to sync |
 
@@ -293,9 +278,17 @@ cargo test -p osu-sync-core
 
 ---
 
-## Next Steps
+## Implementation Complete
 
-1. Wait for current PowerShell import to complete (~5600 files)
-2. Implement the native Rust fix in `importer.rs`
-3. Build and test with various special character filenames
-4. Commit all changes with appropriate message
+Native Rust fix has been implemented in commit `4f8d8b5`.
+
+### Testing Checklist
+
+- [x] Build: `cargo build --release -p osu-sync-cli`
+- [ ] Test with normal filename: `123456 Artist - Title.osz`
+- [ ] Test with `!` in filename: `123456 Artist - Song!.osz`
+- [ ] Test with `[]` in filename: `123456 Artist - Song [TV Size].osz`
+- [ ] Test with `&` in filename: `123456 A & B - Song.osz`
+- [ ] Test batch import of 100+ files
+- [ ] Verify no error dialogs appear
+- [ ] Verify beatmaps appear in lazer song select
