@@ -139,7 +139,7 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
         let songs_path = stable_path.join("Songs");
         if songs_path.exists() {
             let scanner = StableScanner::new(songs_path).skip_hashing();
-            match scanner.scan() {
+            match scanner.scan_parallel() {
                 Ok(sets) => Some((stable_path.clone(), sets.len())),
                 Err(e) => {
                     eprintln!("Warning: Failed to scan stable: {}", e);
