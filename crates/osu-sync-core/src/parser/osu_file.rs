@@ -3,16 +3,16 @@
 use crate::beatmap::{BeatmapDifficulty, BeatmapInfo, BeatmapMetadata, GameMode};
 use crate::error::{Error, Result};
 use md5::{Digest as Md5Digest, Md5};
-use sha2::Sha256;
 use std::fs;
 use std::path::Path;
 
 /// Parse a .osu file and extract beatmap information
+/// Uses Blake3 for fast hashing (5-10x faster than SHA-256)
 pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
     let content = fs::read(path)?;
 
-    // Calculate hashes
-    let sha256_hash = format!("{:x}", Sha256::digest(&content));
+    // Calculate hashes - use Blake3 instead of SHA-256 (5-10x faster)
+    let blake3_hash = blake3::hash(&content).to_hex().to_string();
     let md5_hash = format!("{:x}", Md5::digest(&content));
 
     // Parse with rosu-map
@@ -74,7 +74,7 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
     Ok(BeatmapInfo {
         metadata,
         difficulty,
-        hash: sha256_hash,
+        hash: blake3_hash, // Use Blake3 (5-10x faster than SHA-256)
         md5_hash,
         audio_file: beatmap.audio_file.clone(),
         background_file: extract_background(&beatmap),

@@ -4,6 +4,7 @@
 //!   osu-sync              Run TUI mode (default)
 //!   osu-sync --gui        Run GUI mode (requires 'gui' feature)
 //!   osu-sync --cli <cmd>  Run CLI mode (headless)
+//!   osu-sync --test <script>  Run automated TUI test
 //!   osu-sync --help       Show help
 
 use std::fs::File;
@@ -22,6 +23,8 @@ mod resolver;
 mod screens;
 pub mod theme;
 mod tui;
+pub mod tui_test;
+mod tui_runner;
 mod widgets;
 mod worker;
 
@@ -60,6 +63,18 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Check for --test flag
+    if let Some(test_pos) = args.iter().position(|a| a == "--test") {
+        let script = args.get(test_pos + 1);
+
+        if script.is_none() || script.map(|s| s == "--help" || s == "-h").unwrap_or(false) {
+            tui_runner::print_help();
+            return Ok(());
+        }
+
+        return tui_runner::run_test(script.unwrap());
+    }
+
     // Check for --gui flag
     if args.iter().any(|a| a == "--gui") {
         #[cfg(feature = "gui")]
@@ -91,13 +106,15 @@ fn print_help() {
     println!("    osu-sync [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    --gui           Run in GUI mode (requires 'gui' feature)");
-    println!("    --cli <cmd>     Run in CLI mode (headless, for scripting)");
-    println!("    --help          Show this help message");
+    println!("    --gui              Run in GUI mode (requires 'gui' feature)");
+    println!("    --cli <cmd>        Run in CLI mode (headless, for scripting)");
+    println!("    --test <script>    Run automated TUI test from script");
+    println!("    --help             Show this help message");
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
     println!();
     println!("For CLI mode help: osu-sync --cli --help");
+    println!("For test mode help: osu-sync --test --help");
 }
 
 fn init_logging() {
