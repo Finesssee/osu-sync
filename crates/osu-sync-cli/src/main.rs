@@ -25,8 +25,12 @@ pub mod theme;
 mod tui;
 pub mod tui_test;
 mod tui_runner;
+pub mod vision;
 mod widgets;
 mod worker;
+
+#[cfg(feature = "mcp")]
+mod mcp;
 
 use app::App;
 use worker::Worker;
@@ -38,6 +42,24 @@ fn main() -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
         return Ok(());
+    }
+
+    // Check for --tui-snapshot flag (Vision Phase 1)
+    if args.iter().any(|a| a == "--tui-snapshot") {
+        let json_output = args.iter().any(|a| a == "--json");
+        return run_tui_snapshot(json_output);
+    }
+
+    // Check for --capture-game flag (Vision Phase 2)
+    if let Some(pos) = args.iter().position(|a| a == "--capture-game") {
+        let target = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("any");
+        return run_capture_game(target);
+    }
+
+    // Check for --mcp flag (Vision Phase 3)
+    #[cfg(feature = "mcp")]
+    if args.iter().any(|a| a == "--mcp") {
+        return run_mcp_server();
     }
 
     // Check for --cli flag
@@ -106,15 +128,26 @@ fn print_help() {
     println!("    osu-sync [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    --gui              Run in GUI mode (requires 'gui' feature)");
-    println!("    --cli <cmd>        Run in CLI mode (headless, for scripting)");
-    println!("    --test <script>    Run automated TUI test from script");
-    println!("    --help             Show this help message");
+    println!("    --gui                   Run in GUI mode (requires 'gui' feature)");
+    println!("    --cli <cmd>             Run in CLI mode (headless, for scripting)");
+    println!("    --test <script>         Run automated TUI test from script");
+    println!("    --tui-snapshot [--json] Capture TUI state (for AI vision)");
+    println!("    --capture-game [target] Capture osu! game window (Windows only)");
+    #[cfg(feature = "mcp")]
+    println!("    --mcp                   Start MCP server over stdio");
+    println!("    --help                  Show this help message");
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
     println!();
     println!("For CLI mode help: osu-sync --cli --help");
     println!("For test mode help: osu-sync --test --help");
+    println!();
+    println!("VISION COMMANDS:");
+    println!("    --tui-snapshot          Output TUI buffer as text");
+    println!("    --tui-snapshot --json   Output TUI state as structured JSON");
+    println!("    --capture-game          Capture any osu! window screenshot");
+    println!("    --capture-game stable   Capture osu!stable window");
+    println!("    --capture-game lazer    Capture osu!lazer window");
 }
 
 fn init_logging() {
@@ -174,4 +207,76 @@ fn run() -> anyhow::Result<()> {
     worker.shutdown();
 
     Ok(())
+}
+
+/// Capture TUI snapshot for AI vision (Phase 1)
+fn run_tui_snapshot(json_output: bool) -> anyhow::Result<()> {
+    use vision::TuiSnapshot;
+
+    let snapshot = TuiSnapshot::capture(120, 30)?;
+
+    if json_output {
+        println!("{}", snapshot.as_json()?);
+    } else {
+        print!("{}", snapshot.as_text());
+    }
+
+    Ok(())
+}
+
+/// Capture game window screenshot (Phase 2)
+fn run_capture_game(target: &str) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use osu_sync_core::vision::{capture_game_window, CaptureTarget};
+
+        let target = match target.to_lowercase().as_str() {
+            "stable" => CaptureTarget::Stable,
+            "lazer" => CaptureTarget::Lazer,
+            _ => CaptureTarget::Any,
+        };
+
+        let frame = capture_game_window(target)?;
+
+        // Save to file
+        let filename = format!("osu_capture_{}.png", chrono::Utc::now().timestamp());
+        std::fs::write(&filename, &frame.png_bytes)?;
+
+        eprintln!(
+            "Captured {}x{} from '{}' -> {}",
+            frame.width, frame.height, frame.window_title, filename
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        anyhow::bail!("Game window capture is only supported on Windows")
+    }
+}
+
+/// Start MCP server over stdio (Phase 3)
+#[cfg(feature = "mcp")]
+fn run_mcp_server() -> anyhow::Result<()> {
+    // MCP uses stdio for JSON-RPC - must suppress ALL non-JSON output
+    // Disable any color/ANSI codes that might corrupt the protocol
+    std::env::set_var("NO_COLOR", "1");
+    std::env::set_var("TERM", "dumb");
+    std::env::set_var("CLICOLOR", "0");
+    std::env::set_var("CLICOLOR_FORCE", "0");
+    
+    // Redirect any tracing/logging to stderr with ANSI disabled
+    // to prevent corruption of stdout JSON-RPC stream
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::ERROR)
+        .with_writer(std::io::stderr.with_max_level(tracing::Level::ERROR))
+        .with_ansi(false)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(mcp::run_mcp_server())
 }

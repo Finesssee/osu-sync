@@ -53,6 +53,8 @@ pub mod stable;
 pub mod stats;
 pub mod sync;
 pub mod unified;
+pub mod utils;
+pub mod vision;
 
 // Re-export key types for convenience
 
@@ -133,3 +135,6 @@ pub use replay::{
 
 // Activity log
 pub use activity::{ActivityEntry, ActivityLog, ActivityType, MAX_LOG_ENTRIES};
+
+// Vision/capture
+pub use vision::{capture_game_window, list_osu_windows, CapturedFrame, CaptureTarget, WindowInfo};
