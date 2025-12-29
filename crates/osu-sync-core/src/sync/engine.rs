@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::beatmap::BeatmapSet;
@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateIndex, DuplicateStrategy};
 use crate::error::{Error, Result};
 use crate::filter::{FilterCriteria, FilterEngine};
-use crate::lazer::{LazerDatabase, LazerImporter};
+use crate::lazer::{LazerBeatmapSet, LazerDatabase, LazerImporter};
 use crate::stable::{StableImporter, StableScanner};
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::direction::SyncDirection;
@@ -141,6 +141,9 @@ pub struct SyncEngine {
     selected_folders: Option<HashSet<String>>,
     /// Optional cancellation token for aborting sync
     cancellation: Option<Arc<AtomicBool>>,
+    /// Session-level cache for lazer beatmap sets to avoid repeated database queries
+    /// Each query can take 1-3 minutes, so caching provides significant speedup
+    lazer_sets_cache: OnceLock<Vec<LazerBeatmapSet>>,
 }
 
 impl SyncEngine {
@@ -164,6 +167,7 @@ impl SyncEngine {
             selected_set_ids: None,
             selected_folders: None,
             cancellation: None,
+            lazer_sets_cache: OnceLock::new(),
         }
     }
 
@@ -239,6 +243,29 @@ impl SyncEngine {
             .unwrap_or(false)
     }
 
+    /// Get lazer beatmap sets with session-level caching
+    ///
+    /// This method caches the result of `get_all_beatmap_sets()` to avoid
+    /// repeated expensive database queries during a sync session.
+    /// Each query can take 1-3 minutes, so caching provides significant speedup.
+    fn get_lazer_sets_cached(&self) -> Result<&Vec<LazerBeatmapSet>> {
+        // Check if already cached, return immediately
+        if let Some(cached) = self.lazer_sets_cache.get() {
+            return Ok(cached);
+        }
+
+        // Load from database (this is the expensive operation)
+        tracing::debug!("Loading lazer beatmap sets from database (will be cached for session)");
+        let sets = self.lazer_database.get_all_beatmap_sets()?;
+
+        // Store in cache - OnceLock guarantees this only happens once
+        // If another thread beat us, set() returns Err but we still get the cached value
+        let _ = self.lazer_sets_cache.set(sets);
+
+        // Return the cached reference
+        Ok(self.lazer_sets_cache.get().expect("cache was just set"))
+    }
+
     /// Apply filter to stable beatmap sets, returning indices of matching sets
     fn filter_stable_sets(&self, sets: &[BeatmapSet]) -> Vec<usize> {
         let mut indices: Vec<usize> = if let Some(ref filter) = self.filter {
@@ -279,6 +306,34 @@ impl SyncEngine {
                 }
 
                 false
+            });
+        }
+
+        indices
+    }
+
+    /// Apply filter to lazer beatmap sets, returning indices of matching sets
+    fn filter_lazer_sets(&self, sets: &[LazerBeatmapSet]) -> Vec<usize> {
+        let mut indices: Vec<usize> = if let Some(ref filter) = self.filter {
+            sets.iter()
+                .enumerate()
+                .filter(|(_, set)| FilterEngine::matches_lazer(set, filter))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            // No filter, include all
+            (0..sets.len()).collect()
+        };
+
+        // Apply user selection filter if set (by ID)
+        if let Some(ref selected_ids) = self.selected_set_ids {
+            indices.retain(|&i| {
+                let set = &sets[i];
+                if let Some(id) = set.online_id {
+                    selected_ids.contains(&id)
+                } else {
+                    false
+                }
             });
         }
 
@@ -358,8 +413,8 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        // Get lazer beatmaps and build fast lookup index (O(n) once)
-        let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
+        // Get lazer beatmaps (cached) and build fast lookup index (O(n) once)
+        let lazer_sets = self.get_lazer_sets_cached()?;
         let lazer_beatmap_sets: Vec<BeatmapSet> = lazer_sets
             .iter()
             .map(|ls| self.lazer_database.to_beatmap_set(ls))
@@ -474,26 +529,30 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        // Get lazer beatmaps
-        let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
-        let total = lazer_sets.len();
+        // Get lazer beatmaps (cached)
+        let lazer_sets = self.get_lazer_sets_cached()?;
+
+        // Apply filter to get matching sets
+        let filtered_indices = self.filter_lazer_sets(lazer_sets);
+        let total = filtered_indices.len();
 
         // Scan stable for duplicate detection (uses parallel scanning with caching)
         let stable_sets = self.stable_scanner.scan_parallel()?;
         let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
 
         // Analyze each lazer set
-        for (idx, lazer_set) in lazer_sets.iter().enumerate() {
+        for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
             // Check for cancellation
             if self.is_cancelled() {
-                tracing::info!("Dry run cancelled by user at item {}/{}", idx, total);
+                tracing::info!("Dry run cancelled by user at item {}/{}", progress_idx, total);
                 break;
             }
 
+            let lazer_set = &lazer_sets[*set_idx];
             let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
 
             self.report_progress(SyncProgress {
-                current: idx + 1,
+                current: progress_idx + 1,
                 total,
                 current_name: beatmap_set.generate_folder_name(),
                 phase: SyncPhase::Deduplicating,
@@ -549,7 +608,7 @@ impl SyncEngine {
             .map(|entries| {
                 entries
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_file())
+                    .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
                     .filter_map(|e| e.metadata().ok())
                     .map(|m| m.len())
                     .sum()
@@ -637,7 +696,7 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
+        let lazer_sets = self.get_lazer_sets_cached()?;
         let lazer_beatmap_sets: Vec<BeatmapSet> = lazer_sets
             .iter()
             .map(|ls| self.lazer_database.to_beatmap_set(ls))
@@ -740,7 +799,7 @@ impl SyncEngine {
     fn sync_lazer_to_stable(&self, resolver: &dyn ConflictResolver) -> Result<SyncResult> {
         let mut result = SyncResult::new(SyncDirection::LazerToStable);
 
-        // Phase 1: Get lazer beatmaps
+        // Phase 1: Get lazer beatmaps (cached)
         self.report_progress(SyncProgress {
             current: 0,
             total: 0,
@@ -749,10 +808,28 @@ impl SyncEngine {
             ..Default::default()
         });
 
-        let lazer_sets = self.lazer_database.get_all_beatmap_sets()?;
-        let total = lazer_sets.len();
+        let lazer_sets = self.get_lazer_sets_cached()?;
 
-        tracing::info!("Found {} beatmap sets in osu!lazer", total);
+        // Apply filter to get matching sets
+        let filtered_indices = self.filter_lazer_sets(lazer_sets);
+        let total = filtered_indices.len();
+
+        if let Some(ref filter) = self.filter {
+            tracing::info!(
+                "Filter applied: {} of {} beatmap sets match ({})",
+                total,
+                lazer_sets.len(),
+                filter.summary()
+            );
+        } else if self.selected_set_ids.is_some() {
+            tracing::info!(
+                "Selection applied: {} of {} beatmap sets selected",
+                total,
+                lazer_sets.len()
+            );
+        } else {
+            tracing::info!("Found {} beatmap sets in osu!lazer", total);
+        }
 
         // Phase 2: Scan stable for duplicate detection
         self.report_progress(SyncProgress {
@@ -773,18 +850,19 @@ impl SyncEngine {
                 .ok_or_else(|| Error::Config("Stable path not configured".to_string()))?,
         );
 
-        for (idx, lazer_set) in lazer_sets.iter().enumerate() {
+        for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
             // Check for cancellation
             if self.is_cancelled() {
-                tracing::info!("Sync cancelled by user at item {}/{}", idx, total);
+                tracing::info!("Sync cancelled by user at item {}/{}", progress_idx, total);
                 break;
             }
 
+            let lazer_set = &lazer_sets[*set_idx];
             let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
             let set_name = beatmap_set.generate_folder_name();
 
             self.report_progress(SyncProgress {
-                current: idx + 1,
+                current: progress_idx + 1,
                 total,
                 current_name: set_name.clone(),
                 phase: SyncPhase::Importing,
@@ -859,7 +937,7 @@ impl SyncEngine {
         // Collect entries first
         let entries: Vec<_> = std::fs::read_dir(&folder_path)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
+            .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
             .collect();
 
         // Read files in parallel using rayon (2-3x speedup for large beatmap sets)
