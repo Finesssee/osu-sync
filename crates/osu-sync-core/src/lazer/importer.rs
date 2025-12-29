@@ -14,6 +14,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// Windows flag to prevent console window from appearing
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// Result of an import operation
 #[derive(Debug, Clone)]
 pub struct ImportResult {
@@ -216,117 +223,162 @@ impl LazerImporter {
     }
 
     /// Trigger lazer to import a single .osz file
+    ///
+    /// On Windows, uses `raw_arg()` with quoted path to handle special characters
+    /// like `!`, `[]`, `&` that would otherwise break command-line parsing.
     fn trigger_single_import(&self, osz_path: &Path) -> bool {
-        if let Some(ref lazer_exe) = self.lazer_exe {
-            // Launch lazer with the .osz file - lazer will import and exit
-            // Using --import flag if available, otherwise just pass the file
+        let Some(ref lazer_exe) = self.lazer_exe else {
+            return false;
+        };
+
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, use raw_arg with quoted path to handle special characters
+            // This prevents issues with !, [], &, etc. in filenames
+            let quoted_path = format!("\"{}\"", osz_path.display());
             match Command::new(lazer_exe)
-                .arg(osz_path)
+                .raw_arg(&quoted_path)
+                .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
             {
-                Ok(mut child) => {
-                    // Wait a short time to let lazer start processing
-                    // Don't wait for full completion as lazer stays open
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    
-                    // Check if process is still running (good sign)
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            if status.success() {
-                                tracing::info!("Lazer import triggered successfully");
-                                return true;
-                            } else {
-                                tracing::warn!("Lazer exited with error: {:?}", status);
-                            }
-                        }
-                        Ok(None) => {
-                            // Still running, which is expected
-                            tracing::info!("Lazer import triggered, processing...");
-                            return true;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to check lazer status: {}", e);
-                        }
-                    }
+                Ok(_) => {
+                    tracing::debug!("Lazer import triggered for: {}", osz_path.display());
+                    return true;
                 }
                 Err(e) => {
                     tracing::warn!("Failed to launch lazer for import: {}", e);
                 }
             }
         }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On Linux/macOS, standard arg passing works fine
+            match Command::new(lazer_exe).arg(osz_path).spawn() {
+                Ok(_) => {
+                    tracing::debug!("Lazer import triggered for: {}", osz_path.display());
+                    return true;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to launch lazer for import: {}", e);
+                }
+            }
+        }
+
         false
     }
 
     /// Trigger lazer to process all pending imports
     ///
-    /// Call this after batch imports to launch lazer with .osz files as arguments.
-    /// Lazer will import all files passed as command-line arguments.
+    /// On Windows: Launches lazer once per file with proper quoting to handle special characters.
+    /// On Linux/macOS: Launches lazer with batch of files as arguments.
     pub fn trigger_batch_import(&self) -> Result<bool> {
         if self.pending_imports.is_empty() {
             return Ok(false);
         }
 
-        if let Some(ref lazer_exe) = self.lazer_exe {
-            let total = self.pending_imports.len();
-            tracing::info!(
-                "Triggering lazer to import {} beatmaps",
-                total
+        let Some(ref lazer_exe) = self.lazer_exe else {
+            tracing::warn!(
+                "Lazer executable not found. {} .osz files are waiting in: {}",
+                self.pending_imports.len(),
+                self.import_path.display()
             );
+            tracing::warn!("Please start osu!lazer manually to import them.");
+            return Ok(false);
+        };
 
-            // Windows has ~32767 char command line limit, but safer to use ~8000
-            // Each path is roughly 80-150 chars, so batch ~50 files at a time
+        let total = self.pending_imports.len();
+        tracing::info!("Triggering lazer to import {} beatmaps", total);
+
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, launch each file individually to handle special characters
+            // This is slower but reliable for filenames with !, [], &, etc.
+            let mut success_count = 0;
+            let mut fail_count = 0;
+
+            for (i, osz_path) in self.pending_imports.iter().enumerate() {
+                let quoted_path = format!("\"{}\"", osz_path.display());
+
+                match Command::new(lazer_exe)
+                    .raw_arg(&quoted_path)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                {
+                    Ok(_) => {
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to import {}: {}", osz_path.display(), e);
+                        fail_count += 1;
+                    }
+                }
+
+                // Progress logging every 50 files
+                if (i + 1) % 50 == 0 {
+                    tracing::info!("Import progress: {}/{} files sent to lazer", i + 1, total);
+                }
+
+                // Small delay to not overwhelm lazer (100ms between each)
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            if fail_count > 0 {
+                tracing::warn!(
+                    "Import complete: {} succeeded, {} failed",
+                    success_count,
+                    fail_count
+                );
+            } else {
+                tracing::info!("All {} files sent to lazer for import", success_count);
+            }
+
+            return Ok(success_count > 0);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On Linux/macOS, batch approach works fine
             const BATCH_SIZE: usize = 50;
-            
+
             let batches: Vec<_> = self.pending_imports.chunks(BATCH_SIZE).collect();
             let batch_count = batches.len();
-            
+
             if batch_count > 1 {
                 tracing::info!(
                     "Splitting into {} batches of up to {} files each",
-                    batch_count, BATCH_SIZE
+                    batch_count,
+                    BATCH_SIZE
                 );
             }
 
-            // Launch lazer with first batch - it will import those files
-            // User can restart lazer for remaining batches, or we could launch multiple times
-            let first_batch = &batches[0];
-            
-            match Command::new(lazer_exe)
-                .args(first_batch.iter().map(|p| p.as_os_str()))
-                .spawn()
-            {
-                Ok(_) => {
-                    if batch_count > 1 {
-                        let remaining = total - first_batch.len();
+            // Launch lazer for each batch
+            for (batch_idx, batch) in batches.iter().enumerate() {
+                match Command::new(lazer_exe)
+                    .args(batch.iter().map(|p| p.as_os_str()))
+                    .spawn()
+                {
+                    Ok(_) => {
                         tracing::info!(
-                            "Lazer launched with first {} files. {} files remain in import folder for next launch.",
-                            first_batch.len(),
-                            remaining
+                            "Batch {}/{}: {} files sent to lazer",
+                            batch_idx + 1,
+                            batch_count,
+                            batch.len()
                         );
-                        tracing::info!(
-                            "Restart lazer to import remaining files from: {}",
-                            self.import_path.display()
-                        );
-                    } else {
-                        tracing::info!("Lazer launched with all {} files for import", total);
                     }
-                    return Ok(true);
+                    Err(e) => {
+                        tracing::warn!("Batch {}/{} failed: {}", batch_idx + 1, batch_count, e);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to launch lazer: {}", e);
-                    return Err(Error::Other(format!("Failed to launch lazer: {}", e)));
+
+                // Wait between batches
+                if batch_idx < batch_count - 1 {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             }
+
+            return Ok(true);
         }
-
-        tracing::warn!(
-            "Lazer executable not found. {} .osz files are waiting in: {}",
-            self.pending_imports.len(),
-            self.import_path.display()
-        );
-        tracing::warn!("Please start osu!lazer manually to import them.");
-
-        Ok(false)
     }
 
     /// Check if we can trigger imports (lazer exe found)
