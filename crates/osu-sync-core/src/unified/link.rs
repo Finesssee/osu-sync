@@ -34,6 +34,19 @@ pub struct LinkInfo {
     pub link_type: LinkType,
 }
 
+/// Information about the status of an existing link.
+#[derive(Debug, Clone)]
+pub struct LinkCheckInfo {
+    /// Whether the link exists and points to a valid target.
+    pub is_valid: bool,
+    /// The link path that was checked.
+    pub link_path: PathBuf,
+    /// The target path the link points to (if readable).
+    pub target_path: Option<PathBuf>,
+    /// The type of link (if determinable).
+    pub link_type: Option<LinkType>,
+}
+
 impl LinkInfo {
     /// Creates a new `LinkInfo` instance.
     pub fn new(source: PathBuf, link: PathBuf, link_type: LinkType) -> Self {
@@ -418,10 +431,14 @@ impl LinkManager {
         }
     }
 
-    /// Removes a link without affecting the target.
+    /// Removes a link without affecting the target (static version).
     ///
     /// For junctions and symbolic links, this removes the link itself.
     /// For copies, this removes the copy.
+    ///
+    /// This is a static method that can be called without a `LinkManager` instance.
+    /// For consistency with other instance methods, prefer using the instance
+    /// method `remove_link(&self, path)` when you have a `LinkManager` instance.
     ///
     /// # Errors
     ///
@@ -464,6 +481,84 @@ impl LinkManager {
                 fs::remove_file(path)?;
             }
             Ok(())
+        }
+    }
+
+    /// Checks the status of a link at the given path.
+    ///
+    /// This method verifies whether a link exists, what type it is,
+    /// and whether its target is accessible.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to check for a link.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `LinkCheckInfo` containing information about the link status.
+    pub fn check_link(&self, path: &Path) -> Result<LinkCheckInfo> {
+        // Check if the path exists as a link
+        let is_link = Self::is_link(path);
+
+        if !is_link {
+            // Path is not a link - it might not exist or be a regular file/dir
+            let exists = path.exists();
+            return Ok(LinkCheckInfo {
+                is_valid: false,
+                link_path: path.to_path_buf(),
+                target_path: None,
+                link_type: if exists { None } else { None },
+            });
+        }
+
+        // It's a link - try to read the target
+        let target = Self::read_link(path).ok();
+        let target_exists = target.as_ref().map(|t| t.exists()).unwrap_or(false);
+
+        // Determine link type
+        let link_type = if Self::is_junction(path) {
+            Some(LinkType::Junction)
+        } else {
+            Some(LinkType::Symlink)
+        };
+
+        Ok(LinkCheckInfo {
+            is_valid: target_exists,
+            link_path: path.to_path_buf(),
+            target_path: target,
+            link_type,
+        })
+    }
+
+    /// Creates a link from `link` to `target`.
+    ///
+    /// This is a convenience method that automatically chooses between
+    /// `link_directory` and `link_file` based on whether the target is
+    /// a directory or file.
+    ///
+    /// # Arguments
+    ///
+    /// * `link` - The path where the link should be created.
+    /// * `target` - The target path the link should point to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The target doesn't exist
+    /// - The link path already exists
+    /// - Link creation fails
+    pub fn create_link(&self, link: &Path, target: &Path) -> Result<LinkInfo> {
+        if !target.exists() {
+            return Err(Error::Other(format!(
+                "Target path does not exist: {}",
+                target.display()
+            )));
+        }
+
+        if target.is_dir() {
+            self.link_directory(target, link)
+        } else {
+            self.link_file(target, link)
         }
     }
 

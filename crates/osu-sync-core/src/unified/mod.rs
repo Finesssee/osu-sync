@@ -36,8 +36,10 @@
 //! ```
 
 mod config;
+mod engine;
 mod game_detect;
 mod link;
+mod manifest;
 mod migration;
 mod watcher;
 
@@ -70,4 +72,27 @@ pub use game_detect::{
     GameLaunchDetector,
     OsuGame,
     ProcessInfo,
+};
+
+pub use engine::{
+    RepairResult,
+    SetupResult,
+    SyncResult,
+    UnifiedStorageEngine,
+    VerificationResult,
+};
+
+pub use manifest::{
+    LinkStatus,
+    LinkedResource,
+    ManifestSummary,
+    UnifiedManifest,
+};
+
+pub use link::{
+    LinkCapability,
+    LinkCheckInfo,
+    LinkInfo,
+    LinkManager,
+    LinkType,
 };
