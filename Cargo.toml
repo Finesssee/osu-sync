@@ -9,7 +9,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/yourusername/osu-sync"
+repository = "https://github.com/Finesssee/osu-sync"
 rust-version = "1.75"
 
 [workspace.dependencies]
