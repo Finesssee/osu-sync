@@ -9,18 +9,13 @@ use serde::{Deserialize, Serialize};
 use crate::stats::RankedStatus;
 
 /// Represents a game mode in osu!
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GameMode {
+    #[default]
     Osu = 0,
     Taiko = 1,
     Catch = 2,
     Mania = 3,
-}
-
-impl Default for GameMode {
-    fn default() -> Self {
-        Self::Osu
-    }
 }
 
 impl From<u8> for GameMode {

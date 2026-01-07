@@ -17,12 +17,12 @@ pub struct StatsAnalyzer;
 impl StatsAnalyzer {
     /// Analyze osu!stable beatmap sets
     pub fn analyze_stable(sets: &[BeatmapSet]) -> InstallationStats {
-        Self::analyze_sets(sets.iter().map(|s| SetView::from_stable(s)))
+        Self::analyze_sets(sets.iter().map(SetView::from_stable))
     }
 
     /// Analyze osu!lazer beatmap sets
     pub fn analyze_lazer(sets: &[LazerBeatmapSet]) -> InstallationStats {
-        Self::analyze_sets(sets.iter().map(|s| SetView::from_lazer(s)))
+        Self::analyze_sets(sets.iter().map(SetView::from_lazer))
     }
 
     /// Generic analysis for any beatmap set collection

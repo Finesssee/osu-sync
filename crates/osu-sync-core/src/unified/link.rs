@@ -502,12 +502,11 @@ impl LinkManager {
 
         if !is_link {
             // Path is not a link - it might not exist or be a regular file/dir
-            let exists = path.exists();
             return Ok(LinkCheckInfo {
                 is_valid: false,
                 link_path: path.to_path_buf(),
                 target_path: None,
-                link_type: if exists { None } else { None },
+                link_type: None,
             });
         }
 
@@ -575,7 +574,11 @@ impl LinkManager {
             );
             match windows_impl::create_junction(source, link) {
                 Ok(()) => {
-                    info!("Created junction: {} -> {}", link.display(), source.display());
+                    info!(
+                        "Created junction: {} -> {}",
+                        link.display(),
+                        source.display()
+                    );
                     return Ok(LinkInfo::new(
                         source.to_path_buf(),
                         link.to_path_buf(),
@@ -871,15 +874,14 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         ))
     })?;
 
-    for entry in fs::read_dir(src).map_err(|e| {
-        Error::Other(format!("Failed to read directory {}: {}", src.display(), e))
-    })? {
-        let entry = entry.map_err(|e| {
-            Error::Other(format!("Failed to read directory entry: {}", e))
-        })?;
-        let ty = entry.file_type().map_err(|e| {
-            Error::Other(format!("Failed to get file type: {}", e))
-        })?;
+    for entry in fs::read_dir(src)
+        .map_err(|e| Error::Other(format!("Failed to read directory {}: {}", src.display(), e)))?
+    {
+        let entry =
+            entry.map_err(|e| Error::Other(format!("Failed to read directory entry: {}", e)))?;
+        let ty = entry
+            .file_type()
+            .map_err(|e| Error::Other(format!("Failed to get file type: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -971,11 +973,9 @@ mod windows_impl {
         // canonicalize() on Windows returns \\?\C:\... - we need to strip the \\?\ prefix
         // and use \??\ instead which is the NT namespace prefix for junctions
         let target_path_str = target_path.display().to_string();
-        let clean_path = if target_path_str.starts_with(r"\\?\") {
-            &target_path_str[4..] // Strip the \\?\ prefix
-        } else {
-            &target_path_str
-        };
+        let clean_path = target_path_str
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&target_path_str);
         let target_str = format!(r"\??\{}", clean_path);
 
         // Convert to wide string
@@ -1196,10 +1196,8 @@ mod windows_impl {
 
             if reparse_tag == IO_REPARSE_TAG_MOUNT_POINT {
                 // Mount point / junction format
-                let substitute_name_offset =
-                    u16::from_le_bytes([buffer[8], buffer[9]]) as usize;
-                let substitute_name_length =
-                    u16::from_le_bytes([buffer[10], buffer[11]]) as usize;
+                let substitute_name_offset = u16::from_le_bytes([buffer[8], buffer[9]]) as usize;
+                let substitute_name_length = u16::from_le_bytes([buffer[10], buffer[11]]) as usize;
 
                 let path_buffer_start = 16; // After header
                 let name_start = path_buffer_start + substitute_name_offset;
@@ -1387,10 +1385,8 @@ mod tests {
     #[test]
     fn test_link_directory_source_not_found() {
         let manager = LinkManager::new(true);
-        let result = manager.link_directory(
-            Path::new("/nonexistent/source/dir"),
-            Path::new("/tmp/link"),
-        );
+        let result =
+            manager.link_directory(Path::new("/nonexistent/source/dir"), Path::new("/tmp/link"));
         assert!(result.is_err());
     }
 
@@ -1558,7 +1554,10 @@ mod tests {
                 return;
             }
 
-            assert!(junction.join("test.txt").exists(), "File inside should be accessible");
+            assert!(
+                junction.join("test.txt").exists(),
+                "File inside should be accessible"
+            );
             assert_eq!(
                 fs::read_to_string(junction.join("test.txt")).unwrap(),
                 "junction test"
@@ -1568,7 +1567,10 @@ mod tests {
             if result.link_type == LinkType::Junction {
                 assert!(LinkManager::is_junction(&junction));
                 let target = LinkManager::read_link(&junction).unwrap();
-                assert_eq!(target.canonicalize().unwrap(), source.canonicalize().unwrap());
+                assert_eq!(
+                    target.canonicalize().unwrap(),
+                    source.canonicalize().unwrap()
+                );
             }
 
             // Remove junction/copy

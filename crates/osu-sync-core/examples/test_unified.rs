@@ -2,8 +2,7 @@
 
 use osu_sync_core::config::{detect_lazer_path, detect_stable_path};
 use osu_sync_core::unified::{
-    find_running_processes, is_process_running, GameLaunchDetector,
-    UnifiedStorageConfig, UnifiedStorageMode,
+    find_running_processes, GameLaunchDetector, UnifiedStorageConfig, UnifiedStorageMode,
 };
 use std::path::Path;
 
@@ -86,9 +85,7 @@ fn main() {
 
     for mode in modes {
         let desc = match mode {
-            UnifiedStorageMode::Disabled => {
-                "Unified storage is disabled"
-            }
+            UnifiedStorageMode::Disabled => "Unified storage is disabled",
             UnifiedStorageMode::StableMaster => {
                 "osu!stable is the master, lazer links to stable's Songs folder"
             }
@@ -129,15 +126,17 @@ fn main() {
     let lazer_db_path = Path::new("D:\\osu!lazer");
     if lazer_db_path.exists() {
         match osu_sync_core::lazer::LazerDatabase::open(lazer_db_path) {
-            Ok(db) => {
-                match db.get_all_beatmap_sets() {
-                    Ok(sets) => {
-                        let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
-                        println!("osu!lazer (D:\\osu!lazer): {} beatmap sets, {} beatmaps", sets.len(), total_beatmaps);
-                    }
-                    Err(e) => println!("Error reading lazer beatmaps: {}", e),
+            Ok(db) => match db.get_all_beatmap_sets() {
+                Ok(sets) => {
+                    let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
+                    println!(
+                        "osu!lazer (D:\\osu!lazer): {} beatmap sets, {} beatmaps",
+                        sets.len(),
+                        total_beatmaps
+                    );
                 }
-            }
+                Err(e) => println!("Error reading lazer beatmaps: {}", e),
+            },
             Err(e) => println!("Error opening lazer database: {}", e),
         }
     }

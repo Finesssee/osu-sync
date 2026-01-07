@@ -52,7 +52,15 @@ const DEFAULT_DEBOUNCE_MS: u64 = 100;
 
 /// File extensions that are considered temporary and should be ignored.
 const TEMP_EXTENSIONS: &[&str] = &[
-    "tmp", "temp", "partial", "crdownload", "part", "download", "swp", "lock", "bak",
+    "tmp",
+    "temp",
+    "partial",
+    "crdownload",
+    "part",
+    "download",
+    "swp",
+    "lock",
+    "bak",
 ];
 
 /// File name patterns that indicate temporary or system files.
@@ -60,8 +68,8 @@ const TEMP_PATTERNS: &[&str] = &[
     ".tmp",
     ".temp",
     ".partial",
-    "~$",     // Office temp files
-    ".~",     // Backup files
+    "~$", // Office temp files
+    ".~", // Backup files
     "Thumbs.db",
     ".DS_Store",
     "desktop.ini",
@@ -232,10 +240,8 @@ impl UnifiedWatcher {
                                         rename_from = Some(path);
                                     } else if let Some(from) = rename_from.take() {
                                         // We have both parts of a rename
-                                        let change_event = FileChangeEvent::Renamed {
-                                            from,
-                                            to: path,
-                                        };
+                                        let change_event =
+                                            FileChangeEvent::Renamed { from, to: path };
                                         let _ = event_tx_clone.send(change_event);
                                     }
                                 }

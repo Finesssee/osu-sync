@@ -53,7 +53,11 @@ fn main() {
                     // Count total beatmaps
                     let total_beatmaps: usize = sets.iter().map(|s| s.beatmaps.len()).sum();
                     println!();
-                    println!("Total: {} beatmap sets, {} individual beatmaps", sets.len(), total_beatmaps);
+                    println!(
+                        "Total: {} beatmap sets, {} individual beatmaps",
+                        sets.len(),
+                        total_beatmaps
+                    );
                 }
                 Err(e) => {
                     println!("Error getting beatmap sets: {}", e);

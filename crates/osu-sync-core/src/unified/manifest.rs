@@ -254,13 +254,11 @@ impl UnifiedManifest {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::ManifestError(format!("Failed to read manifest file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| Error::ManifestError(format!("Failed to read manifest file: {}", e)))?;
 
-        let manifest: Self = serde_json::from_str(&content).map_err(|e| {
-            Error::ManifestError(format!("Failed to parse manifest: {}", e))
-        })?;
+        let manifest: Self = serde_json::from_str(&content)
+            .map_err(|e| Error::ManifestError(format!("Failed to parse manifest: {}", e)))?;
 
         // Check version compatibility
         if manifest.version > MANIFEST_VERSION {
@@ -290,13 +288,11 @@ impl UnifiedManifest {
             })?;
         }
 
-        let content = serde_json::to_string_pretty(self).map_err(|e| {
-            Error::ManifestError(format!("Failed to serialize manifest: {}", e))
-        })?;
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| Error::ManifestError(format!("Failed to serialize manifest: {}", e)))?;
 
-        std::fs::write(path, content).map_err(|e| {
-            Error::ManifestError(format!("Failed to write manifest file: {}", e))
-        })?;
+        std::fs::write(path, content)
+            .map_err(|e| Error::ManifestError(format!("Failed to write manifest file: {}", e)))?;
 
         Ok(())
     }
@@ -361,7 +357,9 @@ impl UnifiedManifest {
 
     /// Finds a resource by its source path (mutable).
     pub fn find_by_source_mut(&mut self, source_path: &Path) -> Option<&mut LinkedResource> {
-        self.resources.iter_mut().find(|r| r.source_path == source_path)
+        self.resources
+            .iter_mut()
+            .find(|r| r.source_path == source_path)
     }
 
     /// Finds a resource by any of its link paths.
@@ -371,7 +369,9 @@ impl UnifiedManifest {
 
     /// Finds a resource by any of its link paths (mutable).
     pub fn find_by_link_path_mut(&mut self, link_path: &Path) -> Option<&mut LinkedResource> {
-        self.resources.iter_mut().find(|r| r.has_link_path(link_path))
+        self.resources
+            .iter_mut()
+            .find(|r| r.has_link_path(link_path))
     }
 
     /// Finds all resources of a specific type.
@@ -384,12 +384,18 @@ impl UnifiedManifest {
 
     /// Finds all resources with a specific status.
     pub fn find_by_status(&self, status: LinkStatus) -> Vec<&LinkedResource> {
-        self.resources.iter().filter(|r| r.status == status).collect()
+        self.resources
+            .iter()
+            .filter(|r| r.status == status)
+            .collect()
     }
 
     /// Returns all resources that need attention (broken, stale, or pending).
     pub fn find_needing_attention(&self) -> Vec<&LinkedResource> {
-        self.resources.iter().filter(|r| r.status.needs_attention()).collect()
+        self.resources
+            .iter()
+            .filter(|r| r.status.needs_attention())
+            .collect()
     }
 
     /// Returns the total number of tracked resources.
@@ -612,12 +618,20 @@ mod tests {
         manifest.add_resource(resource2);
 
         // Find by source
-        assert!(manifest.find_by_source(Path::new("/source/beatmap1")).is_some());
-        assert!(manifest.find_by_source(Path::new("/source/nonexistent")).is_none());
+        assert!(manifest
+            .find_by_source(Path::new("/source/beatmap1"))
+            .is_some());
+        assert!(manifest
+            .find_by_source(Path::new("/source/nonexistent"))
+            .is_none());
 
         // Find by link path
-        assert!(manifest.find_by_link_path(Path::new("/link/beatmap1")).is_some());
-        assert!(manifest.find_by_link_path(Path::new("/link/nonexistent")).is_none());
+        assert!(manifest
+            .find_by_link_path(Path::new("/link/beatmap1"))
+            .is_some());
+        assert!(manifest
+            .find_by_link_path(Path::new("/link/nonexistent"))
+            .is_none());
 
         // Find by type
         let beatmaps = manifest.find_by_type(SharedResourceType::Beatmaps);
@@ -646,7 +660,10 @@ mod tests {
 
         assert!(manifest.update_status(Path::new("/source/beatmap1"), LinkStatus::Active));
         assert_eq!(
-            manifest.find_by_source(Path::new("/source/beatmap1")).unwrap().status,
+            manifest
+                .find_by_source(Path::new("/source/beatmap1"))
+                .unwrap()
+                .status,
             LinkStatus::Active
         );
 
@@ -699,7 +716,9 @@ mod tests {
         let loaded = UnifiedManifest::load_from(&manifest_path).unwrap();
         assert_eq!(loaded.mode, UnifiedStorageMode::LazerMaster);
         assert_eq!(loaded.resource_count(), 1);
-        assert!(loaded.find_by_source(Path::new("/source/beatmap1")).is_some());
+        assert!(loaded
+            .find_by_source(Path::new("/source/beatmap1"))
+            .is_some());
     }
 
     #[test]

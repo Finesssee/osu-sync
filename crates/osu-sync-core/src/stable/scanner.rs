@@ -13,6 +13,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use walkdir::WalkDir;
 
+type StableCacheLoad = (
+    Vec<BeatmapSet>,
+    usize,
+    HashMap<String, CachedFileInfo>,
+    HashMap<String, CachedOsuFile>,
+);
+
 /// Timing breakdown for scan operations
 #[derive(Debug, Clone, Default)]
 pub struct ScanTiming {
@@ -179,25 +186,31 @@ fn hash_file_blake3(path: &Path) -> std::io::Result<FileHashResult> {
         blake3::hash(&content).to_hex().to_string()
     };
 
-    Ok(FileHashResult { hash, size, mtime_secs })
+    Ok(FileHashResult {
+        hash,
+        size,
+        mtime_secs,
+    })
 }
 
 /// Check if a file needs rehashing based on mtime/size
+#[cfg(test)]
 fn needs_rehash(path: &Path, cached: Option<&CachedFileInfo>) -> bool {
     let Some(cached) = cached else {
         return true; // Not in cache
     };
-    
+
     let Ok(meta) = fs::metadata(path) else {
         return true; // Can't read metadata
     };
-    
-    let current_mtime = meta.modified()
+
+    let current_mtime = meta
+        .modified()
         .ok()
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    
+
     current_mtime != cached.mtime_secs || meta.len() != cached.size
 }
 
@@ -237,11 +250,12 @@ impl StableScanner {
 
     /// Try to load from cache if valid
     /// Returns: (sets, beatmaps_parsed, file_hashes, osu_cache)
-    fn load_from_cache(&self, current_dir_count: usize) -> Option<(Vec<BeatmapSet>, usize, HashMap<String, CachedFileInfo>, HashMap<String, CachedOsuFile>)> {
+    fn load_from_cache(&self, current_dir_count: usize) -> Option<StableCacheLoad> {
         let cache_path = self.cache_path();
         if !cache_path.exists() {
             // Also try legacy JSON cache for migration
-            let legacy_path = self.songs_path
+            let legacy_path = self
+                .songs_path
                 .parent()
                 .unwrap_or(&self.songs_path)
                 .join(".osu-sync-stable-cache.json");
@@ -257,7 +271,10 @@ impl StableScanner {
 
         // Check cache version (3 = with osu_cache)
         if cache.version < 3 {
-            tracing::info!("Stable cache version mismatch ({}), rebuilding", cache.version);
+            tracing::info!(
+                "Stable cache version mismatch ({}), rebuilding",
+                cache.version
+            );
             return None;
         }
 
@@ -268,7 +285,12 @@ impl StableScanner {
                 cache.sets.len(),
                 cache.osu_cache.len()
             );
-            Some((cache.sets, cache.beatmaps_parsed, cache.file_hashes, cache.osu_cache))
+            Some((
+                cache.sets,
+                cache.beatmaps_parsed,
+                cache.file_hashes,
+                cache.osu_cache,
+            ))
         } else {
             // Directory count changed - return empty sets but keep osu_cache for incremental parsing
             tracing::info!(
@@ -292,7 +314,7 @@ impl StableScanner {
             Ok(c) => c,
             Err(_) => return HashMap::new(),
         };
-        
+
         let cache: StableScanCache = match bincode::deserialize(&content) {
             Ok(c) => c,
             Err(_) => return HashMap::new(),
@@ -303,9 +325,9 @@ impl StableScanner {
 
     /// Save results to cache (bincode format)
     fn save_to_cache(
-        &self, 
-        sets: &[BeatmapSet], 
-        dir_count: usize, 
+        &self,
+        sets: &[BeatmapSet],
+        dir_count: usize,
         beatmaps_parsed: usize,
         file_hashes: HashMap<String, CachedFileInfo>,
         osu_cache: HashMap<String, CachedOsuFile>,
@@ -325,7 +347,10 @@ impl StableScanner {
                 if let Err(e) = fs::write(&cache_path, bytes) {
                     tracing::warn!("Failed to write stable cache: {}", e);
                 } else {
-                    tracing::info!("Saved {} beatmap sets to stable cache (bincode)", sets.len());
+                    tracing::info!(
+                        "Saved {} beatmap sets to stable cache (bincode)",
+                        sets.len()
+                    );
                 }
             }
             Err(e) => {
@@ -436,7 +461,9 @@ impl StableScanner {
         // Try to load from cache (includes file hash cache for incremental updates)
         // Load osu_cache for incremental parsing even if full cache is invalid
         let osu_cache = self.load_osu_cache();
-        if let Some((cached_sets, beatmaps_parsed, _file_hashes, _osu_cache)) = self.load_from_cache(total) {
+        if let Some((cached_sets, beatmaps_parsed, _file_hashes, _osu_cache)) =
+            self.load_from_cache(total)
+        {
             if !cached_sets.is_empty() {
                 let timing = ScanTiming {
                     total: total_start.elapsed(),
@@ -482,7 +509,11 @@ impl StableScanner {
                 // Scan with local timing and file hash collection
                 let mut local_timing = ScanTiming::default();
                 let mut local_hashes = HashMap::new();
-                match self.scan_beatmap_set_timed_with_cache(&dir_path, &mut local_timing, &mut local_hashes) {
+                match self.scan_beatmap_set_timed_with_cache(
+                    &dir_path,
+                    &mut local_timing,
+                    &mut local_hashes,
+                ) {
                     Ok(mut set) => {
                         set.folder_name = Some(folder_name);
 
@@ -514,7 +545,13 @@ impl StableScanner {
         let final_osu_cache = osu_cache.lock().unwrap().clone();
 
         // Save to cache for next time (bincode format)
-        self.save_to_cache(&results, total, final_timing.osu_files_parsed, final_hashes, final_osu_cache);
+        self.save_to_cache(
+            &results,
+            total,
+            final_timing.osu_files_parsed,
+            final_hashes,
+            final_osu_cache,
+        );
 
         Ok((results, final_timing))
     }
@@ -810,7 +847,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, b"test").unwrap();
-        
+
         // No cache entry -> needs rehash
         assert!(needs_rehash(&file_path, None));
     }
@@ -820,20 +857,21 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, b"test content").unwrap();
-        
+
         let meta = fs::metadata(&file_path).unwrap();
-        let mtime_secs = meta.modified()
+        let mtime_secs = meta
+            .modified()
             .unwrap()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let cached = CachedFileInfo {
             mtime_secs,
             size: meta.len(),
             hash: "somehash".to_string(),
         };
-        
+
         // Matching cache -> no rehash needed
         assert!(!needs_rehash(&file_path, Some(&cached)));
     }
@@ -843,20 +881,21 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, b"test content").unwrap();
-        
+
         let meta = fs::metadata(&file_path).unwrap();
-        let mtime_secs = meta.modified()
+        let mtime_secs = meta
+            .modified()
             .unwrap()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let cached = CachedFileInfo {
             mtime_secs,
             size: meta.len() + 100, // Different size
             hash: "somehash".to_string(),
         };
-        
+
         // Size mismatch -> needs rehash
         assert!(needs_rehash(&file_path, Some(&cached)));
     }
@@ -866,15 +905,15 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, b"test content").unwrap();
-        
+
         let meta = fs::metadata(&file_path).unwrap();
-        
+
         let cached = CachedFileInfo {
             mtime_secs: 0, // Old timestamp
             size: meta.len(),
             hash: "somehash".to_string(),
         };
-        
+
         // Mtime mismatch -> needs rehash
         assert!(needs_rehash(&file_path, Some(&cached)));
     }
@@ -886,7 +925,7 @@ mod tests {
             size: 100,
             hash: "somehash".to_string(),
         };
-        
+
         // File doesn't exist -> needs rehash (will fail later)
         assert!(needs_rehash(Path::new("/nonexistent"), Some(&cached)));
     }
@@ -903,10 +942,10 @@ mod tests {
             file_hashes: HashMap::new(),
             osu_cache: HashMap::new(),
         };
-        
+
         let bytes = bincode::serialize(&cache).unwrap();
         let deserialized: StableScanCache = bincode::deserialize(&bytes).unwrap();
-        
+
         assert_eq!(deserialized.version, 3);
         assert_eq!(deserialized.dir_count, 100);
         assert_eq!(deserialized.beatmaps_parsed, 500);
@@ -915,17 +954,23 @@ mod tests {
     #[test]
     fn test_cache_with_file_hashes() {
         let mut file_hashes = HashMap::new();
-        file_hashes.insert("song1/audio.mp3".to_string(), CachedFileInfo {
-            mtime_secs: 1234567890,
-            size: 5000000,
-            hash: "abc123def456".to_string(),
-        });
-        file_hashes.insert("song2/bg.jpg".to_string(), CachedFileInfo {
-            mtime_secs: 1234567891,
-            size: 100000,
-            hash: "xyz789".to_string(),
-        });
-        
+        file_hashes.insert(
+            "song1/audio.mp3".to_string(),
+            CachedFileInfo {
+                mtime_secs: 1234567890,
+                size: 5000000,
+                hash: "abc123def456".to_string(),
+            },
+        );
+        file_hashes.insert(
+            "song2/bg.jpg".to_string(),
+            CachedFileInfo {
+                mtime_secs: 1234567891,
+                size: 100000,
+                hash: "xyz789".to_string(),
+            },
+        );
+
         let cache = StableScanCache {
             version: 3,
             dir_count: 2,
@@ -934,14 +979,18 @@ mod tests {
             file_hashes,
             osu_cache: HashMap::new(),
         };
-        
+
         let bytes = bincode::serialize(&cache).unwrap();
         let deserialized: StableScanCache = bincode::deserialize(&bytes).unwrap();
-        
+
         assert_eq!(deserialized.file_hashes.len(), 2);
         assert!(deserialized.file_hashes.contains_key("song1/audio.mp3"));
         assert_eq!(
-            deserialized.file_hashes.get("song1/audio.mp3").unwrap().size,
+            deserialized
+                .file_hashes
+                .get("song1/audio.mp3")
+                .unwrap()
+                .size,
             5000000
         );
     }
@@ -951,29 +1000,32 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let songs_path = temp_dir.path().join("Songs");
         fs::create_dir(&songs_path).unwrap();
-        
+
         let scanner = StableScanner::new(songs_path.clone());
         let cache_path = scanner.cache_path();
-        
+
         // Verify cache path uses .bin extension
         assert!(cache_path.to_string_lossy().ends_with(".bin"));
-        
+
         // Save cache
         let mut file_hashes = HashMap::new();
-        file_hashes.insert("test".to_string(), CachedFileInfo {
-            mtime_secs: 123,
-            size: 456,
-            hash: "testhash".to_string(),
-        });
+        file_hashes.insert(
+            "test".to_string(),
+            CachedFileInfo {
+                mtime_secs: 123,
+                size: 456,
+                hash: "testhash".to_string(),
+            },
+        );
         scanner.save_to_cache(&[], 5, 10, file_hashes, HashMap::new());
-        
+
         // Verify file exists
         assert!(cache_path.exists());
-        
+
         // Load cache
         let loaded = scanner.load_from_cache(5);
         assert!(loaded.is_some());
-        
+
         let (sets, beatmaps_parsed, hashes, _osu_cache) = loaded.unwrap();
         assert!(sets.is_empty());
         assert_eq!(beatmaps_parsed, 10);
@@ -985,12 +1037,12 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let songs_path = temp_dir.path().join("Songs");
         fs::create_dir(&songs_path).unwrap();
-        
+
         let scanner = StableScanner::new(songs_path);
-        
+
         // Save with dir_count = 5
         scanner.save_to_cache(&[], 5, 10, HashMap::new(), HashMap::new());
-        
+
         // Load with different dir_count - should still return the osu_cache for incremental parsing
         let loaded = scanner.load_from_cache(10);
         assert!(loaded.is_some());
@@ -1006,7 +1058,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let songs_path = temp_dir.path().join("Songs");
         fs::create_dir(&songs_path).unwrap();
-        
+
         let scanner = StableScanner::new(songs_path).skip_hashing();
         assert!(scanner.skip_hashing);
     }
@@ -1020,7 +1072,7 @@ mod tests {
             osu_files_parsed: 500,
             ..Default::default()
         };
-        
+
         let report = timing.report();
         assert!(report.contains("cached"));
         assert!(report.contains("100 dirs"));
@@ -1042,7 +1094,7 @@ mod tests {
             parallel: true,
             thread_count: 8,
         };
-        
+
         let report = timing.report();
         assert!(report.contains("Blake3")); // Should mention Blake3, not SHA-256
         assert!(report.contains("parallel"));
@@ -1053,13 +1105,13 @@ mod tests {
     fn test_cached_file_info_serialization() {
         let info = CachedFileInfo {
             mtime_secs: 1703836800, // 2023-12-29
-            size: 1024 * 1024, // 1MB
+            size: 1024 * 1024,      // 1MB
             hash: "abcdef1234567890".to_string(),
         };
-        
+
         let bytes = bincode::serialize(&info).unwrap();
         let deserialized: CachedFileInfo = bincode::deserialize(&bytes).unwrap();
-        
+
         assert_eq!(deserialized.mtime_secs, info.mtime_secs);
         assert_eq!(deserialized.size, info.size);
         assert_eq!(deserialized.hash, info.hash);

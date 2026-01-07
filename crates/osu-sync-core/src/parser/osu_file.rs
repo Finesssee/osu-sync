@@ -16,11 +16,10 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
     let md5_hash = format!("{:x}", Md5::digest(&content));
 
     // Parse with rosu-map (reuse already-read content)
-    let beatmap =
-        rosu_map::Beatmap::from_bytes(&content).map_err(|e| Error::BeatmapParse {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
+    let beatmap = rosu_map::Beatmap::from_bytes(&content).map_err(|e| Error::BeatmapParse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
 
     // Extract metadata
     let metadata = BeatmapMetadata {
@@ -44,12 +43,12 @@ pub fn parse_osu_file(path: &Path) -> Result<BeatmapInfo> {
         },
         tags: beatmap.tags.split_whitespace().map(String::from).collect(),
         beatmap_id: if beatmap.beatmap_id > 0 {
-            Some(beatmap.beatmap_id as i32)
+            Some(beatmap.beatmap_id)
         } else {
             None
         },
         beatmap_set_id: if beatmap.beatmap_set_id > 0 {
-            Some(beatmap.beatmap_set_id as i32)
+            Some(beatmap.beatmap_set_id)
         } else {
             None
         },

@@ -268,7 +268,6 @@ impl ReplayExporter {
     }
 }
 
-
 /// Format a Unix timestamp as a date string (YYYY-MM-DD)
 fn format_date(timestamp: i64) -> String {
     use std::time::{Duration, UNIX_EPOCH};

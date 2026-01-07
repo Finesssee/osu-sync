@@ -140,11 +140,9 @@ impl ActivityLog {
         if let Some(path) = Self::log_path() {
             if let Ok(file) = File::open(&path) {
                 let reader = BufReader::new(file);
-                for line in reader.lines().take(MAX_LOG_ENTRIES) {
-                    if let Ok(line) = line {
-                        if let Ok(entry) = serde_json::from_str::<ActivityEntry>(&line) {
-                            log.entries.push(entry);
-                        }
+                for line in reader.lines().take(MAX_LOG_ENTRIES).flatten() {
+                    if let Ok(entry) = serde_json::from_str::<ActivityEntry>(&line) {
+                        log.entries.push(entry);
                     }
                 }
             }

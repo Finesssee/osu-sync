@@ -432,10 +432,10 @@ impl MediaExtractor {
         let hash = Self::compute_fast_hash(&content);
 
         // Check if duplicate (either already extracted this session, or exists in output dir)
-        if self.skip_duplicates {
-            if self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash) {
-                return Ok(None);
-            }
+        if self.skip_duplicates
+            && (self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash))
+        {
+            return Ok(None);
         }
 
         // Determine output path
@@ -455,6 +455,7 @@ impl MediaExtractor {
     }
 
     /// Extract a file from stable with metadata support
+    #[allow(clippy::too_many_arguments)]
     fn extract_file_with_metadata(
         &mut self,
         source_path: &Path,
@@ -474,10 +475,10 @@ impl MediaExtractor {
         let hash = Self::compute_fast_hash(&content);
 
         // Check if duplicate (either already extracted this session, or exists in output dir)
-        if self.skip_duplicates {
-            if self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash) {
-                return Ok(None);
-            }
+        if self.skip_duplicates
+            && (self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash))
+        {
+            return Ok(None);
         }
 
         // Build audio info
@@ -538,10 +539,10 @@ impl MediaExtractor {
         let hash = Self::compute_fast_hash(&content);
 
         // Check if duplicate (either already extracted this session, or exists in output dir)
-        if self.skip_duplicates {
-            if self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash) {
-                return Ok(None);
-            }
+        if self.skip_duplicates
+            && (self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash))
+        {
+            return Ok(None);
         }
 
         // Determine output path
@@ -580,10 +581,10 @@ impl MediaExtractor {
         let hash = Self::compute_fast_hash(&content);
 
         // Check if duplicate (either already extracted this session, or exists in output dir)
-        if self.skip_duplicates {
-            if self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash) {
-                return Ok(None);
-            }
+        if self.skip_duplicates
+            && (self.extracted_hashes.contains(&hash) || self.existing_hashes.contains(&hash))
+        {
+            return Ok(None);
         }
 
         // Build audio info

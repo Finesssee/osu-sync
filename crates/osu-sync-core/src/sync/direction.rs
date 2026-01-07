@@ -3,9 +3,10 @@
 use std::fmt;
 
 /// Direction of beatmap synchronization
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SyncDirection {
     /// Sync beatmaps from osu!stable to osu!lazer
+    #[default]
     StableToLazer,
     /// Sync beatmaps from osu!lazer to osu!stable
     LazerToStable,
@@ -40,12 +41,6 @@ impl SyncDirection {
             Self::LazerToStable => "osu!stable",
             Self::Bidirectional => "both",
         }
-    }
-}
-
-impl Default for SyncDirection {
-    fn default() -> Self {
-        Self::StableToLazer
     }
 }
 

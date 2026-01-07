@@ -2,7 +2,7 @@
 
 use crate::beatmap::BeatmapSet;
 use crate::dedup::DuplicateStrategy;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Information about a detected duplicate
 #[derive(Debug, Clone)]
@@ -67,10 +67,10 @@ impl DuplicateDetector {
     }
 
     /// Check if a beatmap set already exists in the target index
-    pub fn find_duplicate<'a>(
+    pub fn find_duplicate(
         &self,
         source: &BeatmapSet,
-        existing_sets: &'a [BeatmapSet],
+        existing_sets: &[BeatmapSet],
     ) -> Option<DuplicateInfo> {
         match self.strategy {
             DuplicateStrategy::ByHash => self.find_by_hash(source, existing_sets),
@@ -228,7 +228,10 @@ impl DuplicateIndex {
     /// Check if any MD5 hash from the source exists (O(k) where k = difficulties)
     #[inline]
     pub fn has_any_hash(&self, source: &BeatmapSet) -> bool {
-        source.beatmaps.iter().any(|b| self.md5_hashes.contains(&b.md5_hash))
+        source
+            .beatmaps
+            .iter()
+            .any(|b| self.md5_hashes.contains(&b.md5_hash))
     }
 
     /// Check if metadata matches (O(1))
@@ -253,11 +256,11 @@ impl DuplicateIndex {
     pub fn is_duplicate(&self, source: &BeatmapSet, strategy: DuplicateStrategy) -> bool {
         match strategy {
             DuplicateStrategy::ByHash => self.has_any_hash(source),
-            DuplicateStrategy::BySetId => source.id.map_or(false, |id| self.has_set_id(id)),
+            DuplicateStrategy::BySetId => source.id.is_some_and(|id| self.has_set_id(id)),
             DuplicateStrategy::ByMetadata => self.has_metadata(source),
             DuplicateStrategy::Composite => {
                 self.has_any_hash(source)
-                    || source.id.map_or(false, |id| self.has_set_id(id))
+                    || source.id.is_some_and(|id| self.has_set_id(id))
                     || self.has_metadata(source)
             }
         }

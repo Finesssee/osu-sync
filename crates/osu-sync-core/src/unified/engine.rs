@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 
 use super::config::{SharedResourceType, UnifiedStorageConfig, UnifiedStorageMode};
 use super::link::{copy_dir_recursive, LinkManager};
-use super::manifest::{LinkedResource, LinkStatus, UnifiedManifest};
+use super::manifest::{LinkStatus, LinkedResource, UnifiedManifest};
 
 /// Result of a setup operation.
 ///
@@ -286,10 +286,7 @@ impl UnifiedStorageEngine {
             ));
         }
 
-        tracing::info!(
-            "Setting up unified storage in {:?} mode",
-            self.config.mode
-        );
+        tracing::info!("Setting up unified storage in {:?} mode", self.config.mode);
 
         let mut result = SetupResult::new();
 
@@ -508,7 +505,8 @@ impl UnifiedStorageEngine {
 
         // Update status to Active for successfully repaired resources
         for source_path in repaired_sources {
-            self.manifest.update_status(&source_path, LinkStatus::Active);
+            self.manifest
+                .update_status(&source_path, LinkStatus::Active);
         }
 
         // Handle stale links - remove them from the manifest
@@ -565,11 +563,7 @@ impl UnifiedStorageEngine {
 
         for link_path in all_link_paths {
             if let Err(e) = LinkManager::remove_link(&link_path) {
-                tracing::warn!(
-                    "Failed to remove link {}: {}",
-                    link_path.display(),
-                    e
-                );
+                tracing::warn!("Failed to remove link {}: {}", link_path.display(), e);
             } else {
                 removed_count += 1;
             }
@@ -605,10 +599,7 @@ impl UnifiedStorageEngine {
 
             // Check if the resource exists in stable
             if !stable_resource.exists() {
-                result.add_warning(format!(
-                    "{} not found in stable installation",
-                    folder_name
-                ));
+                result.add_warning(format!("{} not found in stable installation", folder_name));
                 continue;
             }
 
@@ -621,10 +612,7 @@ impl UnifiedStorageEngine {
                         let stable_canonical = stable_resource.canonicalize().ok();
                         let target_canonical = target.canonicalize().ok();
                         if stable_canonical.is_some() && stable_canonical == target_canonical {
-                            tracing::debug!(
-                                "{} already linked correctly, skipping",
-                                folder_name
-                            );
+                            tracing::debug!("{} already linked correctly, skipping", folder_name);
                             // Still add to manifest if not already tracked
                             if self.manifest.find_by_source(&stable_resource).is_none() {
                                 self.manifest.add_resource(LinkedResource::active(
@@ -691,7 +679,10 @@ impl UnifiedStorageEngine {
                 stable_resource.display()
             );
 
-            match self.link_manager.link_directory(&stable_resource, &lazer_resource) {
+            match self
+                .link_manager
+                .link_directory(&stable_resource, &lazer_resource)
+            {
                 Ok(link_info) => {
                     tracing::info!(
                         "Created {} link: {} -> {}",
@@ -712,11 +703,7 @@ impl UnifiedStorageEngine {
                     result.resources_linked += 1;
                 }
                 Err(e) => {
-                    result.add_warning(format!(
-                        "Failed to create link for {}: {}",
-                        folder_name,
-                        e
-                    ));
+                    result.add_warning(format!("Failed to create link for {}: {}", folder_name, e));
                 }
             }
         }
@@ -739,10 +726,7 @@ impl UnifiedStorageEngine {
 
             // Check if the resource exists in lazer
             if !lazer_resource.exists() {
-                result.add_warning(format!(
-                    "{} not found in lazer installation",
-                    folder_name
-                ));
+                result.add_warning(format!("{} not found in lazer installation", folder_name));
                 continue;
             }
 
@@ -755,10 +739,7 @@ impl UnifiedStorageEngine {
                         let lazer_canonical = lazer_resource.canonicalize().ok();
                         let target_canonical = target.canonicalize().ok();
                         if lazer_canonical.is_some() && lazer_canonical == target_canonical {
-                            tracing::debug!(
-                                "{} already linked correctly, skipping",
-                                folder_name
-                            );
+                            tracing::debug!("{} already linked correctly, skipping", folder_name);
                             // Still add to manifest if not already tracked
                             if self.manifest.find_by_source(&lazer_resource).is_none() {
                                 self.manifest.add_resource(LinkedResource::active(
@@ -825,7 +806,10 @@ impl UnifiedStorageEngine {
                 lazer_resource.display()
             );
 
-            match self.link_manager.create_link(&stable_resource, &lazer_resource) {
+            match self
+                .link_manager
+                .create_link(&stable_resource, &lazer_resource)
+            {
                 Ok(link_info) => {
                     tracing::info!(
                         "Created {} link: {} -> {}",
@@ -846,11 +830,7 @@ impl UnifiedStorageEngine {
                     result.resources_linked += 1;
                 }
                 Err(e) => {
-                    result.add_warning(format!(
-                        "Failed to create link for {}: {}",
-                        folder_name,
-                        e
-                    ));
+                    result.add_warning(format!("Failed to create link for {}: {}", folder_name, e));
                 }
             }
         }
@@ -865,9 +845,11 @@ impl UnifiedStorageEngine {
     fn setup_true_unified(&mut self, result: &mut SetupResult) -> Result<()> {
         tracing::debug!("Setting up TrueUnified mode");
 
-        let shared_path = self.config.get_shared_path().ok_or_else(|| {
-            Error::Config("TrueUnified mode requires a shared path".to_string())
-        })?.clone();
+        let shared_path = self
+            .config
+            .get_shared_path()
+            .ok_or_else(|| Error::Config("TrueUnified mode requires a shared path".to_string()))?
+            .clone();
 
         // Collect resource types to avoid borrow issues
         let resource_types: Vec<SharedResourceType> =
@@ -993,10 +975,7 @@ impl UnifiedStorageEngine {
                     if shared_canonical != target_canonical {
                         // Link points to wrong target, remove it
                         if let Err(e) = LinkManager::remove_link(&stable_resource) {
-                            result.add_warning(format!(
-                                "Failed to remove old stable link: {}",
-                                e
-                            ));
+                            result.add_warning(format!("Failed to remove old stable link: {}", e));
                         }
                     }
                 }
@@ -1009,10 +988,7 @@ impl UnifiedStorageEngine {
                     if shared_canonical != target_canonical {
                         // Link points to wrong target, remove it
                         if let Err(e) = LinkManager::remove_link(&lazer_resource) {
-                            result.add_warning(format!(
-                                "Failed to remove old lazer link: {}",
-                                e
-                            ));
+                            result.add_warning(format!("Failed to remove old lazer link: {}", e));
                         }
                     }
                 }
@@ -1020,7 +996,10 @@ impl UnifiedStorageEngine {
 
             // Create stable link to shared location
             if !stable_resource.exists() {
-                match self.link_manager.link_directory(&shared_resource, &stable_resource) {
+                match self
+                    .link_manager
+                    .link_directory(&shared_resource, &stable_resource)
+                {
                     Ok(link_info) => {
                         tracing::info!(
                             "Created {} link: {} -> {}",
@@ -1044,7 +1023,10 @@ impl UnifiedStorageEngine {
 
             // Create lazer link to shared location
             if !lazer_resource.exists() {
-                match self.link_manager.link_directory(&shared_resource, &lazer_resource) {
+                match self
+                    .link_manager
+                    .link_directory(&shared_resource, &lazer_resource)
+                {
                     Ok(link_info) => {
                         tracing::info!(
                             "Created {} link: {} -> {}",
@@ -1094,9 +1076,8 @@ impl UnifiedStorageEngine {
         for entry in fs::read_dir(src).map_err(|e| {
             Error::Other(format!("Failed to read directory {}: {}", src.display(), e))
         })? {
-            let entry = entry.map_err(|e| {
-                Error::Other(format!("Failed to read directory entry: {}", e))
-            })?;
+            let entry = entry
+                .map_err(|e| Error::Other(format!("Failed to read directory entry: {}", e)))?;
             let src_path = entry.path();
             let file_name = entry.file_name();
             let dst_path = dst.join(&file_name);
@@ -1182,7 +1163,8 @@ impl UnifiedStorageEngine {
                         if let Ok(target) = LinkManager::read_link(&link_path) {
                             let beatmap_canonical = beatmap_path.canonicalize().ok();
                             let target_canonical = target.canonicalize().ok();
-                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical {
+                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical
+                            {
                                 // Link exists and is correct, just add to manifest
                                 self.manifest.add_resource(LinkedResource::active(
                                     SharedResourceType::Beatmaps,
@@ -1280,7 +1262,8 @@ impl UnifiedStorageEngine {
                                     link_path.display(),
                                     e
                                 ));
-                                self.manifest.update_status(&source_path, LinkStatus::Broken);
+                                self.manifest
+                                    .update_status(&source_path, LinkStatus::Broken);
                             }
                         }
                     } else {
@@ -1350,7 +1333,8 @@ impl UnifiedStorageEngine {
                         if let Ok(target) = LinkManager::read_link(&link_path) {
                             let beatmap_canonical = beatmap_path.canonicalize().ok();
                             let target_canonical = target.canonicalize().ok();
-                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical {
+                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical
+                            {
                                 // Link exists and is correct, just add to manifest
                                 self.manifest.add_resource(LinkedResource::active(
                                     SharedResourceType::Beatmaps,
@@ -1448,7 +1432,8 @@ impl UnifiedStorageEngine {
                                     link_path.display(),
                                     e
                                 ));
-                                self.manifest.update_status(&source_path, LinkStatus::Broken);
+                                self.manifest
+                                    .update_status(&source_path, LinkStatus::Broken);
                             }
                         }
                     } else {
@@ -1522,10 +1507,7 @@ impl UnifiedStorageEngine {
                             stable_link_ok = true;
                         } else {
                             // Link points to wrong target
-                            tracing::debug!(
-                                "Stable {} link points to wrong target",
-                                folder_name
-                            );
+                            tracing::debug!("Stable {} link points to wrong target", folder_name);
                         }
                     }
                 } else {
@@ -1547,10 +1529,7 @@ impl UnifiedStorageEngine {
                             lazer_link_ok = true;
                         } else {
                             // Link points to wrong target
-                            tracing::debug!(
-                                "Lazer {} link points to wrong target",
-                                folder_name
-                            );
+                            tracing::debug!("Lazer {} link points to wrong target", folder_name);
                         }
                     }
                 } else {
@@ -1578,7 +1557,10 @@ impl UnifiedStorageEngine {
 
                 // Create link if path doesn't exist
                 if !stable_resource.exists() {
-                    match self.link_manager.link_directory(&shared_resource, &stable_resource) {
+                    match self
+                        .link_manager
+                        .link_directory(&shared_resource, &stable_resource)
+                    {
                         Ok(link_info) => {
                             tracing::info!(
                                 "Repaired stable {} link: {} -> {}",
@@ -1614,7 +1596,10 @@ impl UnifiedStorageEngine {
 
                 // Create link if path doesn't exist
                 if !lazer_resource.exists() {
-                    match self.link_manager.link_directory(&shared_resource, &lazer_resource) {
+                    match self
+                        .link_manager
+                        .link_directory(&shared_resource, &lazer_resource)
+                    {
                         Ok(link_info) => {
                             tracing::info!(
                                 "Repaired lazer {} link: {} -> {}",
@@ -1661,11 +1646,8 @@ impl UnifiedStorageEngine {
                     LinkStatus::Broken
                 };
 
-                let mut linked_resource = LinkedResource::new(
-                    resource_type,
-                    shared_resource.clone(),
-                    link_paths,
-                );
+                let mut linked_resource =
+                    LinkedResource::new(resource_type, shared_resource.clone(), link_paths);
                 linked_resource.set_status(status);
                 self.manifest.add_resource(linked_resource);
             }

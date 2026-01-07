@@ -43,57 +43,23 @@ mod manifest;
 mod migration;
 mod watcher;
 
-pub use config::{
-    SharedResourceType,
-    SyncTriggers,
-    UnifiedStorageConfig,
-    UnifiedStorageMode,
-};
+pub use config::{SharedResourceType, SyncTriggers, UnifiedStorageConfig, UnifiedStorageMode};
 
 pub use migration::{
-    BackupManifest,
-    MigrationPlan,
-    MigrationProgress,
-    MigrationResult,
-    MigrationStep,
+    BackupManifest, MigrationPlan, MigrationProgress, MigrationResult, MigrationStep,
     UnifiedMigration,
 };
 
-pub use watcher::{
-    FileChangeEvent,
-    UnifiedWatcher,
-    WatcherEventHandler,
-};
+pub use watcher::{FileChangeEvent, UnifiedWatcher, WatcherEventHandler};
 
 pub use game_detect::{
-    find_running_processes,
-    is_process_running,
-    GameEvent,
-    GameLaunchDetector,
-    OsuGame,
-    ProcessInfo,
+    find_running_processes, is_process_running, GameEvent, GameLaunchDetector, OsuGame, ProcessInfo,
 };
 
-pub use engine::{
-    RepairResult,
-    SetupResult,
-    SyncResult,
-    UnifiedStorageEngine,
-    VerificationResult,
-};
+pub use engine::{RepairResult, SetupResult, SyncResult, UnifiedStorageEngine, VerificationResult};
 
-pub use manifest::{
-    LinkStatus,
-    LinkedResource,
-    ManifestSummary,
-    UnifiedManifest,
-};
+pub use manifest::{LinkStatus, LinkedResource, ManifestSummary, UnifiedManifest};
 
 pub use link::{
-    copy_dir_recursive,
-    LinkCapability,
-    LinkCheckInfo,
-    LinkInfo,
-    LinkManager,
-    LinkType,
+    copy_dir_recursive, LinkCapability, LinkCheckInfo, LinkInfo, LinkManager, LinkType,
 };

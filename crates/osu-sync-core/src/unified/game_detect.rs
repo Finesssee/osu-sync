@@ -293,10 +293,11 @@ impl GameLaunchDetector {
                     if event_tx.send(GameEvent::Launched(OsuGame::Stable)).is_err() {
                         break;
                     }
-                } else if !stable_running && stable_was_running {
-                    if event_tx.send(GameEvent::Closed(OsuGame::Stable)).is_err() {
-                        break;
-                    }
+                } else if !stable_running
+                    && stable_was_running
+                    && event_tx.send(GameEvent::Closed(OsuGame::Stable)).is_err()
+                {
+                    break;
                 }
 
                 // Check for lazer state changes
@@ -304,10 +305,11 @@ impl GameLaunchDetector {
                     if event_tx.send(GameEvent::Launched(OsuGame::Lazer)).is_err() {
                         break;
                     }
-                } else if !lazer_running && lazer_was_running {
-                    if event_tx.send(GameEvent::Closed(OsuGame::Lazer)).is_err() {
-                        break;
-                    }
+                } else if !lazer_running
+                    && lazer_was_running
+                    && event_tx.send(GameEvent::Closed(OsuGame::Lazer)).is_err()
+                {
+                    break;
                 }
 
                 stable_was_running = stable_running;
@@ -375,7 +377,7 @@ fn check_lazer_running_with_system(sys: &System, lazer_exe: &str, lazer_alt_exe:
 
     // For the main osu!.exe, check if it's lazer by path
     let processes = find_running_processes_with_system(sys, lazer_exe);
-    processes.iter().any(|p| is_lazer_process(p))
+    processes.iter().any(is_lazer_process)
 }
 
 /// Determines if a process is osu! lazer based on its path.
@@ -460,11 +462,11 @@ fn is_process_running_with_system(sys: &System, exe_name: &str) -> bool {
 #[cfg(target_os = "windows")]
 pub mod windows {
     use super::ProcessInfo;
-    use std::path::PathBuf;
 
     /// Finds all running processes matching the given executable name using Windows API.
     ///
     /// This is a fallback implementation used when sysinfo doesn't work.
+    #[allow(dead_code)]
     pub fn find_running_processes_fallback(exe_name: &str) -> Vec<ProcessInfo> {
         let mut processes = Vec::new();
 
@@ -495,6 +497,7 @@ pub mod windows {
     }
 
     /// Checks if a process with the given name is running using Windows API.
+    #[allow(dead_code)]
     pub fn is_process_running_fallback(exe_name: &str) -> bool {
         if let Ok(output) = std::process::Command::new("tasklist")
             .args(["/FI", &format!("IMAGENAME eq {}", exe_name), "/NH"])
@@ -655,7 +658,10 @@ mod tests {
             detector.poll_interval,
             GameLaunchDetector::DEFAULT_POLL_INTERVAL
         );
-        assert_eq!(detector.stable_exe_name, GameLaunchDetector::STABLE_EXE_NAME);
+        assert_eq!(
+            detector.stable_exe_name,
+            GameLaunchDetector::STABLE_EXE_NAME
+        );
         assert_eq!(detector.lazer_exe_name, GameLaunchDetector::LAZER_EXE_NAME);
     }
 
@@ -764,10 +770,7 @@ mod tests {
 
         assert_eq!(info.pid, 12345);
         assert_eq!(info.name, "test.exe");
-        assert_eq!(
-            info.exe_path,
-            Some(PathBuf::from("/path/to/test.exe"))
-        );
+        assert_eq!(info.exe_path, Some(PathBuf::from("/path/to/test.exe")));
     }
 
     #[test]

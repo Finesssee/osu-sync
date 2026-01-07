@@ -1,6 +1,6 @@
 //! Platform-specific path detection for osu! installations
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Get all available drive letters on Windows
 #[cfg(target_os = "windows")]
@@ -19,7 +19,7 @@ fn get_available_drives() -> Vec<PathBuf> {
 
 /// Check if a path is a valid osu!stable installation
 /// Looks for: Songs folder + (osu!.exe OR osu!.db OR collection.db)
-fn is_stable_installation(path: &PathBuf) -> bool {
+fn is_stable_installation(path: &Path) -> bool {
     if !path.exists() || !path.is_dir() {
         return false;
     }
@@ -38,7 +38,7 @@ fn is_stable_installation(path: &PathBuf) -> bool {
 
 /// Check if a path is a valid osu!lazer data directory
 /// Looks for: client.realm file
-fn is_lazer_installation(path: &PathBuf) -> bool {
+fn is_lazer_installation(path: &Path) -> bool {
     if !path.exists() || !path.is_dir() {
         return false;
     }
@@ -48,14 +48,14 @@ fn is_lazer_installation(path: &PathBuf) -> bool {
 
 /// Scan a directory for osu! installations (non-recursive, checks immediate children)
 #[cfg(target_os = "windows")]
-fn scan_directory_for_stable(dir: &PathBuf) -> Option<PathBuf> {
+fn scan_directory_for_stable(dir: &Path) -> Option<PathBuf> {
     if !dir.exists() || !dir.is_dir() {
         return None;
     }
 
     // First check if this directory itself is osu!
     if is_stable_installation(dir) {
-        return Some(dir.clone());
+        return Some(dir.to_path_buf());
     }
 
     // Then check immediate children
@@ -73,14 +73,14 @@ fn scan_directory_for_stable(dir: &PathBuf) -> Option<PathBuf> {
 
 /// Scan a directory for osu!lazer installations (non-recursive, checks immediate children)
 #[cfg(target_os = "windows")]
-fn scan_directory_for_lazer(dir: &PathBuf) -> Option<PathBuf> {
+fn scan_directory_for_lazer(dir: &Path) -> Option<PathBuf> {
     if !dir.exists() || !dir.is_dir() {
         return None;
     }
 
     // First check if this directory itself is lazer
     if is_lazer_installation(dir) {
-        return Some(dir.clone());
+        return Some(dir.to_path_buf());
     }
 
     // Then check immediate children
@@ -223,12 +223,12 @@ pub fn detect_stable_path() -> Option<PathBuf> {
 }
 
 /// Validate that a path is a valid osu!stable installation
-pub fn validate_stable_path(path: &PathBuf) -> bool {
+pub fn validate_stable_path(path: &Path) -> bool {
     path.exists() && path.join("Songs").is_dir()
 }
 
 /// Validate that a path is a valid osu!lazer data directory
-pub fn validate_lazer_path(path: &PathBuf) -> bool {
+pub fn validate_lazer_path(path: &Path) -> bool {
     path.exists() && path.join("client.realm").is_file() && path.join("files").is_dir()
 }
 

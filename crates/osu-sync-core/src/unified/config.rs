@@ -289,15 +289,11 @@ impl UnifiedStorageConfig {
     /// - The shared path is set but doesn't exist (optional check)
     pub fn validate(&self) -> Result<(), String> {
         if self.mode == UnifiedStorageMode::TrueUnified && self.shared_path.is_none() {
-            return Err(
-                "TrueUnified mode requires a shared_path to be configured".to_string()
-            );
+            return Err("TrueUnified mode requires a shared_path to be configured".to_string());
         }
 
         if self.is_enabled() && self.shared_resources.is_empty() {
-            return Err(
-                "At least one resource type must be selected for sharing".to_string()
-            );
+            return Err("At least one resource type must be selected for sharing".to_string());
         }
 
         Ok(())
@@ -366,7 +362,10 @@ mod tests {
         assert!(config.is_resource_shared(SharedResourceType::Beatmaps));
 
         config.share_all_resources();
-        assert_eq!(config.shared_resources_count(), SharedResourceType::all().len());
+        assert_eq!(
+            config.shared_resources_count(),
+            SharedResourceType::all().len()
+        );
 
         config.unshare_resource(SharedResourceType::Beatmaps);
         assert!(!config.is_resource_shared(SharedResourceType::Beatmaps));

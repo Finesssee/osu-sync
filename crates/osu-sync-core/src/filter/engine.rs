@@ -98,7 +98,7 @@ impl FilterEngine {
                         || meta
                             .artist_unicode
                             .as_ref()
-                            .map_or(false, |a| a.to_lowercase().contains(&filter_lower));
+                            .is_some_and(|a| a.to_lowercase().contains(&filter_lower));
                     if !matches_artist {
                         return false;
                     }
@@ -120,22 +120,22 @@ impl FilterEngine {
         if let Some(ref query) = criteria.search_query {
             if !query.is_empty() {
                 let query_lower = query.to_lowercase();
-                let matches_metadata = set.metadata().map_or(false, |meta| {
+                let matches_metadata = set.metadata().is_some_and(|meta| {
                     meta.title.to_lowercase().contains(&query_lower)
                         || meta.artist.to_lowercase().contains(&query_lower)
                         || meta
                             .title_unicode
                             .as_ref()
-                            .map_or(false, |t| t.to_lowercase().contains(&query_lower))
+                            .is_some_and(|t| t.to_lowercase().contains(&query_lower))
                         || meta
                             .artist_unicode
                             .as_ref()
-                            .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                            .is_some_and(|a| a.to_lowercase().contains(&query_lower))
                         || meta.creator.to_lowercase().contains(&query_lower)
                         || meta
                             .source
                             .as_ref()
-                            .map_or(false, |s| s.to_lowercase().contains(&query_lower))
+                            .is_some_and(|s| s.to_lowercase().contains(&query_lower))
                         || meta
                             .tags
                             .iter()
@@ -147,7 +147,7 @@ impl FilterEngine {
                     let matches_folder = set
                         .folder_name
                         .as_ref()
-                        .map_or(false, |f| f.to_lowercase().contains(&query_lower));
+                        .is_some_and(|f| f.to_lowercase().contains(&query_lower));
 
                     if !matches_folder {
                         return false;
@@ -223,7 +223,7 @@ impl FilterEngine {
                         || meta
                             .artist_unicode
                             .as_ref()
-                            .map_or(false, |a| a.to_lowercase().contains(&filter_lower));
+                            .is_some_and(|a| a.to_lowercase().contains(&filter_lower));
                     if !matches_artist {
                         return false;
                     }
@@ -247,23 +247,23 @@ impl FilterEngine {
                 let query_lower = query.to_lowercase();
 
                 // Get metadata from first beatmap
-                let matches_metadata = set.beatmaps.first().map_or(false, |beatmap| {
+                let matches_metadata = set.beatmaps.first().is_some_and(|beatmap| {
                     let meta = &beatmap.metadata;
                     meta.title.to_lowercase().contains(&query_lower)
                         || meta.artist.to_lowercase().contains(&query_lower)
                         || meta
                             .title_unicode
                             .as_ref()
-                            .map_or(false, |t| t.to_lowercase().contains(&query_lower))
+                            .is_some_and(|t| t.to_lowercase().contains(&query_lower))
                         || meta
                             .artist_unicode
                             .as_ref()
-                            .map_or(false, |a| a.to_lowercase().contains(&query_lower))
+                            .is_some_and(|a| a.to_lowercase().contains(&query_lower))
                         || meta.creator.to_lowercase().contains(&query_lower)
                         || meta
                             .source
                             .as_ref()
-                            .map_or(false, |s| s.to_lowercase().contains(&query_lower))
+                            .is_some_and(|s| s.to_lowercase().contains(&query_lower))
                         || meta
                             .tags
                             .iter()

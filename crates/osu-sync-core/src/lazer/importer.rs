@@ -81,10 +81,16 @@ impl LazerImporter {
             if let Some(local_app_data) = dirs::data_local_dir() {
                 let paths = [
                     // Standard installer location with version subfolder
-                    local_app_data.join("osulazer").join("current").join("osu!.exe"),
+                    local_app_data
+                        .join("osulazer")
+                        .join("current")
+                        .join("osu!.exe"),
                     local_app_data.join("osulazer").join("osu!.exe"),
                     local_app_data.join("osu!lazer").join("osu!.exe"),
-                    local_app_data.join("Programs").join("osu!lazer").join("osu!.exe"),
+                    local_app_data
+                        .join("Programs")
+                        .join("osu!lazer")
+                        .join("osu!.exe"),
                 ];
                 for path in &paths {
                     if path.exists() {
@@ -95,7 +101,9 @@ impl LazerImporter {
 
             // 2. Check Program Files
             if let Ok(program_files) = std::env::var("ProgramFiles") {
-                let path = PathBuf::from(&program_files).join("osu!lazer").join("osu!.exe");
+                let path = PathBuf::from(&program_files)
+                    .join("osu!lazer")
+                    .join("osu!.exe");
                 if path.exists() {
                     return Some(path);
                 }
@@ -196,10 +204,9 @@ impl LazerImporter {
         let generated_name = beatmap_set.generate_folder_name();
         let base_name = beatmap_set
             .folder_name
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(&generated_name);
-        
+
         let filename = format!("{}.osz", sanitize_filename(base_name));
         let osz_path = self.import_path.join(&filename);
 
@@ -334,7 +341,7 @@ impl LazerImporter {
                 tracing::info!("All {} files sent to lazer for import", success_count);
             }
 
-            return Ok(success_count > 0);
+            Ok(success_count > 0)
         }
 
         #[cfg(not(target_os = "windows"))]

@@ -276,7 +276,7 @@ impl Default for MigrationProgress {
 }
 
 /// Result of a completed migration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrationResult {
     /// Whether the migration completed successfully.
     pub success: bool,
@@ -327,18 +327,6 @@ impl MigrationResult {
     /// Returns human-readable space saved.
     pub fn space_saved_display(&self) -> String {
         format_bytes(self.space_saved)
-    }
-}
-
-impl Default for MigrationResult {
-    fn default() -> Self {
-        Self {
-            success: false,
-            links_created: 0,
-            space_saved: 0,
-            warnings: Vec::new(),
-            errors: Vec::new(),
-        }
     }
 }
 
@@ -439,9 +427,7 @@ impl UnifiedMigration {
         let mut plan = MigrationPlan::new(self.config.mode);
 
         // Validate configuration
-        self.config
-            .validate()
-            .map_err(|e| Error::Config(e))?;
+        self.config.validate().map_err(Error::Config)?;
 
         // Check prerequisites first
         plan.add_step(MigrationStep::CheckPrerequisites);
@@ -720,7 +706,8 @@ impl UnifiedMigration {
 
         // Check if games are running
         if Self::is_game_running() {
-            warnings.push("osu! appears to be running. Close the game before migrating.".to_string());
+            warnings
+                .push("osu! appears to be running. Close the game before migrating.".to_string());
         }
 
         Ok(warnings)
@@ -810,7 +797,8 @@ impl UnifiedMigration {
 
         // Check if games are running
         if Self::is_game_running() {
-            warnings.push("osu! appears to be running. Please close it before migrating.".to_string());
+            warnings
+                .push("osu! appears to be running. Please close it before migrating.".to_string());
         }
 
         // Check disk space
@@ -856,6 +844,7 @@ impl UnifiedMigration {
     }
 
     /// Creates the backup manifest file.
+    #[allow(dead_code)]
     fn create_backup_manifest(&self) -> Result<PathBuf> {
         let manifest = BackupManifest::new(
             self.stable_path.clone(),
@@ -931,8 +920,8 @@ impl UnifiedMigration {
                 }
             }
 
-            MigrationStep::CopyBeatmaps { count: _, size } |
-            MigrationStep::CopySkins { count: _, size } => {
+            MigrationStep::CopyBeatmaps { count: _, size }
+            | MigrationStep::CopySkins { count: _, size } => {
                 let folder_name = if matches!(step, MigrationStep::CopyBeatmaps { .. }) {
                     "Songs"
                 } else {
@@ -958,11 +947,11 @@ impl UnifiedMigration {
                 })?;
             }
 
-            MigrationStep::CreateJunctions { count } => {
+            MigrationStep::CreateJunctions { count: _count } => {
                 stats.links_created = self.create_links(manifest, true)?;
             }
 
-            MigrationStep::CreateSymlinks { count } => {
+            MigrationStep::CreateSymlinks { count: _count } => {
                 stats.links_created = self.create_links(manifest, false)?;
             }
 
@@ -1006,9 +995,11 @@ impl UnifiedMigration {
             UnifiedStorageMode::StableMaster => (&self.stable_path, &self.lazer_path),
             UnifiedStorageMode::LazerMaster => (&self.lazer_path, &self.stable_path),
             UnifiedStorageMode::TrueUnified => {
-                let shared = self.config.shared_path.as_ref().ok_or_else(|| {
-                    Error::Config("Missing shared path".to_string())
-                })?;
+                let shared = self
+                    .config
+                    .shared_path
+                    .as_ref()
+                    .ok_or_else(|| Error::Config("Missing shared path".to_string()))?;
                 (shared, &self.stable_path)
             }
             UnifiedStorageMode::Disabled => return Ok(()),
@@ -1028,7 +1019,13 @@ impl UnifiedMigration {
 
         // Copy files that don't exist in destination
         let mut bytes_copied = 0u64;
-        Self::copy_directory_merge(&source, &dest, total_size, &mut bytes_copied, &progress_callback)?;
+        Self::copy_directory_merge(
+            &source,
+            &dest,
+            total_size,
+            &mut bytes_copied,
+            &progress_callback,
+        )?;
 
         // Record the move for rollback
         let backup_path = source.with_extension("pre-migration");
@@ -1065,7 +1062,13 @@ impl UnifiedMigration {
             let dest_path = dest.join(&file_name);
 
             if source_path.is_dir() {
-                Self::copy_directory_merge(&source_path, &dest_path, total_size, bytes_copied, progress_callback)?;
+                Self::copy_directory_merge(
+                    &source_path,
+                    &dest_path,
+                    total_size,
+                    bytes_copied,
+                    progress_callback,
+                )?;
             } else if source_path.is_file() {
                 // Only copy if destination doesn't exist or is older
                 let should_copy = if dest_path.exists() {
@@ -1098,9 +1101,11 @@ impl UnifiedMigration {
             UnifiedStorageMode::StableMaster => (&self.stable_path, &self.lazer_path),
             UnifiedStorageMode::LazerMaster => (&self.lazer_path, &self.stable_path),
             UnifiedStorageMode::TrueUnified => {
-                let shared = self.config.shared_path.as_ref().ok_or_else(|| {
-                    Error::Config("Missing shared path".to_string())
-                })?;
+                let shared = self
+                    .config
+                    .shared_path
+                    .as_ref()
+                    .ok_or_else(|| Error::Config("Missing shared path".to_string()))?;
                 // In TrueUnified, both installations link to shared
                 return self.create_links_to_shared(shared, manifest, use_junctions);
             }
@@ -1221,7 +1226,10 @@ impl UnifiedMigration {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Other(format!("Failed to create junction: {}", stderr)));
+            return Err(Error::Other(format!(
+                "Failed to create junction: {}",
+                stderr
+            )));
         }
 
         Ok(())
@@ -1229,7 +1237,9 @@ impl UnifiedMigration {
 
     #[cfg(not(windows))]
     fn create_junction(_link: &Path, _target: &Path) -> Result<()> {
-        Err(Error::Other("Junctions are only supported on Windows".to_string()))
+        Err(Error::Other(
+            "Junctions are only supported on Windows".to_string(),
+        ))
     }
 
     /// Moves a directory to a new location.
@@ -1286,10 +1296,7 @@ impl UnifiedMigration {
             let stable_resource = self.stable_path.join(folder_name);
             if stable_resource.exists() {
                 if let Err(e) = fs::read_dir(&stable_resource) {
-                    issues.push(format!(
-                        "Cannot access {} in stable: {}",
-                        folder_name, e
-                    ));
+                    issues.push(format!("Cannot access {} in stable: {}", folder_name, e));
                 }
             }
 
@@ -1297,10 +1304,7 @@ impl UnifiedMigration {
             let lazer_resource = self.lazer_path.join(folder_name);
             if lazer_resource.exists() {
                 if let Err(e) = fs::read_dir(&lazer_resource) {
-                    issues.push(format!(
-                        "Cannot access {} in lazer: {}",
-                        folder_name, e
-                    ));
+                    issues.push(format!("Cannot access {} in lazer: {}", folder_name, e));
                 }
             }
         }
@@ -1350,14 +1354,8 @@ impl UnifiedMigration {
     fn get_available_disk_space(path: &Path) -> Result<u64> {
         #[cfg(windows)]
         {
-            use std::ffi::OsStr;
-            use std::os::windows::ffi::OsStrExt;
-
             // Get the root of the path
-            let root = path
-                .ancestors()
-                .last()
-                .unwrap_or(path);
+            let _root = path.ancestors().last().unwrap_or(path);
 
             // For simplicity, return a large value if we can't determine
             // In production, use winapi GetDiskFreeSpaceExW
@@ -1400,7 +1398,7 @@ impl UnifiedMigration {
 
         // Try to create a temp file
         let test_path = path.join(".osu-sync-write-test");
-        if let Ok(_) = File::create(&test_path) {
+        if File::create(&test_path).is_ok() {
             fs::remove_file(&test_path).ok();
             return true;
         }
@@ -1518,9 +1516,16 @@ mod tests {
     fn test_all_migration_step_descriptions() {
         let steps = vec![
             MigrationStep::CheckPrerequisites,
-            MigrationStep::BackupOriginal { path: PathBuf::from("/backup") },
-            MigrationStep::CreateSharedFolder { path: PathBuf::from("/shared") },
-            MigrationStep::CopyBeatmaps { count: 50, size: 1024 * 1024 * 1024 },
+            MigrationStep::BackupOriginal {
+                path: PathBuf::from("/backup"),
+            },
+            MigrationStep::CreateSharedFolder {
+                path: PathBuf::from("/shared"),
+            },
+            MigrationStep::CopyBeatmaps {
+                count: 50,
+                size: 1024 * 1024 * 1024,
+            },
             MigrationStep::CreateJunctions { count: 10 },
             MigrationStep::CreateSymlinks { count: 5 },
             MigrationStep::VerifyIntegrity,
@@ -1530,7 +1535,11 @@ mod tests {
 
         for step in steps {
             let desc = step.description();
-            assert!(!desc.is_empty(), "Step {:?} should have a description", step);
+            assert!(
+                !desc.is_empty(),
+                "Step {:?} should have a description",
+                step
+            );
         }
     }
 
@@ -1586,7 +1595,9 @@ mod tests {
         let mut plan = MigrationPlan::new(UnifiedStorageMode::StableMaster);
 
         plan.add_step(MigrationStep::CheckPrerequisites);
-        plan.add_step(MigrationStep::BackupOriginal { path: PathBuf::from("/backup") });
+        plan.add_step(MigrationStep::BackupOriginal {
+            path: PathBuf::from("/backup"),
+        });
         plan.add_step(MigrationStep::VerifyIntegrity);
 
         assert_eq!(plan.step_count(), 3);
@@ -1724,11 +1735,8 @@ mod tests {
             UnifiedStorageMode::LazerMaster,
             UnifiedStorageMode::TrueUnified,
         ] {
-            let manifest = BackupManifest::new(
-                PathBuf::from("/stable"),
-                PathBuf::from("/lazer"),
-                mode,
-            );
+            let manifest =
+                BackupManifest::new(PathBuf::from("/stable"), PathBuf::from("/lazer"), mode);
 
             assert_eq!(manifest.mode, mode);
             assert!(manifest.moved_paths.is_empty());

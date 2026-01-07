@@ -2,9 +2,7 @@
 //!
 //! Run with: cargo run --package osu-sync-core --example test_unified_storage
 
-use osu_sync_core::unified::{
-    SharedResourceType, UnifiedStorageConfig, UnifiedStorageEngine, UnifiedStorageMode,
-};
+use osu_sync_core::unified::{UnifiedStorageConfig, UnifiedStorageEngine};
 use std::fs::{self, File};
 use std::io::Write;
 use tempfile::TempDir;
@@ -36,7 +34,11 @@ fn main() {
         fs::create_dir_all(&beatmap_dir).expect("Failed to create beatmap dir");
         let osu_file = beatmap_dir.join(format!("song_{}.osu", i));
         let mut file = File::create(&osu_file).expect("Failed to create .osu file");
-        writeln!(file, "osu file format v14\n[General]\nAudioFilename: audio.mp3").unwrap();
+        writeln!(
+            file,
+            "osu file format v14\n[General]\nAudioFilename: audio.mp3"
+        )
+        .unwrap();
 
         // Create a fake audio file
         let audio_file = beatmap_dir.join("audio.mp3");
@@ -80,7 +82,11 @@ fn main() {
         fs::create_dir_all(&beatmap_dir).expect("Failed to create beatmap dir");
         let osu_file = beatmap_dir.join(format!("lazer_{}.osu", i));
         let mut file = File::create(&osu_file).expect("Failed to create .osu file");
-        writeln!(file, "osu file format v14\n[General]\nAudioFilename: audio.mp3").unwrap();
+        writeln!(
+            file,
+            "osu file format v14\n[General]\nAudioFilename: audio.mp3"
+        )
+        .unwrap();
     }
 
     // Reset stable songs for lazer master test

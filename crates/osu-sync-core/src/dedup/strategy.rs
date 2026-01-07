@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Strategy for detecting duplicate beatmaps
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DuplicateStrategy {
     /// Match by MD5/SHA-256 hash (exact file match)
     ByHash,
@@ -12,13 +12,8 @@ pub enum DuplicateStrategy {
     /// Match by metadata (title + artist + creator)
     ByMetadata,
     /// Try all methods (hash -> set ID -> metadata)
+    #[default]
     Composite,
-}
-
-impl Default for DuplicateStrategy {
-    fn default() -> Self {
-        Self::Composite
-    }
 }
 
 /// Action to take when a duplicate is found
