@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Handler for osu!lazer's hash-based file storage
 ///
@@ -117,6 +118,16 @@ impl LazerFileStore {
             .collect();
 
         Ok(hashes)
+    }
+
+    /// Get the last-modified time of the file store directory (seconds since UNIX epoch)
+    pub fn store_mtime_secs(&self) -> Option<u64> {
+        let metadata = fs::metadata(&self.files_path).ok()?;
+        let modified = metadata.modified().ok()?;
+        modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
     }
 
     /// Calculate the SHA-256 hash of content

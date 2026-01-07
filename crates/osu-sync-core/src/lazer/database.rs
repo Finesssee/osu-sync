@@ -17,6 +17,7 @@ use crate::beatmap::{
 use crate::error::{Error, Result};
 use crate::lazer::LazerFileStore;
 use crate::stats::RankedStatus;
+use blake3;
 use realm_db_reader::{Group, Realm, Row, Table, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -105,6 +106,12 @@ impl LazerScanTiming {
 struct BeatmapCache {
     /// Number of files in the file store when cache was created
     file_count: usize,
+    /// File store last-modified time when cache was created
+    #[serde(default)]
+    file_store_mtime_secs: Option<u64>,
+    /// File store signature (hash of file store contents)
+    #[serde(default)]
+    file_store_signature: Option<String>,
     /// Number of beatmaps parsed
     beatmaps_parsed: usize,
     /// Cached beatmap sets
@@ -266,8 +273,22 @@ impl LazerDatabase {
         self.data_path.join(".osu-sync-cache.json")
     }
 
+    /// Compute a stable signature for the file store contents
+    fn compute_file_store_signature(hashes: &[String]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        for hash in hashes {
+            hasher.update(hash.as_bytes());
+            hasher.update(b"\n");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// Try to load beatmap sets from cache
-    fn load_from_cache(&self, current_file_count: usize) -> Option<(Vec<LazerBeatmapSet>, usize)> {
+    fn load_from_cache(
+        &self,
+        current_file_count: usize,
+        current_signature: Option<&str>,
+    ) -> Option<(Vec<LazerBeatmapSet>, usize)> {
         let cache_path = self.cache_path();
         if !cache_path.exists() {
             return None;
@@ -275,6 +296,7 @@ impl LazerDatabase {
 
         let data = std::fs::read_to_string(&cache_path).ok()?;
         let cache: BeatmapCache = serde_json::from_str(&data).ok()?;
+        let current_mtime = self.file_store.store_mtime_secs();
 
         // Validate cache - file count must match
         if cache.file_count != current_file_count {
@@ -286,14 +308,54 @@ impl LazerDatabase {
             return None;
         }
 
+        // Validate cache - file store mtime must match (when available)
+        if let (Some(cache_mtime), Some(current_mtime)) =
+            (cache.file_store_mtime_secs, current_mtime)
+        {
+            if cache_mtime != current_mtime {
+                tracing::info!(
+                    "Cache invalidated: file store modified time changed ({} -> {})",
+                    cache_mtime,
+                    current_mtime
+                );
+                return None;
+            }
+        } else if cache.file_store_mtime_secs.is_some() && current_mtime.is_none() {
+            tracing::info!("Cache invalidated: file store mtime unavailable");
+            return None;
+        }
+
+        // Validate cache - file store signature must match (when available)
+        if let Some(current_signature) = current_signature {
+            match cache.file_store_signature.as_deref() {
+                Some(cache_signature) if cache_signature == current_signature => {}
+                Some(_) => {
+                    tracing::info!("Cache invalidated: file store signature changed");
+                    return None;
+                }
+                None => {
+                    tracing::info!("Cache invalidated: file store signature missing");
+                    return None;
+                }
+            }
+        }
+
         tracing::info!("Loaded {} beatmap sets from cache", cache.sets.len());
         Some((cache.sets, cache.beatmaps_parsed))
     }
 
     /// Save beatmap sets to cache
-    fn save_to_cache(&self, sets: &[LazerBeatmapSet], file_count: usize, beatmaps_parsed: usize) {
+    fn save_to_cache(
+        &self,
+        sets: &[LazerBeatmapSet],
+        file_count: usize,
+        beatmaps_parsed: usize,
+        file_store_signature: Option<String>,
+    ) {
         let cache = BeatmapCache {
             file_count,
+            file_store_mtime_secs: self.file_store.store_mtime_secs(),
+            file_store_signature,
             beatmaps_parsed,
             sets: sets.to_vec(),
         };
@@ -307,17 +369,13 @@ impl LazerDatabase {
         }
     }
 
-    /// Scan .osu files from the file store to build beatmap sets (without timing)
-    fn get_beatmap_sets_from_file_scan(&self) -> Result<Vec<LazerBeatmapSet>> {
-        let (sets, _timing) = self.get_beatmap_sets_from_file_scan_timed()?;
-        Ok(sets)
-    }
-
     /// Scan .osu files from the file store to build beatmap sets with detailed timing
     ///
     /// This is a fallback method when Realm database reading isn't available.
     /// Uses parallel processing for fast scanning and caching for instant subsequent loads.
-    fn get_beatmap_sets_from_file_scan_timed(&self) -> Result<(Vec<LazerBeatmapSet>, LazerScanTiming)> {
+    fn get_beatmap_sets_from_file_scan_timed(
+        &self,
+    ) -> Result<(Vec<LazerBeatmapSet>, LazerScanTiming)> {
         use rayon::prelude::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -330,13 +388,19 @@ impl LazerDatabase {
 
         // Phase 0: List all files
         let listing_start = Instant::now();
-        let all_hashes = self.file_store.list_all()?;
+        let mut all_hashes = self.file_store.list_all()?;
         timing.file_listing = listing_start.elapsed();
         timing.total_files = all_hashes.len();
         tracing::info!("Found {} files in lazer file store", timing.total_files);
 
+        // Compute a stable signature for cache validation
+        all_hashes.sort();
+        let store_signature = Some(Self::compute_file_store_signature(&all_hashes));
+
         // Try to load from cache first
-        if let Some((cached_sets, beatmaps_parsed)) = self.load_from_cache(timing.total_files) {
+        if let Some((cached_sets, beatmaps_parsed)) =
+            self.load_from_cache(timing.total_files, store_signature.as_deref())
+        {
             timing.total = total_start.elapsed();
             timing.from_cache = true;
             timing.sets_created = cached_sets.len();
@@ -444,7 +508,12 @@ impl LazerDatabase {
         timing.total = total_start.elapsed();
 
         // Save to cache for next time
-        self.save_to_cache(&result, timing.total_files, timing.osu_files_parsed);
+        self.save_to_cache(
+            &result,
+            timing.total_files,
+            timing.osu_files_parsed,
+            store_signature,
+        );
 
         Ok((result, timing))
     }
@@ -477,18 +546,14 @@ impl LazerDatabase {
             } else {
                 Some(beatmap.source.clone())
             },
-            tags: beatmap
-                .tags
-                .split_whitespace()
-                .map(String::from)
-                .collect(),
+            tags: beatmap.tags.split_whitespace().map(String::from).collect(),
             beatmap_id: if beatmap.beatmap_id > 0 {
-                Some(beatmap.beatmap_id as i32)
+                Some(beatmap.beatmap_id)
             } else {
                 None
             },
             beatmap_set_id: if beatmap.beatmap_set_id > 0 {
-                Some(beatmap.beatmap_set_id as i32)
+                Some(beatmap.beatmap_set_id)
             } else {
                 None
             },
@@ -544,7 +609,10 @@ impl LazerDatabase {
         let beatmap_set_table = match group.get_table_by_name("class_BeatmapSetInfo") {
             Ok(table) => table,
             Err(e) => {
-                tracing::warn!("BeatmapSetInfo table not found: {}. Trying alternative names...", e);
+                tracing::warn!(
+                    "BeatmapSetInfo table not found: {}. Trying alternative names...",
+                    e
+                );
                 // Try alternative table names
                 match group.get_table_by_name("BeatmapSetInfo") {
                     Ok(table) => table,
@@ -1066,6 +1134,45 @@ impl LazerDatabase {
             files,
             folder_name: None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn make_db(temp_dir: &TempDir) -> LazerDatabase {
+        let data_path = temp_dir.path().to_path_buf();
+        fs::create_dir_all(data_path.join("files")).expect("Failed to create files dir");
+        LazerDatabase {
+            data_path: data_path.clone(),
+            file_store: LazerFileStore::new(&data_path),
+            realm_group: None,
+        }
+    }
+
+    #[test]
+    fn cache_load_respects_file_store_signature() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db = make_db(&temp_dir);
+
+        let sets: Vec<LazerBeatmapSet> = Vec::new();
+        db.save_to_cache(&sets, 0, 0, Some("signature-a".to_string()));
+
+        let loaded = db.load_from_cache(0, Some("signature-a"));
+        assert!(
+            loaded.is_some(),
+            "Cache should load with matching signature"
+        );
+
+        let loaded = db.load_from_cache(0, Some("signature-b"));
+        assert!(
+            loaded.is_none(),
+            "Cache should invalidate when signature changes"
+        );
     }
 }
 
