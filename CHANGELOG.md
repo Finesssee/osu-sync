@@ -1,12 +1,16 @@
 # Changelog
 
-> Last updated: 2025-12-28
+> Last updated: 2026-01-06
 
 All notable changes to osu-sync will be documented in this file.
 
 ## [Unreleased]
 
 ### Added
+
+#### Vision Feature Gating
+- Game window capture now requires Windows and the `vision` feature flag
+- `--capture-game` reports when the feature is unavailable
 
 #### Beatmap Selection in Dry Run Preview
 - **Checkbox selection**: Each beatmap set now has a checkbox (`[x]`/`[ ]`) in the Dry Run Preview screen

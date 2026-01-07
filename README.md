@@ -90,6 +90,22 @@ osu-sync
 osu-sync --help
 ```
 
+### Vision Commands (Optional)
+
+```bash
+# Capture current TUI state (text or JSON)
+osu-sync --tui-snapshot
+osu-sync --tui-snapshot --json
+
+# Capture an osu! game window screenshot (Windows + vision feature only)
+osu-sync --capture-game
+osu-sync --capture-game stable
+osu-sync --capture-game lazer
+```
+
+Note: `--capture-game` requires Windows and a build with the `vision` feature
+enabled.
+
 ### TUI Navigation
 
 | Key | Action |
@@ -154,6 +170,12 @@ cargo build --release
 
 ```bash
 cargo build --release --features gui
+```
+
+### Build with Vision Capture (Optional, Windows only)
+
+```bash
+cargo build --release --features vision
 ```
 
 ### Run Tests
