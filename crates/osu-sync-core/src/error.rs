@@ -36,6 +36,12 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Missing component: {component}")]
+    MissingComponent { component: &'static str },
+
+    #[error("{path_type} path not configured")]
+    MissingPath { path_type: &'static str },
+
     #[error("{0}")]
     Other(String),
 

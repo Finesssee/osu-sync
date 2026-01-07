@@ -447,7 +447,7 @@ impl SyncEngine {
             // Fast O(1) duplicate check using index
             let action = if dup_index.is_duplicate(stable_set, strategy) {
                 DryRunAction::Duplicate
-            } else if stable_set.id.map_or(false, |id| dup_index.exists_by_id(id)) {
+            } else if stable_set.id.is_some_and(|id| dup_index.exists_by_id(id)) {
                 DryRunAction::Skip
             } else {
                 DryRunAction::Import
@@ -479,7 +479,7 @@ impl SyncEngine {
             let current = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             let elapsed_millis = start_time.elapsed().as_millis() as u64;
             let last = last_report_millis.load(Ordering::Relaxed);
-            
+
             // Report every 50ms or at completion
             if elapsed_millis >= last + 50 || current == total {
                 last_report_millis.store(elapsed_millis, Ordering::Relaxed);
@@ -494,7 +494,7 @@ impl SyncEngine {
                 } else {
                     None
                 };
-                
+
                 self.report_progress(SyncProgress {
                     current,
                     total,
@@ -544,7 +544,11 @@ impl SyncEngine {
         for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
             // Check for cancellation
             if self.is_cancelled() {
-                tracing::info!("Dry run cancelled by user at item {}/{}", progress_idx, total);
+                tracing::info!(
+                    "Dry run cancelled by user at item {}/{}",
+                    progress_idx,
+                    total
+                );
                 break;
             }
 
@@ -567,9 +571,9 @@ impl SyncEngine {
                 DryRunAction::Duplicate
             } else {
                 // Check if it already exists in stable by ID
-                let exists = beatmap_set.id.map_or(false, |id| {
-                    stable_index.sets.iter().any(|s| s.id == Some(id))
-                });
+                let exists = beatmap_set
+                    .id
+                    .is_some_and(|id| stable_index.sets.iter().any(|s| s.id == Some(id)));
 
                 if exists {
                     DryRunAction::Skip
@@ -708,7 +712,7 @@ impl SyncEngine {
             self.config
                 .lazer_path
                 .as_ref()
-                .ok_or_else(|| Error::Config("Lazer path not configured".to_string()))?,
+                .ok_or(Error::MissingPath { path_type: "Lazer" })?,
         )
         .batch_mode(); // Don't launch lazer for each beatmap
 
@@ -844,11 +848,10 @@ impl SyncEngine {
         let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
 
         // Phase 3: Import to stable
-        let stable_importer = StableImporter::new(
-            self.config
-                .stable_songs_path()
-                .ok_or_else(|| Error::Config("Stable path not configured".to_string()))?,
-        );
+        let stable_importer =
+            StableImporter::new(self.config.stable_songs_path().ok_or(Error::MissingPath {
+                path_type: "Stable",
+            })?);
 
         for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
             // Check for cancellation
@@ -927,13 +930,12 @@ impl SyncEngine {
             .as_ref()
             .ok_or_else(|| Error::Other("Beatmap set has no folder name".to_string()))?;
 
-        let songs_path = self
-            .config
-            .stable_songs_path()
-            .ok_or_else(|| Error::Config("Stable path not configured".to_string()))?;
+        let songs_path = self.config.stable_songs_path().ok_or(Error::MissingPath {
+            path_type: "Stable",
+        })?;
 
         let folder_path = songs_path.join(folder_name);
-        
+
         // Collect entries first
         let entries: Vec<_> = std::fs::read_dir(&folder_path)?
             .filter_map(|e| e.ok())
@@ -960,22 +962,21 @@ impl SyncEngine {
         lazer_set: &crate::lazer::LazerBeatmapSet,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let file_store = self.lazer_database.file_store();
-        
+
         // Read files in parallel using rayon
-        let files: Vec<_> = lazer_set.files
+        let files: Vec<_> = lazer_set
+            .files
             .par_iter()
-            .filter_map(|named_file| {
-                match file_store.read(&named_file.hash) {
-                    Ok(content) => Some((named_file.filename.clone(), content)),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to read file {} ({}): {}",
-                            named_file.filename,
-                            named_file.hash,
-                            e
-                        );
-                        None
-                    }
+            .filter_map(|named_file| match file_store.read(&named_file.hash) {
+                Ok(content) => Some((named_file.filename.clone(), content)),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read file {} ({}): {}",
+                        named_file.filename,
+                        named_file.hash,
+                        e
+                    );
+                    None
                 }
             })
             .collect();
@@ -1069,17 +1070,17 @@ impl SyncEngineBuilder {
 
     /// Build the sync engine
     pub fn build(self) -> Result<SyncEngine> {
-        let config = self
-            .config
-            .ok_or_else(|| Error::Config("Config is required".to_string()))?;
+        let config = self.config.ok_or(Error::MissingComponent {
+            component: "Config",
+        })?;
 
-        let stable_scanner = self
-            .stable_scanner
-            .ok_or_else(|| Error::Config("StableScanner is required".to_string()))?;
+        let stable_scanner = self.stable_scanner.ok_or(Error::MissingComponent {
+            component: "StableScanner",
+        })?;
 
-        let lazer_database = self
-            .lazer_database
-            .ok_or_else(|| Error::Config("LazerDatabase is required".to_string()))?;
+        let lazer_database = self.lazer_database.ok_or(Error::MissingComponent {
+            component: "LazerDatabase",
+        })?;
 
         let mut engine = SyncEngine::new(config, stable_scanner, lazer_database)
             .with_duplicate_strategy(self.duplicate_strategy);
@@ -1185,7 +1186,10 @@ mod tests {
     #[test]
     fn test_sync_phase_display() {
         assert_eq!(format!("{}", SyncPhase::Scanning), "Scanning");
-        assert_eq!(format!("{}", SyncPhase::Deduplicating), "Checking duplicates");
+        assert_eq!(
+            format!("{}", SyncPhase::Deduplicating),
+            "Checking duplicates"
+        );
         assert_eq!(format!("{}", SyncPhase::Importing), "Importing");
         assert_eq!(format!("{}", SyncPhase::Complete), "Complete");
     }
@@ -1223,7 +1227,9 @@ mod tests {
     fn test_sync_result_with_errors() {
         let mut result = SyncResult::new(SyncDirection::StableToLazer);
         result.imported = 5;
-        result.errors.push(SyncError::new(Some("Failed Map".to_string()), "IO error"));
+        result
+            .errors
+            .push(SyncError::new(Some("Failed Map".to_string()), "IO error"));
 
         assert!(!result.is_success()); // has errors
         assert_eq!(result.errors.len(), 1);
@@ -1326,15 +1332,19 @@ mod tests {
     #[test]
     fn test_parallel_file_collection_pattern() {
         // Test the pattern used in collect_stable_files/collect_lazer_files
-        use tempfile::TempDir;
         use std::fs;
+        use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path();
 
         // Create test files
         for i in 0..5 {
-            fs::write(dir_path.join(format!("file{}.txt", i)), format!("content{}", i)).unwrap();
+            fs::write(
+                dir_path.join(format!("file{}.txt", i)),
+                format!("content{}", i),
+            )
+            .unwrap();
         }
 
         // Parallel file read pattern
