@@ -272,7 +272,9 @@ impl TuiSnapshot {
                 in_progress: *in_progress,
                 status_message: status_message.clone(),
             },
-            AppState::Syncing { is_paused, stats, .. } => StateData::Syncing {
+            AppState::Syncing {
+                is_paused, stats, ..
+            } => StateData::Syncing {
                 is_paused: *is_paused,
                 imported: stats.imported,
                 skipped: stats.skipped,
@@ -354,7 +356,7 @@ impl TuiSnapshot {
         serde_json::to_string_pretty(self)
     }
 
-    /// Output as compact JSON (for MCP tools)
+    /// Output as compact JSON (for programmatic use)
     pub fn as_json_compact(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }

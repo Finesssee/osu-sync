@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 
 use osu_sync_core::backup::{
@@ -19,6 +19,7 @@ use osu_sync_core::stable::StableScanner;
 use osu_sync_core::stats::StatsAnalyzer;
 use osu_sync_core::sync::{SyncDirection, SyncEngineBuilder, SyncProgress};
 use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
+use osu_sync_core::Error as CoreError;
 
 use crate::app::{AppMessage, ScanResult, WorkerMessage};
 
@@ -28,6 +29,32 @@ pub struct Worker {
     tx: Sender<WorkerMessage>,
     /// Shared cancellation flag
     cancelled: Arc<AtomicBool>,
+}
+
+fn config_snapshot(config: &Arc<RwLock<Config>>) -> Config {
+    if let Ok(guard) = config.read() {
+        guard.clone()
+    } else {
+        Config::load()
+    }
+}
+
+fn format_core_error(error: &CoreError) -> String {
+    match error {
+        CoreError::MissingPath { path_type } => format!(
+            "{} path not configured. Open Configuration to set it.",
+            path_type
+        ),
+        CoreError::OsuNotFound(path) => format!(
+            "osu! installation not found at {}. Update Configuration paths.",
+            path.display()
+        ),
+        CoreError::MissingComponent { component } => format!(
+            "Internal error: missing {}. Try restarting the app.",
+            component
+        ),
+        _ => error.to_string(),
+    }
 }
 
 impl Worker {
@@ -76,7 +103,7 @@ fn run_worker(
 ) {
     // Load config once at session start to avoid repeated disk reads
     // This is cached for the lifetime of the worker thread
-    let config = Arc::new(Config::load());
+    let config = Arc::new(RwLock::new(Config::load()));
 
     loop {
         match rx.recv() {
@@ -84,9 +111,20 @@ fn run_worker(
                 cancelled.store(false, Ordering::SeqCst);
                 handle_scan(&app_tx, &config, stable, lazer);
             }
-            Ok(WorkerMessage::StartSync { direction, selected_set_ids, selected_folders }) => {
+            Ok(WorkerMessage::StartSync {
+                direction,
+                selected_set_ids,
+                selected_folders,
+            }) => {
                 cancelled.store(false, Ordering::SeqCst);
-                handle_sync(&app_tx, &config, direction, Arc::clone(&cancelled), selected_set_ids, selected_folders);
+                handle_sync(
+                    &app_tx,
+                    &config,
+                    direction,
+                    Arc::clone(&cancelled),
+                    selected_set_ids,
+                    selected_folders,
+                );
             }
             Ok(WorkerMessage::StartDryRun { direction }) => {
                 cancelled.store(false, Ordering::SeqCst);
@@ -143,7 +181,14 @@ fn run_worker(
                 filter,
                 rename_pattern,
             }) => {
-                handle_replay_export(&app_tx, &config, organization, output_path, filter, rename_pattern);
+                handle_replay_export(
+                    &app_tx,
+                    &config,
+                    organization,
+                    output_path,
+                    filter,
+                    rename_pattern,
+                );
             }
             Ok(WorkerMessage::StartUnifiedSetup {
                 mode,
@@ -164,6 +209,11 @@ fn run_worker(
             Ok(WorkerMessage::DisableUnifiedStorage) => {
                 handle_unified_disable(&app_tx, &config);
             }
+            Ok(WorkerMessage::UpdateConfig(new_config)) => {
+                if let Ok(mut guard) = config.write() {
+                    *guard = new_config;
+                }
+            }
             Ok(WorkerMessage::Cancel) => {
                 cancelled.store(true, Ordering::SeqCst);
             }
@@ -174,7 +224,15 @@ fn run_worker(
     }
 }
 
-fn handle_scan(app_tx: &Sender<AppMessage>, config: &Arc<Config>, scan_stable: bool, scan_lazer: bool) {
+fn handle_scan(
+    app_tx: &Sender<AppMessage>,
+    config: &Arc<RwLock<Config>>,
+    scan_stable: bool,
+    scan_lazer: bool,
+) {
+    let config = config_snapshot(config);
+    let stable_path = config.stable_path.clone();
+    let lazer_path = config.lazer_path.clone();
 
     // Run both scans in parallel using std::thread::scope
     // This halves the total scan time since stable and lazer scans are independent
@@ -190,7 +248,7 @@ fn handle_scan(app_tx: &Sender<AppMessage>, config: &Arc<Config>, scan_stable: b
                 message: "Detecting osu!stable...".to_string(),
             });
 
-            if let Some(path) = config.stable_path.as_ref() {
+            if let Some(path) = stable_path.as_ref() {
                 let songs_path = path.join("Songs");
                 let _ = app_tx.send(AppMessage::ScanProgress {
                     stable: true,
@@ -245,7 +303,7 @@ fn handle_scan(app_tx: &Sender<AppMessage>, config: &Arc<Config>, scan_stable: b
                 message: "Detecting osu!lazer...".to_string(),
             });
 
-            if let Some(path) = config.lazer_path.as_ref() {
+            if let Some(path) = lazer_path.as_ref() {
                 let _ = app_tx.send(AppMessage::ScanProgress {
                     stable: false,
                     message: "Loading osu!lazer database...".to_string(),
@@ -312,29 +370,44 @@ fn handle_scan(app_tx: &Sender<AppMessage>, config: &Arc<Config>, scan_stable: b
 
 fn handle_sync(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     direction: SyncDirection,
     cancelled: Arc<AtomicBool>,
     selected_set_ids: Option<HashSet<i32>>,
     selected_folders: Option<HashSet<String>>,
 ) {
+    let config = config_snapshot(config);
 
     // Check paths
     let stable_path = match config.stable_path.as_ref() {
-        Some(p) => p.clone(),
+        Some(p) if p.exists() => p.clone(),
+        Some(p) => {
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "osu!stable path not found at {}. Update Configuration.",
+                p.display()
+            )));
+            return;
+        }
         None => {
             let _ = app_tx.send(AppMessage::Error(
-                "osu!stable path not configured".to_string(),
+                "osu!stable path not configured. Open Configuration to set it.".to_string(),
             ));
             return;
         }
     };
 
     let lazer_path = match config.lazer_path.as_ref() {
-        Some(p) => p.clone(),
+        Some(p) if p.exists() => p.clone(),
+        Some(p) => {
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "osu!lazer path not found at {}. Update Configuration.",
+                p.display()
+            )));
+            return;
+        }
         None => {
             let _ = app_tx.send(AppMessage::Error(
-                "osu!lazer path not configured".to_string(),
+                "osu!lazer path not configured. Open Configuration to set it.".to_string(),
             ));
             return;
         }
@@ -346,10 +419,7 @@ fn handle_sync(
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!(
-                "Failed to open lazer database: {}",
-                e
-            )));
+            let _ = app_tx.send(AppMessage::Error(format_core_error(&e)));
             return;
         }
     };
@@ -363,7 +433,7 @@ fn handle_sync(
     // Build engine with cancellation support
     // Clone config since SyncEngineBuilder takes ownership
     let mut builder = SyncEngineBuilder::new()
-        .config((**config).clone())
+        .config(config.clone())
         .stable_scanner(scanner)
         .lazer_database(database)
         .progress_callback(progress_callback)
@@ -384,7 +454,7 @@ fn handle_sync(
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!(
                 "Failed to create sync engine: {}",
-                e
+                format_core_error(&e)
             )));
             return;
         }
@@ -411,12 +481,16 @@ fn handle_sync(
             }
         }
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Sync failed: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Sync failed: {}",
+                format_core_error(&e)
+            )));
         }
     }
 }
 
-fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
+fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config);
 
     let _ = app_tx.send(AppMessage::StatsProgress(
         "Scanning osu!stable...".to_string(),
@@ -425,13 +499,10 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
     // Scan stable (fast mode - no hashing needed for stats)
     let stable_sets = if let Some(path) = config.stable_path.as_ref() {
         let songs_path = path.join("Songs");
-        match StableScanner::new(songs_path)
+        StableScanner::new(songs_path)
             .skip_hashing()
             .scan_parallel()
-        {
-            Ok(sets) => sets,
-            Err(_) => Vec::new(),
-        }
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -460,7 +531,8 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
     let _ = app_tx.send(AppMessage::StatsComplete(stats));
 }
 
-fn handle_load_collections(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
+fn handle_load_collections(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config);
 
     let collections = if let Some(stable_path) = config.stable_path.as_ref() {
         // The collection.db is in the root osu! folder, not in Songs
@@ -488,7 +560,12 @@ fn handle_load_collections(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
     let _ = app_tx.send(AppMessage::CollectionsLoaded(collections));
 }
 
-fn handle_sync_collections(app_tx: &Sender<AppMessage>, config: &Arc<Config>, strategy: CollectionSyncStrategy) {
+fn handle_sync_collections(
+    app_tx: &Sender<AppMessage>,
+    config: &Arc<RwLock<Config>>,
+    strategy: CollectionSyncStrategy,
+) {
+    let config = config_snapshot(config);
 
     // Load collections from stable
     let collections = if let Some(stable_path) = config.stable_path.as_ref() {
@@ -544,27 +621,42 @@ fn handle_sync_collections(app_tx: &Sender<AppMessage>, config: &Arc<Config>, st
 
 fn handle_dry_run(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     direction: SyncDirection,
     cancelled: Arc<AtomicBool>,
 ) {
+    let config = config_snapshot(config);
 
     // Check paths
     let stable_path = match config.stable_path.as_ref() {
-        Some(p) => p.clone(),
+        Some(p) if p.exists() => p.clone(),
+        Some(p) => {
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "osu!stable path not found at {}. Update Configuration.",
+                p.display()
+            )));
+            return;
+        }
         None => {
             let _ = app_tx.send(AppMessage::Error(
-                "osu!stable path not configured".to_string(),
+                "osu!stable path not configured. Open Configuration to set it.".to_string(),
             ));
             return;
         }
     };
 
     let lazer_path = match config.lazer_path.as_ref() {
-        Some(p) => p.clone(),
+        Some(p) if p.exists() => p.clone(),
+        Some(p) => {
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "osu!lazer path not found at {}. Update Configuration.",
+                p.display()
+            )));
+            return;
+        }
         None => {
             let _ = app_tx.send(AppMessage::Error(
-                "osu!lazer path not configured".to_string(),
+                "osu!lazer path not configured. Open Configuration to set it.".to_string(),
             ));
             return;
         }
@@ -582,10 +674,7 @@ fn handle_dry_run(
     let database = match LazerDatabase::open(&lazer_path) {
         Ok(db) => db,
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!(
-                "Failed to open lazer database: {}",
-                e
-            )));
+            let _ = app_tx.send(AppMessage::Error(format_core_error(&e)));
             return;
         }
     };
@@ -599,7 +688,7 @@ fn handle_dry_run(
     // Build engine with cancellation support
     // Clone config since SyncEngineBuilder takes ownership
     let engine = match SyncEngineBuilder::new()
-        .config((**config).clone())
+        .config(config.clone())
         .stable_scanner(scanner)
         .lazer_database(database)
         .progress_callback(progress_callback)
@@ -610,7 +699,7 @@ fn handle_dry_run(
         Err(e) => {
             let _ = app_tx.send(AppMessage::Error(format!(
                 "Failed to create sync engine: {}",
-                e
+                format_core_error(&e)
             )));
             return;
         }
@@ -626,18 +715,22 @@ fn handle_dry_run(
             }
         }
         Err(e) => {
-            let _ = app_tx.send(AppMessage::Error(format!("Dry run failed: {}", e)));
+            let _ = app_tx.send(AppMessage::Error(format!(
+                "Dry run failed: {}",
+                format_core_error(&e)
+            )));
         }
     }
 }
 
 fn handle_create_backup(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     target: BackupTarget,
     compression: CompressionLevel,
     mode: BackupMode,
 ) {
+    let config = config_snapshot(config);
     let backup_manager = BackupManager::new(BackupManager::default_backup_dir());
 
     // Determine source path based on target
@@ -741,7 +834,12 @@ fn handle_load_backups(app_tx: &Sender<AppMessage>) {
     }
 }
 
-fn handle_restore_backup(app_tx: &Sender<AppMessage>, config: &Arc<Config>, backup_path: PathBuf) {
+fn handle_restore_backup(
+    app_tx: &Sender<AppMessage>,
+    config: &Arc<RwLock<Config>>,
+    backup_path: PathBuf,
+) {
+    let config = config_snapshot(config);
     let backup_manager = BackupManager::new(BackupManager::default_backup_dir());
 
     // Parse backup info to determine target
@@ -823,13 +921,14 @@ fn handle_restore_backup(app_tx: &Sender<AppMessage>, config: &Arc<Config>, back
 
 fn handle_media_extraction(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     media_type: osu_sync_core::media::MediaType,
     organization: osu_sync_core::media::OutputOrganization,
     output_path: PathBuf,
     _skip_duplicates: bool,
     include_metadata: bool,
 ) {
+    let config = config_snapshot(config);
     use osu_sync_core::media::{ExtractionProgress, MediaExtractor};
 
     // Get stable path
@@ -879,7 +978,8 @@ fn handle_media_extraction(
     }
 }
 
-fn handle_load_replays(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
+fn handle_load_replays(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config);
     use osu_sync_core::replay::StableReplayReader;
 
     // Get stable path
@@ -915,12 +1015,13 @@ fn handle_load_replays(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
 
 fn handle_replay_export(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     organization: osu_sync_core::replay::ExportOrganization,
     output_path: PathBuf,
     filter: osu_sync_core::replay::ReplayFilter,
     rename_pattern: Option<String>,
 ) {
+    let config = config_snapshot(config);
     use osu_sync_core::replay::{ReplayExporter, ReplayProgress, StableReplayReader};
 
     // Get stable path
@@ -975,11 +1076,12 @@ fn handle_replay_export(
 
 fn handle_unified_setup(
     app_tx: &Sender<AppMessage>,
-    config: &Arc<Config>,
+    config: &Arc<RwLock<Config>>,
     mode: UnifiedStorageMode,
     shared_path: Option<PathBuf>,
     _resources: Vec<SharedResourceType>,
 ) {
+    let config = config_snapshot(config);
     use osu_sync_core::unified::{UnifiedMigration, UnifiedStorageConfig};
 
     // Get stable and lazer paths
@@ -1056,7 +1158,11 @@ fn handle_unified_setup(
                 message: if result.success {
                     "Unified storage setup complete!".to_string()
                 } else {
-                    result.errors.first().cloned().unwrap_or_else(|| "Unknown error".to_string())
+                    result
+                        .errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown error".to_string())
                 },
                 links_created: result.links_created,
                 space_saved: result.space_saved,
@@ -1073,8 +1179,9 @@ fn handle_unified_setup(
     }
 }
 
-fn handle_unified_status(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
-    // Get current unified storage config (clone to avoid moving out of Arc)
+fn handle_unified_status(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config);
+    // Get current unified storage config
     let unified_config = config.unified_storage.clone().unwrap_or_default();
     let mode = format!("{:?}", unified_config.mode);
 
@@ -1088,8 +1195,9 @@ fn handle_unified_status(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
     });
 }
 
-fn handle_unified_verify(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
-    // Check if unified storage is enabled (clone to avoid moving out of Arc)
+fn handle_unified_verify(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config);
+    // Check if unified storage is enabled
     let unified_config = config.unified_storage.clone().unwrap_or_default();
     if unified_config.mode == UnifiedStorageMode::Disabled {
         let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
@@ -1118,7 +1226,8 @@ fn handle_unified_repair(app_tx: &Sender<AppMessage>) {
     });
 }
 
-fn handle_unified_disable(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
+fn handle_unified_disable(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<Config>>) {
+    let mut config = config_snapshot(config_lock);
 
     // Check for manifest file
     let manifest_path = config
@@ -1140,9 +1249,11 @@ fn handle_unified_disable(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
     }
 
     // Update config to disable unified storage
-    let mut new_config = (**config).clone();
-    new_config.unified_storage = Some(osu_sync_core::unified::UnifiedStorageConfig::disabled());
-    let _ = new_config.save();
+    config.unified_storage = Some(osu_sync_core::unified::UnifiedStorageConfig::disabled());
+    let _ = config.save();
+    if let Ok(mut guard) = config_lock.write() {
+        *guard = config.clone();
+    }
 
     let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
         success: true,
@@ -1150,4 +1261,68 @@ fn handle_unified_disable(app_tx: &Sender<AppMessage>, config: &Arc<Config>) {
         links_created: 0,
         space_saved: 0,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use osu_sync_core::config::ThemeName;
+    use osu_sync_core::unified::UnifiedStorageConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn config_snapshot_reflects_updates() {
+        let config = Arc::new(RwLock::new(Config::default()));
+        let updated = Config {
+            theme: ThemeName::Monochrome,
+            ..Config::default()
+        };
+
+        if let Ok(mut guard) = config.write() {
+            *guard = updated.clone();
+        }
+
+        let snapshot = config_snapshot(&config);
+        assert_eq!(snapshot.theme, ThemeName::Monochrome);
+    }
+
+    #[test]
+    fn worker_uses_updated_config_for_status() {
+        let (app_tx, app_rx) = mpsc::channel::<AppMessage>();
+        let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
+        let (_resolution_tx, resolution_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let handle = thread::spawn(move || {
+            run_worker(worker_rx, app_tx, resolution_rx, cancelled);
+        });
+
+        let config = Config {
+            unified_storage: Some(UnifiedStorageConfig::true_unified(PathBuf::from(
+                "C:\\shared",
+            ))),
+            ..Config::default()
+        };
+
+        worker_tx
+            .send(WorkerMessage::UpdateConfig(config))
+            .expect("Failed to send UpdateConfig");
+        worker_tx
+            .send(WorkerMessage::GetUnifiedStatus)
+            .expect("Failed to request status");
+
+        let status = app_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Timed out waiting for UnifiedStorageStatus");
+
+        match status {
+            AppMessage::UnifiedStorageStatus { mode, .. } => {
+                assert_eq!(mode, "TrueUnified");
+            }
+            other => panic!("Unexpected message: {:?}", other),
+        }
+
+        let _ = worker_tx.send(WorkerMessage::Shutdown);
+        let _ = handle.join();
+    }
 }

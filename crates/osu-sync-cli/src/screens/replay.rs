@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
 use crate::app::{PINK, SUBTLE, TEXT};
 
 /// Render replay export configuration screen
+#[allow(clippy::too_many_arguments)]
 pub fn render_config(
     frame: &mut Frame,
     area: Rect,

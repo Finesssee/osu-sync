@@ -167,7 +167,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
 }
 
 /// Create a formatted shortcut line with key and description
-fn shortcut_line<'a>(key: &str, description: &str, text: Color, subtle: Color) -> Line<'static> {
+fn shortcut_line(key: &str, description: &str, text: Color, subtle: Color) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
         Span::styled(format!("{:<14}", key), Style::default().fg(text)),

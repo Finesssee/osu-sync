@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use osu_sync_core::backup::{
     BackupInfo, BackupMode, BackupProgress, BackupTarget, CompressionLevel,
@@ -27,6 +27,8 @@ use ratatui::prelude::*;
 use crate::event;
 use crate::screens;
 use crate::theme;
+
+mod dispatch;
 
 /// osu! pink color
 pub const PINK: Color = Color::Rgb(255, 102, 170);
@@ -152,6 +154,7 @@ pub struct ScanResult {
 
 /// Messages from the background worker to the UI
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 pub enum AppMessage {
     ScanProgress {
@@ -283,6 +286,7 @@ pub enum WorkerMessage {
     VerifyUnifiedLinks,
     RepairUnifiedLinks,
     DisableUnifiedStorage,
+    UpdateConfig(osu_sync_core::config::Config),
     Cancel,
     Shutdown,
 }
@@ -292,6 +296,7 @@ pub use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
 
 /// Application state enum
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)]
 pub enum AppState {
     MainMenu {
@@ -530,111 +535,6 @@ impl App {
     /// Reset cancellation flag (called before starting new operations)
     fn reset_cancel(&self) {
         self.cancellation_flag.store(false, Ordering::SeqCst);
-    }
-
-    /// Handle a keyboard event
-    pub fn handle_key(&mut self, key: KeyEvent) {
-        // Global quit handling
-        if event::is_quit(&key) && matches!(self.state, AppState::MainMenu { .. }) {
-            self.should_quit = true;
-            return;
-        }
-
-        // Handle help screen - any key closes it
-        if let AppState::Help { previous_state } = &self.state {
-            self.state = *previous_state.clone();
-            return;
-        }
-
-        // Global help key handling (? or h) - available from most screens
-        // Skip if we're in filter mode (typing in search box)
-        let in_filter_mode = matches!(
-            &self.state,
-            AppState::DryRunPreview { filter_mode: true, .. }
-        );
-        if event::is_help(&key) && self.can_show_help() && !in_filter_mode {
-            self.show_help();
-            return;
-        }
-
-        // Copy values needed from state first to avoid borrow conflicts
-        let state_info = match &self.state {
-            AppState::MainMenu { selected } => Some(("menu", *selected, false)),
-            AppState::Scanning { .. } => Some(("scanning", 0, false)),
-            AppState::SyncConfig { selected, .. } => Some(("sync_config", *selected, false)),
-            AppState::Syncing { .. } => Some(("syncing", 0, false)),
-            AppState::DuplicateDialog {
-                selected,
-                apply_to_all,
-                ..
-            } => Some(("duplicate", *selected, *apply_to_all)),
-            AppState::SyncComplete { .. } => Some(("complete", 0, false)),
-            AppState::Config { selected, .. } => Some(("config", *selected, false)),
-            AppState::Statistics { tab, .. } => Some(("statistics", *tab as usize, false)),
-            AppState::CollectionConfig { selected, .. } => {
-                Some(("collection_config", *selected, false))
-            }
-            AppState::CollectionSync { .. } => Some(("collection_sync", 0, false)),
-            AppState::CollectionSummary { .. } => Some(("collection_summary", 0, false)),
-            AppState::DryRunPreview { selected_item, .. } => {
-                Some(("dry_run_preview", *selected_item, false))
-            }
-            AppState::BackupConfig { selected, .. } => Some(("backup_config", *selected, false)),
-            AppState::BackupProgress { .. } => Some(("backup_progress", 0, false)),
-            AppState::BackupComplete { .. } => Some(("backup_complete", 0, false)),
-            AppState::RestoreConfig { selected, .. } => Some(("restore_config", *selected, false)),
-            AppState::RestoreConfirm { selected, .. } => {
-                Some(("restore_confirm", *selected, false))
-            }
-            AppState::RestoreProgress { .. } => Some(("restore_progress", 0, false)),
-            AppState::RestoreComplete { .. } => Some(("restore_complete", 0, false)),
-            AppState::MediaConfig { selected, .. } => Some(("media_config", *selected, false)),
-            AppState::MediaProgress { .. } => Some(("media_progress", 0, false)),
-            AppState::MediaComplete { .. } => Some(("media_complete", 0, false)),
-            AppState::ReplayConfig { selected, .. } => Some(("replay_config", *selected, false)),
-            AppState::ReplayProgress { .. } => Some(("replay_progress", 0, false)),
-            AppState::ReplayComplete { .. } => Some(("replay_complete", 0, false)),
-            AppState::UnifiedConfig { .. } => Some(("unified_config", 0, false)),
-            AppState::UnifiedSetup { .. } => Some(("unified_setup", 0, false)),
-            AppState::UnifiedStatus { .. } => Some(("unified_status", 0, false)),
-            AppState::Help { .. } => None, // Already handled above
-            AppState::Exiting => None,
-        };
-
-        // Delegate to current screen handler
-        if let Some((screen, selected, apply_to_all)) = state_info {
-            match screen {
-                "menu" => self.handle_main_menu_key(key, selected),
-                "scanning" => self.handle_scanning_key(key),
-                "sync_config" => self.handle_sync_config_key(key, selected),
-                "syncing" => self.handle_syncing_key(key),
-                "duplicate" => self.handle_duplicate_dialog_key(key, selected, apply_to_all),
-                "complete" => self.handle_sync_complete_key(key),
-                "config" => self.handle_config_key(key, selected),
-                "statistics" => self.handle_statistics_key(key),
-                "collection_config" => self.handle_collection_config_key(key, selected),
-                "collection_sync" => self.handle_collection_sync_key(key),
-                "collection_summary" => self.handle_collection_summary_key(key),
-                "dry_run_preview" => self.handle_dry_run_preview_key(key),
-                "backup_config" => self.handle_backup_config_key(key, selected),
-                "backup_progress" => self.handle_backup_progress_key(key),
-                "backup_complete" => self.handle_backup_complete_key(key),
-                "restore_config" => self.handle_restore_config_key(key, selected),
-                "restore_confirm" => self.handle_restore_confirm_key(key, selected),
-                "restore_progress" => self.handle_restore_progress_key(key),
-                "restore_complete" => self.handle_restore_complete_key(key),
-                "media_config" => self.handle_media_config_key(key, selected),
-                "media_progress" => self.handle_media_progress_key(key),
-                "media_complete" => self.handle_media_complete_key(key),
-                "replay_config" => self.handle_replay_config_key(key, selected),
-                "replay_progress" => self.handle_replay_progress_key(key),
-                "replay_complete" => self.handle_replay_complete_key(key),
-                "unified_config" => self.handle_unified_config_key(key),
-                "unified_setup" => self.handle_unified_setup_key(key),
-                "unified_status" => self.handle_unified_status_key(key),
-                _ => {}
-            }
-        }
     }
 
     fn handle_main_menu_key(&mut self, key: KeyEvent, selected: usize) {
@@ -1034,6 +934,9 @@ impl App {
                         unified_storage: None,
                     };
                     let save_result = config.save();
+                    let _ = self
+                        .worker_tx
+                        .send(WorkerMessage::UpdateConfig(config.clone()));
 
                     self.state = AppState::Config {
                         selected,
@@ -1141,6 +1044,9 @@ impl App {
         let mut config = osu_sync_core::config::Config::load();
         config.theme = new_theme;
         let save_result = config.save();
+        let _ = self
+            .worker_tx
+            .send(WorkerMessage::UpdateConfig(config.clone()));
 
         // Update state with success message
         if let AppState::Config {
@@ -1165,51 +1071,6 @@ impl App {
     }
 
     /// Auto-detect osu! installation paths
-    fn auto_detect_paths(&mut self) {
-        use osu_sync_core::config::{detect_lazer_path, detect_stable_path};
-
-        let stable_path = detect_stable_path().map(|p| p.to_string_lossy().to_string());
-        let lazer_path = detect_lazer_path().map(|p| p.to_string_lossy().to_string());
-
-        // Build status message
-        let status = match (&stable_path, &lazer_path) {
-            (Some(_), Some(_)) => "Both installations detected!".to_string(),
-            (Some(_), None) => "osu!stable detected, osu!lazer not found".to_string(),
-            (None, Some(_)) => "osu!lazer detected, osu!stable not found".to_string(),
-            (None, None) => "No installations detected".to_string(),
-        };
-
-        // Update cached scans if paths were found
-        if stable_path.is_some() {
-            self.cached_stable_scan = Some(ScanResult {
-                path: stable_path.clone(),
-                detected: true,
-                beatmap_sets: 0,
-                total_beatmaps: 0,
-                timing_report: None,
-            });
-        }
-        if lazer_path.is_some() {
-            self.cached_lazer_scan = Some(ScanResult {
-                path: lazer_path.clone(),
-                detected: true,
-                beatmap_sets: 0,
-                total_beatmaps: 0,
-                timing_report: None,
-            });
-        }
-
-        if let AppState::Config { selected, .. } = &self.state {
-            self.state = AppState::Config {
-                selected: *selected,
-                stable_path,
-                lazer_path,
-                status_message: status,
-                editing: None,
-            };
-        }
-    }
-
     fn handle_statistics_key(&mut self, key: KeyEvent) {
         // Extract current state
         let (stats, loading, tab, status_message, export_state) = if let AppState::Statistics {
@@ -1523,8 +1384,9 @@ impl App {
                     // Option 2: Validate we have at least one identifier
                     if selected_set_ids.is_empty() && selected_folders.is_empty() {
                         // Can't identify any selected beatmaps - show error
-                        self.last_error =
-                            Some("Cannot sync: selected beatmaps have no valid identifiers".to_string());
+                        self.last_error = Some(
+                            "Cannot sync: selected beatmaps have no valid identifiers".to_string(),
+                        );
                         return;
                     }
 
@@ -1562,8 +1424,9 @@ impl App {
 
                                 // Option 2: Validate we have at least one identifier
                                 if selected_set_ids.is_none() && selected_folders.is_none() {
-                                    self.last_error =
-                                        Some("Cannot sync: beatmap has no valid identifier".to_string());
+                                    self.last_error = Some(
+                                        "Cannot sync: beatmap has no valid identifier".to_string(),
+                                    );
                                     return;
                                 }
 
@@ -1579,7 +1442,6 @@ impl App {
                                     filter_mode,
                                 };
                                 self.start_sync(direction, selected_set_ids, selected_folders);
-                                return;
                             } else {
                                 // Item not importable, go back
                                 self.go_to_sync_config();
@@ -1938,11 +1800,12 @@ impl App {
         match action {
             ConfigAction::RequestConfirm => {
                 // Extract what we need for validation
-                let (mode, shared_path_empty) = if let AppState::UnifiedConfig { screen } = &self.state {
-                    (screen.mode, screen.shared_path.is_empty())
-                } else {
-                    return;
-                };
+                let (mode, shared_path_empty) =
+                    if let AppState::UnifiedConfig { screen } = &self.state {
+                        (screen.mode, screen.shared_path.is_empty())
+                    } else {
+                        return;
+                    };
 
                 // Validate configuration first
                 if mode == StorageMode::TrueUnified && shared_path_empty {
@@ -1972,7 +1835,11 @@ impl App {
             ConfigAction::ConfirmApply => {
                 // Clone what we need from screen
                 let setup_params = if let AppState::UnifiedConfig { screen } = &self.state {
-                    Some((screen.mode, screen.shared_path.clone(), screen.shared_resources.clone()))
+                    Some((
+                        screen.mode,
+                        screen.shared_path.clone(),
+                        screen.shared_resources.clone(),
+                    ))
                 } else {
                     None
                 };
@@ -2084,127 +1951,56 @@ impl App {
         info
     }
 
-    /// Start the unified storage setup
-    fn start_unified_setup(&mut self, screen: &crate::screens::unified_config::UnifiedConfigScreen) {
-        use crate::screens::unified_config::StorageMode;
-
-        // Convert CLI StorageMode to core UnifiedStorageMode
-        let mode = match screen.mode {
-            StorageMode::Disabled => UnifiedStorageMode::Disabled,
-            StorageMode::StableMaster => UnifiedStorageMode::StableMaster,
-            StorageMode::LazerMaster => UnifiedStorageMode::LazerMaster,
-            StorageMode::TrueUnified => UnifiedStorageMode::TrueUnified,
-        };
-
-        // Get shared path for TrueUnified mode
-        let shared_path = if mode == UnifiedStorageMode::TrueUnified {
-            Some(std::path::PathBuf::from(&screen.shared_path))
-        } else {
-            None
-        };
-
-        // Convert resources
-        let resources: Vec<SharedResourceType> = screen
-            .shared_resources
-            .iter()
-            .map(|r| match r {
-                crate::screens::unified_config::ResourceType::Beatmaps => {
-                    SharedResourceType::Beatmaps
-                }
-                crate::screens::unified_config::ResourceType::Skins => {
-                    SharedResourceType::Skins
-                }
-                crate::screens::unified_config::ResourceType::Replays => {
-                    SharedResourceType::Replays
-                }
-                crate::screens::unified_config::ResourceType::Screenshots => {
-                    SharedResourceType::Screenshots
-                }
-                crate::screens::unified_config::ResourceType::Exports => {
-                    SharedResourceType::Exports
-                }
-                crate::screens::unified_config::ResourceType::Backgrounds => {
-                    SharedResourceType::Backgrounds
-                }
-            })
-            .collect();
-
-        // Send message to worker
-        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup {
-            mode,
-            shared_path,
-            resources,
-        });
-
-        // Transition to setup screen
-        self.state = AppState::UnifiedSetup {
-            screen: crate::screens::unified_setup::UnifiedSetupScreen::new(),
-        };
-    }
-
-    /// Start unified setup with pre-extracted parameters (to avoid borrow issues)
     fn start_unified_setup_with_params(
         &mut self,
         mode: crate::screens::unified_config::StorageMode,
         shared_path: String,
         resources: std::collections::HashSet<crate::screens::unified_config::ResourceType>,
     ) {
-        use crate::screens::unified_config::StorageMode;
+        use crate::screens::unified_config::{ResourceType, StorageMode};
 
-        // Convert CLI StorageMode to core UnifiedStorageMode
-        let core_mode = match mode {
+        let mode = match mode {
             StorageMode::Disabled => UnifiedStorageMode::Disabled,
             StorageMode::StableMaster => UnifiedStorageMode::StableMaster,
             StorageMode::LazerMaster => UnifiedStorageMode::LazerMaster,
             StorageMode::TrueUnified => UnifiedStorageMode::TrueUnified,
         };
 
-        // Get shared path for TrueUnified mode
-        let core_shared_path = if core_mode == UnifiedStorageMode::TrueUnified {
-            Some(std::path::PathBuf::from(&shared_path))
+        let shared_path = if mode == UnifiedStorageMode::TrueUnified {
+            if shared_path.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(shared_path))
+            }
         } else {
             None
         };
 
-        // Convert resources
-        let core_resources: Vec<SharedResourceType> = resources
-            .iter()
-            .map(|r| match r {
-                crate::screens::unified_config::ResourceType::Beatmaps => {
-                    SharedResourceType::Beatmaps
-                }
-                crate::screens::unified_config::ResourceType::Skins => {
-                    SharedResourceType::Skins
-                }
-                crate::screens::unified_config::ResourceType::Replays => {
-                    SharedResourceType::Replays
-                }
-                crate::screens::unified_config::ResourceType::Screenshots => {
-                    SharedResourceType::Screenshots
-                }
-                crate::screens::unified_config::ResourceType::Exports => {
-                    SharedResourceType::Exports
-                }
-                crate::screens::unified_config::ResourceType::Backgrounds => {
-                    SharedResourceType::Backgrounds
-                }
-            })
-            .collect();
+        let mut shared_resources = Vec::new();
+        for resource in resources {
+            let mapped = match resource {
+                ResourceType::Beatmaps => SharedResourceType::Beatmaps,
+                ResourceType::Skins => SharedResourceType::Skins,
+                ResourceType::Replays => SharedResourceType::Replays,
+                ResourceType::Screenshots => SharedResourceType::Screenshots,
+                ResourceType::Exports => SharedResourceType::Exports,
+                ResourceType::Backgrounds => SharedResourceType::Backgrounds,
+            };
+            shared_resources.push(mapped);
+        }
 
-        // Send message to worker
-        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup {
-            mode: core_mode,
-            shared_path: core_shared_path,
-            resources: core_resources,
-        });
-
-        // Transition to setup screen
         self.state = AppState::UnifiedSetup {
             screen: crate::screens::unified_setup::UnifiedSetupScreen::new(),
         };
+
+        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup {
+            mode,
+            shared_path,
+            resources: shared_resources,
+        });
     }
 
-    /// Handle key events for unified setup screen
+    /// Start the unified storage setup
     fn handle_unified_setup_key(&mut self, key: KeyEvent) {
         if event::is_escape(&key) {
             // Cancel setup and return to config
@@ -2271,7 +2067,7 @@ impl App {
     }
 
     /// Start a restore operation
-    fn start_restore(&mut self, backup_path: &PathBuf) {
+    fn start_restore(&mut self, backup_path: &Path) {
         let backup_name = backup_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -2289,7 +2085,7 @@ impl App {
             },
         };
         let _ = self.worker_tx.send(WorkerMessage::RestoreBackup {
-            backup_path: backup_path.clone(),
+            backup_path: backup_path.to_path_buf(),
         });
     }
 
@@ -2489,8 +2285,13 @@ impl App {
                 self.go_to_restore_config();
             } else {
                 // Confirm restore
-                if let AppState::RestoreConfirm { backup, .. } = &self.state {
-                    self.start_restore(&backup.path.clone());
+                let backup_path = if let AppState::RestoreConfirm { backup, .. } = &self.state {
+                    Some(backup.path.clone())
+                } else {
+                    None
+                };
+                if let Some(path) = backup_path {
+                    self.start_restore(&path);
                 }
             }
         }
@@ -2688,7 +2489,7 @@ impl App {
                     self.state = AppState::MainMenu { selected: 4 };
                 }
             } else if loading {
-                return; // Don't process navigation while loading
+                // Don't process navigation while loading
             } else if filter_panel_open {
                 // Handle filter panel navigation
                 self.handle_replay_filter_panel_key(
@@ -2816,6 +2617,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_replay_filter_panel_key(
         &mut self,
         key: KeyEvent,
@@ -3252,16 +3054,15 @@ impl App {
                     if let AppState::UnifiedSetup { screen } = &mut self.state {
                         screen.current_operation = format!("{}: {}", phase, message);
                         if total > 0 {
-                            screen.progress = Some(
-                                crate::screens::unified_setup::MigrationProgress {
+                            screen.progress =
+                                Some(crate::screens::unified_setup::MigrationProgress {
                                     phase: crate::screens::unified_setup::MigrationPhase::Preparing,
                                     current,
                                     total,
                                     current_item: message,
                                     bytes_processed: 0,
                                     bytes_total: 0,
-                                },
-                            );
+                                });
                         }
                     }
                 }

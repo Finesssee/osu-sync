@@ -150,7 +150,10 @@ fn parse_command(line: &str) -> anyhow::Result<Option<TestCommand>> {
         }
         "char" => {
             let c = arg.ok_or_else(|| anyhow::anyhow!("char requires an argument"))?;
-            let c = c.chars().next().ok_or_else(|| anyhow::anyhow!("invalid char"))?;
+            let c = c
+                .chars()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("invalid char"))?;
             TestCommand::Char(c)
         }
         "ctrl+a" | "ctrl+b" | "ctrl+c" | "ctrl+d" | "ctrl+e" | "ctrl+f" | "ctrl+g" | "ctrl+h"
@@ -378,7 +381,7 @@ fn capture_screen(terminal: &Terminal<TestBackend>) -> anyhow::Result<String> {
 
     for y in 0..buffer.area.height {
         for x in 0..buffer.area.width {
-            let cell = buffer.get(x, y);
+            let cell = &buffer[(x, y)];
             output.push_str(cell.symbol());
         }
         output.push('\n');

@@ -139,8 +139,3 @@ pub fn is_ctrl_i(key: &KeyEvent) -> bool {
         }
     )
 }
-
-/// Check if a key event is backspace
-pub fn is_backspace(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Backspace)
-}

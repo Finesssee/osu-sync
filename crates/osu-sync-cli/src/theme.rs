@@ -103,7 +103,8 @@ use std::cell::RefCell;
 
 thread_local! {
     static CURRENT_THEME: RefCell<Theme> = RefCell::new(Theme::default());
-    static CURRENT_THEME_NAME: RefCell<ThemeName> = RefCell::new(ThemeName::Default);
+    static CURRENT_THEME_NAME: RefCell<ThemeName> =
+        const { RefCell::new(ThemeName::Default) };
 }
 
 /// Set the current global theme

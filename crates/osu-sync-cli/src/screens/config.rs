@@ -25,12 +25,12 @@ pub fn render(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Length(8), // Paths section
+            Constraint::Length(3),  // Title
+            Constraint::Length(8),  // Paths section
             Constraint::Length(10), // Settings section (increased for rescan)
-            Constraint::Length(3), // Status message
-            Constraint::Min(0),    // Spacer
-            Constraint::Length(4), // About
+            Constraint::Length(3),  // Status message
+            Constraint::Min(0),     // Spacer
+            Constraint::Length(4),  // About
         ])
         .split(area);
 
@@ -143,14 +143,20 @@ pub fn render(
                 if selected == 3 { "> " } else { "  " },
                 Style::default().fg(if selected == 3 { accent } else { text }),
             ),
-            Span::styled("\u{1F50D} ", Style::default().fg(if selected == 3 { accent } else { subtle })),
+            Span::styled(
+                "\u{1F50D} ",
+                Style::default().fg(if selected == 3 { accent } else { subtle }),
+            ),
             Span::styled(
                 "Rescan Installations",
                 Style::default()
                     .fg(if selected == 3 { accent } else { text })
                     .bold(),
             ),
-            Span::styled("  Re-detect osu! paths", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  Re-detect osu! paths",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(""),
         Line::from(vec![

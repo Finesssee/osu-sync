@@ -52,7 +52,7 @@ impl TuiTestHarness {
 
         for y in 0..buffer.area.height {
             for x in 0..buffer.area.width {
-                let cell = buffer.get(x, y);
+                let cell = &buffer[(x, y)];
                 output.push_str(cell.symbol());
             }
             output.push('\n');
@@ -472,7 +472,7 @@ mod tests {
         let scenario = TestScenario::new().unwrap();
         let harness = scenario
             .assert_state("MainMenu")
-            .press_down()  // Navigate to exit option
+            .press_down() // Navigate to exit option
             .press_down()
             .press_down()
             .press_down()
@@ -480,7 +480,7 @@ mod tests {
             .press_down()
             .press_down()
             .press_down()
-            .press_down()  // Should be at "Exit" (9th item, index 9)
+            .press_down() // Should be at "Exit" (9th item, index 9)
             .press_enter()
             .finish();
 

@@ -164,11 +164,11 @@ impl UnifiedConfigScreen {
     /// Get the number of items in the current section
     fn section_item_count(&self) -> usize {
         match self.selected_section {
-            0 => StorageMode::all().len(),      // Mode selection
-            1 => 1,                              // Path input
-            2 => ResourceType::all().len(),     // Resources
-            3 => 2,                              // Triggers (file watcher, on launch)
-            4 => 2,                              // Buttons (Apply, Cancel)
+            0 => StorageMode::all().len(),  // Mode selection
+            1 => 1,                         // Path input
+            2 => ResourceType::all().len(), // Resources
+            3 => 2,                         // Triggers (file watcher, on launch)
+            4 => 2,                         // Buttons (Apply, Cancel)
             _ => 0,
         }
     }
@@ -338,12 +338,12 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Mode selection
-            Constraint::Length(3),  // Path input
-            Constraint::Length(9),  // Resources
-            Constraint::Length(5),  // Triggers
-            Constraint::Length(3),  // Buttons
-            Constraint::Min(0),     // Status/remaining
+            Constraint::Length(8), // Mode selection
+            Constraint::Length(3), // Path input
+            Constraint::Length(9), // Resources
+            Constraint::Length(5), // Triggers
+            Constraint::Length(3), // Buttons
+            Constraint::Min(0),    // Status/remaining
         ])
         .split(inner);
 
@@ -366,8 +366,7 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
 
     // Status message
     if let Some(msg) = &screen.status_message {
-        let status = Paragraph::new(msg.as_str())
-            .style(Style::default().fg(WARNING));
+        let status = Paragraph::new(msg.as_str()).style(Style::default().fg(WARNING));
         frame.render_widget(status, chunks[5]);
     }
 
@@ -621,13 +620,17 @@ fn render_buttons(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
         .split(area);
 
     let apply_style = if screen.selected_section == 4 && screen.selected_item == 0 {
-        Style::default().fg(PINK).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        Style::default()
+            .fg(PINK)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         Style::default().fg(SUCCESS)
     };
 
     let cancel_style = if screen.selected_section == 4 && screen.selected_item == 1 {
-        Style::default().fg(PINK).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        Style::default()
+            .fg(PINK)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     } else {
         Style::default().fg(SUBTLE)
     };

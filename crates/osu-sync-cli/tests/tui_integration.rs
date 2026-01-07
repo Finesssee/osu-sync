@@ -15,7 +15,12 @@ mod test_harness {
     use super::*;
 
     /// Create a mock DryRunItem for testing
-    pub fn make_item(set_id: Option<i32>, title: &str, artist: &str, action: DryRunAction) -> DryRunItem {
+    pub fn make_item(
+        set_id: Option<i32>,
+        title: &str,
+        artist: &str,
+        action: DryRunAction,
+    ) -> DryRunItem {
         let folder_name = set_id.map(|id| format!("{} {} - {}", id, artist, title));
         DryRunItem {
             set_id,
@@ -32,11 +37,31 @@ mod test_harness {
     pub fn make_dry_run_result() -> DryRunResult {
         DryRunResult {
             items: vec![
-                make_item(Some(123), "UNION!!", "765 MILLION ALLSTARS", DryRunAction::Import),
-                make_item(Some(456), "Harumachi Clover", "Hanatan", DryRunAction::Import),
-                make_item(Some(789), "UNION!! Remix", "Some Artist", DryRunAction::Import),
+                make_item(
+                    Some(123),
+                    "UNION!!",
+                    "765 MILLION ALLSTARS",
+                    DryRunAction::Import,
+                ),
+                make_item(
+                    Some(456),
+                    "Harumachi Clover",
+                    "Hanatan",
+                    DryRunAction::Import,
+                ),
+                make_item(
+                    Some(789),
+                    "UNION!! Remix",
+                    "Some Artist",
+                    DryRunAction::Import,
+                ),
                 make_item(Some(111), "Already Synced", "Artist", DryRunAction::Skip),
-                make_item(Some(222), "Duplicate Song", "Artist", DryRunAction::Duplicate),
+                make_item(
+                    Some(222),
+                    "Duplicate Song",
+                    "Artist",
+                    DryRunAction::Duplicate,
+                ),
                 make_item(Some(333), "Test Song", "UNION Band", DryRunAction::Import),
                 make_item(None, "No ID Song", "Unknown", DryRunAction::Import),
             ],
@@ -60,7 +85,10 @@ mod test_harness {
             .filter(|(_, item)| {
                 item.title.to_lowercase().contains(&filter_lower)
                     || item.artist.to_lowercase().contains(&filter_lower)
-                    || item.set_id.map(|id| id.to_string().contains(&filter_lower)).unwrap_or(false)
+                    || item
+                        .set_id
+                        .map(|id| id.to_string().contains(&filter_lower))
+                        .unwrap_or(false)
             })
             .map(|(idx, _)| idx)
             .collect()
@@ -132,7 +160,7 @@ fn test_display_to_actual_index_mapping() {
     // display_index 1 -> actual_index 2 (UNION!! Remix)
     // display_index 2 -> actual_index 5 (Test Song by UNION Band)
 
-    assert_eq!(visible_indices.get(0), Some(&0));
+    assert_eq!(visible_indices.first(), Some(&0));
     assert_eq!(visible_indices.get(1), Some(&2));
     assert_eq!(visible_indices.get(2), Some(&5));
 }
@@ -203,7 +231,8 @@ fn test_select_all_only_selects_import_items() {
     let result = make_dry_run_result();
 
     // Simulate Ctrl+A: select all Import items
-    let checked_items: HashSet<usize> = result.items
+    let checked_items: HashSet<usize> = result
+        .items
         .iter()
         .enumerate()
         .filter(|(_, item)| matches!(item.action, DryRunAction::Import))
@@ -222,7 +251,6 @@ fn test_select_all_only_selects_import_items() {
 
 #[test]
 fn test_toggle_selection() {
-    let result = make_dry_run_result();
     let mut checked_items: HashSet<usize> = HashSet::new();
 
     // Toggle on
@@ -363,8 +391,16 @@ fn test_checkbox_hidden_for_non_importable() {
     let dup_item = &result.items[4];
 
     // Non-importable items should not show checkbox
-    let skip_checkbox = if matches!(skip_item.action, DryRunAction::Import) { "[x]" } else { "   " };
-    let dup_checkbox = if matches!(dup_item.action, DryRunAction::Import) { "[x]" } else { "   " };
+    let skip_checkbox = if matches!(skip_item.action, DryRunAction::Import) {
+        "[x]"
+    } else {
+        "   "
+    };
+    let dup_checkbox = if matches!(dup_item.action, DryRunAction::Import) {
+        "[x]"
+    } else {
+        "   "
+    };
 
     assert_eq!(skip_checkbox, "   ");
     assert_eq!(dup_checkbox, "   ");
@@ -462,7 +498,8 @@ fn test_all_items_skipped() {
     };
 
     // Ctrl+A should not select any items
-    let checked_items: HashSet<usize> = result.items
+    let checked_items: HashSet<usize> = result
+        .items
         .iter()
         .enumerate()
         .filter(|(_, item)| matches!(item.action, DryRunAction::Import))
@@ -546,14 +583,14 @@ fn test_scroll_down_adjusts_offset() {
         assert!(
             selected_item >= scroll_offset && selected_item < scroll_offset + visible_lines,
             "After moving to item {}, cursor should be visible (scroll={})",
-            selected_item, scroll_offset
+            selected_item,
+            scroll_offset
         );
     }
 }
 
 #[test]
 fn test_scroll_up_adjusts_offset() {
-    let total_items: usize = 100;
     let visible_lines: usize = 15;
 
     // Start at item 50
@@ -574,7 +611,8 @@ fn test_scroll_up_adjusts_offset() {
         assert!(
             selected_item >= scroll_offset && selected_item < scroll_offset + visible_lines,
             "After moving to item {}, cursor should be visible (scroll={})",
-            selected_item, scroll_offset
+            selected_item,
+            scroll_offset
         );
     }
 }
@@ -585,7 +623,7 @@ fn test_page_down_scroll() {
     let page_size: usize = 15;
 
     let mut selected_item: usize = 10;
-    let mut scroll_offset: usize = 5;
+    let mut scroll_offset: usize;
 
     // Page down
     selected_item = (selected_item + page_size).min(total_items.saturating_sub(1));
@@ -599,15 +637,13 @@ fn test_page_down_scroll() {
 
 #[test]
 fn test_page_up_scroll() {
-    let total_items: usize = 100;
     let page_size: usize = 15;
 
     let mut selected_item: usize = 50;
-    let mut scroll_offset: usize = 45;
 
     // Page up
     selected_item = selected_item.saturating_sub(page_size);
-    scroll_offset = selected_item.saturating_sub(2);
+    let scroll_offset = selected_item.saturating_sub(2);
 
     assert_eq!(selected_item, 35);
     assert!(scroll_offset <= selected_item);
@@ -690,6 +726,9 @@ fn test_cursor_not_rendered_when_scrolled_away() {
         .enumerate()
     {
         let is_cursor = selected_item == scroll_offset + screen_row;
-        assert!(!is_cursor, "Cursor at item 5 should not appear when scroll_offset is 20");
+        assert!(
+            !is_cursor,
+            "Cursor at item 5 should not appear when scroll_offset is 20"
+        );
     }
 }

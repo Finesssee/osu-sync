@@ -686,7 +686,12 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         ],
         AppState::CollectionSync { .. } => vec![("Esc", "Cancel")],
         AppState::CollectionSummary { .. } => vec![("Enter", "Back to Menu")],
-        AppState::DryRunPreview { result, filter_mode, checked_items, .. } => {
+        AppState::DryRunPreview {
+            result,
+            filter_mode,
+            checked_items,
+            ..
+        } => {
             if *filter_mode {
                 vec![
                     ("Enter", "Apply"),
@@ -764,11 +769,9 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
             ("Esc", "Back"),
         ],
         AppState::UnifiedSetup { .. } => vec![("Esc", "Cancel")],
-        AppState::UnifiedStatus { .. } => vec![
-            ("Enter", "Action"),
-            ("←/→", "Navigate"),
-            ("Esc", "Back"),
-        ],
+        AppState::UnifiedStatus { .. } => {
+            vec![("Enter", "Action"), ("←/→", "Navigate"), ("Esc", "Back")]
+        }
         AppState::Help { .. } => vec![("Any key", "Close")],
         AppState::Exiting => vec![],
     }

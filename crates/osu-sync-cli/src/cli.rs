@@ -12,13 +12,15 @@
 //!   --json             Output in JSON format
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use osu_sync_core::config::Config;
 use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
-use osu_sync_core::sync::{DryRunResult, SyncDirection, SyncEngineBuilder, SyncProgress, SyncResult};
+use osu_sync_core::sync::{
+    DryRunResult, SyncDirection, SyncEngineBuilder, SyncProgress, SyncResult,
+};
 
 /// CLI command to execute
 #[derive(Debug, Clone)]
@@ -95,7 +97,9 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         Some(CliCommand::DryRun { direction, .. }) => CliCommand::DryRun { direction, set_ids },
         Some(CliCommand::Sync { direction, .. }) => CliCommand::Sync { direction, set_ids },
         Some(cmd) => cmd,
-        None => return Err("No command specified. Use: scan, dry-run <dir>, or sync <dir>".to_string()),
+        None => {
+            return Err("No command specified. Use: scan, dry-run <dir>, or sync <dir>".to_string())
+        }
     };
 
     Ok((command, options))
@@ -498,7 +502,10 @@ mod tests {
             parse_direction("bidirectional"),
             Ok(SyncDirection::Bidirectional)
         ));
-        assert!(matches!(parse_direction("bi"), Ok(SyncDirection::Bidirectional)));
+        assert!(matches!(
+            parse_direction("bi"),
+            Ok(SyncDirection::Bidirectional)
+        ));
         assert!(parse_direction("invalid").is_err());
     }
 

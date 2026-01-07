@@ -191,10 +191,10 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedStatusScreen) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),  // Mode and health
-            Constraint::Length(6),  // Statistics
-            Constraint::Min(8),     // Events
-            Constraint::Length(3),  // Actions
+            Constraint::Length(4), // Mode and health
+            Constraint::Length(6), // Statistics
+            Constraint::Min(8),    // Events
+            Constraint::Length(3), // Actions
         ])
         .split(inner);
 
@@ -214,7 +214,11 @@ fn render_header(frame: &mut Frame, area: Rect, screen: &UnifiedStatusScreen) {
     let mode_text = format!("Mode: {}", screen.mode);
     let mode = Paragraph::new(mode_text)
         .style(Style::default().fg(PINK).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).title(" Configuration "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Configuration "),
+        );
     frame.render_widget(mode, layout[0]);
 
     // Health gauge
@@ -229,7 +233,11 @@ fn render_header(frame: &mut Frame, area: Rect, screen: &UnifiedStatusScreen) {
     };
 
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" Link Health "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Link Health "),
+        )
         .gauge_style(Style::default().fg(health_color))
         .ratio(health_pct as f64 / 100.0)
         .label(format!(
@@ -286,13 +294,18 @@ fn render_events(frame: &mut Frame, area: Rect, screen: &UnifiedStatusScreen) {
         .map(|event| {
             let icon = event.event_type.icon();
             let color = event.event_type.color();
-            let text = format!("{} [{}] {} {}", icon, event.timestamp, icon, event.description);
+            let text = format!(
+                "{} [{}] {} {}",
+                icon, event.timestamp, icon, event.description
+            );
             ListItem::new(text).style(Style::default().fg(color))
         })
         .collect();
 
     let list = if items.is_empty() {
-        List::new(vec![ListItem::new("No recent events").style(Style::default().fg(SUBTLE))])
+        List::new(vec![
+            ListItem::new("No recent events").style(Style::default().fg(SUBTLE))
+        ])
     } else {
         List::new(items)
     };

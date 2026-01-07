@@ -23,12 +23,16 @@ pub fn filter_items(items: &[DryRunItem], filter_text: &str) -> Vec<usize> {
         .filter(|(_, item)| {
             item.title.to_lowercase().contains(&filter_lower)
                 || item.artist.to_lowercase().contains(&filter_lower)
-                || item.set_id.map(|id| id.to_string().contains(&filter_lower)).unwrap_or(false)
+                || item
+                    .set_id
+                    .map(|id| id.to_string().contains(&filter_lower))
+                    .unwrap_or(false)
         })
         .map(|(idx, _)| idx)
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -90,7 +94,9 @@ pub fn render(
     frame.render_widget(summary_block, summary_area);
 
     // Calculate selection stats
-    let total_importable = result.items.iter()
+    let total_importable = result
+        .items
+        .iter()
         .filter(|i| i.action == DryRunAction::Import)
         .count();
     let selected_count = checked_items.len();
@@ -99,7 +105,9 @@ pub fn render(
         Span::styled("  Selected: ", Style::default().fg(SUBTLE)),
         Span::styled(
             format!("{}/{}", selected_count, total_importable),
-            Style::default().fg(if selected_count > 0 { SUCCESS } else { WARNING }).bold(),
+            Style::default()
+                .fg(if selected_count > 0 { SUCCESS } else { WARNING })
+                .bold(),
         ),
         Span::styled("    Skip: ", Style::default().fg(SUBTLE)),
         Span::styled(format!("{}", result.total_skip), Style::default().fg(TEXT)),
@@ -231,7 +239,10 @@ pub fn render(
 
             ListItem::new(Line::from(vec![
                 Span::styled(prefix, style),
-                Span::styled(format!("{} ", checkbox), Style::default().fg(checkbox_color)),
+                Span::styled(
+                    format!("{} ", checkbox),
+                    Style::default().fg(checkbox_color),
+                ),
                 Span::styled(format!("[{}] ", icon), Style::default().fg(action_color)),
                 Span::styled(format!("{} ", set_id_str), Style::default().fg(SUBTLE)),
                 Span::styled(format!("{} - {}", item.artist, item.title), style),
@@ -415,7 +426,7 @@ mod tests {
         // display_index 1 -> actual_index 2
         // display_index 2 -> actual_index 4
 
-        assert_eq!(visible_indices.get(0), Some(&0));
+        assert_eq!(visible_indices.first(), Some(&0));
         assert_eq!(visible_indices.get(1), Some(&2));
         assert_eq!(visible_indices.get(2), Some(&4));
     }
