@@ -6,9 +6,6 @@ release/
 
 # Temp files
 nul
-*.bat
-*.ps1
-*.txt
 test-core.rs
 
 # Cargo lock for libraries (keep for binaries)
@@ -27,6 +24,9 @@ Thumbs.db
 # Logs
 *.log
 
+# Local dev artifacts
+docs/dev/
+
 # Environment
 .env
 .env.local
@@ -37,3 +37,18 @@ Thumbs.db
 
 # AutoHotkey scripts
 *.ahk
+
+# Local-only scripts and notes
+/PLAN.md
+/build.bat
+/check_lazer.ps1
+/import_to_lazer.ps1
+/test_import.ps1
+
+# Generated/docs assets kept out of git
+/docs/tui/
+/crates/osu-sync-cli/tests/screenshots/
+/crates/osu-sync-cli/tests/scripts/
+
+# Local WIP modules
+/crates/osu-sync-cli/src/commands/
