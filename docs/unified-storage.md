@@ -242,10 +242,9 @@ ManifestError(String),
 
 ## Future Enhancements
 
-1. **Main Menu Integration** - Add "Unified Storage" option
-2. **Worker Thread Integration** - Background processing messages
-3. **AppState Integration** - New states for unified screens
-4. **Full CLI Integration** - Wire up all screens and handlers
+1. **Headless CLI Commands** - Expose unified storage actions via CLI flags
+2. **Cross-Platform Validation** - Expand automated tests for Linux/macOS
+3. **Background Health Checks** - Periodic verify/repair scheduling
 
 ## Testing
 
@@ -269,6 +268,6 @@ cargo test -p osu-sync-core unified
 | Config screen | ✅ Complete |
 | Setup screen | ✅ Complete |
 | Status screen | ✅ Complete |
-| Main menu integration | ⏳ Pending |
-| Worker integration | ⏳ Pending |
-| Full app integration | ⏳ Pending |
+| Main menu integration | ✅ Complete |
+| Worker integration | ✅ Complete |
+| Full app integration | ✅ Complete |
