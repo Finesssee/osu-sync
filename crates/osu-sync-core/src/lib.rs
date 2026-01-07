@@ -54,6 +54,7 @@ pub mod stats;
 pub mod sync;
 pub mod unified;
 pub mod utils;
+#[cfg(feature = "vision")]
 pub mod vision;
 
 // Re-export key types for convenience
@@ -137,4 +138,5 @@ pub use replay::{
 pub use activity::{ActivityEntry, ActivityLog, ActivityType, MAX_LOG_ENTRIES};
 
 // Vision/capture
-pub use vision::{capture_game_window, list_osu_windows, CapturedFrame, CaptureTarget, WindowInfo};
+#[cfg(feature = "vision")]
+pub use vision::{capture_game_window, list_osu_windows, CaptureTarget, CapturedFrame, WindowInfo};

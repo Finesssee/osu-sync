@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+vision = ["windows-capture", "image"]
+
 [dependencies]
 thiserror.workspace = true
 anyhow.workspace = true
@@ -59,8 +63,8 @@ windows = { version = "0.54", features = [
 ] }
 
 # Vision/capture (Windows only)
-windows-capture = "1.3"
-image = "0.25"
+windows-capture = { version = "1.3", optional = true }
+image = { version = "0.25", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

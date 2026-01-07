@@ -23,14 +23,11 @@ mod resolver;
 mod screens;
 pub mod theme;
 mod tui;
-pub mod tui_test;
 mod tui_runner;
+pub mod tui_test;
 pub mod vision;
 mod widgets;
 mod worker;
-
-#[cfg(feature = "mcp")]
-mod mcp;
 
 use app::App;
 use worker::Worker;
@@ -54,12 +51,6 @@ fn main() -> anyhow::Result<()> {
     if let Some(pos) = args.iter().position(|a| a == "--capture-game") {
         let target = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("any");
         return run_capture_game(target);
-    }
-
-    // Check for --mcp flag (Vision Phase 3)
-    #[cfg(feature = "mcp")]
-    if args.iter().any(|a| a == "--mcp") {
-        return run_mcp_server();
     }
 
     // Check for --cli flag
@@ -133,8 +124,6 @@ fn print_help() {
     println!("    --test <script>         Run automated TUI test from script");
     println!("    --tui-snapshot [--json] Capture TUI state (for AI vision)");
     println!("    --capture-game [target] Capture osu! game window (Windows only)");
-    #[cfg(feature = "mcp")]
-    println!("    --mcp                   Start MCP server over stdio");
     println!("    --help                  Show this help message");
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
@@ -226,7 +215,7 @@ fn run_tui_snapshot(json_output: bool) -> anyhow::Result<()> {
 
 /// Capture game window screenshot (Phase 2)
 fn run_capture_game(target: &str) -> anyhow::Result<()> {
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "vision"))]
     {
         use osu_sync_core::vision::{capture_game_window, CaptureTarget};
 
@@ -250,33 +239,9 @@ fn run_capture_game(target: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), not(feature = "vision")))]
     {
         let _ = target;
-        anyhow::bail!("Game window capture is only supported on Windows")
+        anyhow::bail!("Game window capture requires Windows and the 'vision' feature")
     }
-}
-
-/// Start MCP server over stdio (Phase 3)
-#[cfg(feature = "mcp")]
-fn run_mcp_server() -> anyhow::Result<()> {
-    // MCP uses stdio for JSON-RPC - must suppress ALL non-JSON output
-    // Disable any color/ANSI codes that might corrupt the protocol
-    std::env::set_var("NO_COLOR", "1");
-    std::env::set_var("TERM", "dumb");
-    std::env::set_var("CLICOLOR", "0");
-    std::env::set_var("CLICOLOR_FORCE", "0");
-    
-    // Redirect any tracing/logging to stderr with ANSI disabled
-    // to prevent corruption of stdout JSON-RPC stream
-    use tracing_subscriber::fmt::writer::MakeWriterExt;
-    let subscriber = tracing_subscriber::FmtSubscriber::builder()
-        .with_max_level(tracing::Level::ERROR)
-        .with_writer(std::io::stderr.with_max_level(tracing::Level::ERROR))
-        .with_ansi(false)
-        .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
-    
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(mcp::run_mcp_server())
 }

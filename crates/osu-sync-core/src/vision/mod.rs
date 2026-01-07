@@ -32,4 +32,6 @@
 
 mod capture;
 
-pub use capture::{capture_game_window, list_osu_windows, CapturedFrame, CaptureTarget, WindowInfo};
+pub use capture::{
+    capture_game_window, list_osu_windows, CaptureTarget, CapturedFrame, WindowInfo,
+};

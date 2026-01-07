@@ -128,7 +128,10 @@ mod windows_impl {
             let height = frame.height();
 
             // Lock state to get temp path
-            let state = self.state.lock().map_err(|e| format!("Lock error: {}", e))?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
             let temp_path = state.temp_path.clone();
             let window_title = state.window_title.clone();
             drop(state);

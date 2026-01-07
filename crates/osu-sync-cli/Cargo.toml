@@ -12,7 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 gui = ["iced"]
-mcp = ["rmcp", "base64", "schemars"]
+vision = ["osu-sync-core/vision"]
 
 [dependencies]
 osu-sync-core = { path = "../osu-sync-core" }
@@ -34,8 +34,3 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # GUI (optional)
 iced = { workspace = true, optional = true }
-
-# MCP Server (optional)
-rmcp = { version = "0.1", features = ["server", "transport-io"], optional = true }
-base64 = { version = "0.22", optional = true }
-schemars = { version = "0.8", optional = true }
