@@ -47,6 +47,28 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -W clippy::all
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSRV)
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - name: Check (MSRV)
+        run: cargo check --workspace
+
+  build-gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build with GUI feature
+        run: cargo build --features gui --verbose
+
   release:
     needs: build
     runs-on: windows-latest
