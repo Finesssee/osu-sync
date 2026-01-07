@@ -134,8 +134,14 @@ fn test_stable_master_setup_creates_links() {
     let result = engine.setup().expect("Setup failed");
 
     // Should have created links for Songs and Skins (default shared resources)
-    assert!(result.links_created >= 1, "Should have created at least 1 link");
-    assert!(result.resources_linked >= 1, "Should have linked at least 1 resource");
+    assert!(
+        result.links_created >= 1,
+        "Should have created at least 1 link"
+    );
+    assert!(
+        result.resources_linked >= 1,
+        "Should have linked at least 1 resource"
+    );
 
     // Lazer should now have Songs as a link
     let lazer_songs = fixture.lazer_path.join("Songs");
@@ -166,11 +172,19 @@ fn test_stable_master_setup_backs_up_existing_lazer_content() {
     // Original lazer content should be backed up
     let backup_path = fixture.lazer_path.join("Songs_backup");
     assert!(backup_path.exists(), "Backup should exist");
-    assert_eq!(fixture.count_items(&backup_path), 3, "Backup should have 3 items");
+    assert_eq!(
+        fixture.count_items(&backup_path),
+        3,
+        "Backup should have 3 items"
+    );
 
     // Lazer Songs should now link to stable
     let lazer_songs = fixture.lazer_path.join("Songs");
-    assert_eq!(fixture.count_items(&lazer_songs), 5, "Should access stable's 5 beatmaps");
+    assert_eq!(
+        fixture.count_items(&lazer_songs),
+        5,
+        "Should access stable's 5 beatmaps"
+    );
 }
 
 #[test]
@@ -220,7 +234,10 @@ fn test_stable_master_teardown_removes_links() {
     // Note: The directory might still exist if teardown doesn't remove it
     // but it should no longer be a symlink
     let manifest = engine.manifest();
-    assert!(manifest.is_empty(), "Manifest should be empty after teardown");
+    assert!(
+        manifest.is_empty(),
+        "Manifest should be empty after teardown"
+    );
 }
 
 // =============================================================================
@@ -243,7 +260,10 @@ fn test_lazer_master_setup_creates_links() {
 
     let result = engine.setup().expect("Setup failed");
 
-    assert!(result.links_created >= 1, "Should have created at least 1 link");
+    assert!(
+        result.links_created >= 1,
+        "Should have created at least 1 link"
+    );
 
     // Stable should now have Songs as a link pointing to lazer
     let stable_songs = fixture.stable_path.join("Songs");
@@ -274,11 +294,19 @@ fn test_lazer_master_setup_backs_up_existing_stable_content() {
     // Original stable content should be backed up
     let backup_path = fixture.stable_path.join("Songs_backup");
     assert!(backup_path.exists(), "Backup should exist");
-    assert_eq!(fixture.count_items(&backup_path), 4, "Backup should have 4 items");
+    assert_eq!(
+        fixture.count_items(&backup_path),
+        4,
+        "Backup should have 4 items"
+    );
 
     // Stable Songs should now link to lazer
     let stable_songs = fixture.stable_path.join("Songs");
-    assert_eq!(fixture.count_items(&stable_songs), 6, "Should access lazer's 6 beatmaps");
+    assert_eq!(
+        fixture.count_items(&stable_songs),
+        6,
+        "Should access lazer's 6 beatmaps"
+    );
 }
 
 // =============================================================================
@@ -307,7 +335,10 @@ fn test_true_unified_setup_creates_shared_location() {
 
     // Both stable and lazer beatmaps should be in shared location
     let shared_count = fixture.count_items(&shared_songs);
-    assert!(shared_count >= 3, "Should have at least stable's beatmaps in shared");
+    assert!(
+        shared_count >= 3,
+        "Should have at least stable's beatmaps in shared"
+    );
 
     // Both installations should link to shared location
     assert!(result.links_created >= 1, "Should have created links");
@@ -334,8 +365,10 @@ fn test_true_unified_both_installations_link_to_shared() {
 
     // After setup, both should be able to access the shared content
     // (either as links or as the original if one is the source)
-    assert!(stable_songs.exists() || lazer_songs.exists(),
-        "At least one installation should have Songs accessible");
+    assert!(
+        stable_songs.exists() || lazer_songs.exists(),
+        "At least one installation should have Songs accessible"
+    );
 }
 
 // =============================================================================
@@ -346,14 +379,10 @@ fn test_true_unified_both_installations_link_to_shared() {
 fn test_verify_empty_manifest_is_healthy() {
     let fixture = TestFixture::new();
 
-    // Create engine without setting up (disabled mode)
-    let mut config = UnifiedStorageConfig::default();
-    config.mode = UnifiedStorageMode::Disabled;
-
     // For disabled mode, engine creation should fail or verify should still work
     // Let's test with an enabled config but no setup
     let config = UnifiedStorageConfig::stable_master();
-    let mut engine = UnifiedStorageEngine::new(
+    let engine = UnifiedStorageEngine::new(
         config,
         fixture.stable_path.clone(),
         fixture.lazer_path.clone(),
@@ -415,7 +444,10 @@ fn test_repair_fixes_broken_links() {
     // Since stable Songs still exists, repair should recreate the link
     let final_verify = engine.verify().expect("Verify failed");
     // The link should be restored if the source exists
-    assert!(final_verify.broken <= broken_verify.broken, "Repair should not increase broken links");
+    assert!(
+        final_verify.broken <= broken_verify.broken,
+        "Repair should not increase broken links"
+    );
 }
 
 // =============================================================================
@@ -436,7 +468,10 @@ fn test_engine_rejects_disabled_config_on_setup() {
     .expect("Engine creation should succeed even with disabled config");
 
     let result = engine.setup();
-    assert!(result.is_err(), "Setup should fail when unified storage is disabled");
+    assert!(
+        result.is_err(),
+        "Setup should fail when unified storage is disabled"
+    );
 }
 
 #[test]
@@ -462,12 +497,17 @@ fn test_true_unified_requires_shared_path() {
     let _fixture = TestFixture::new();
 
     // Create TrueUnified config without shared path
-    let mut config = UnifiedStorageConfig::default();
-    config.mode = UnifiedStorageMode::TrueUnified;
-    config.shared_path = None;
+    let config = UnifiedStorageConfig {
+        mode: UnifiedStorageMode::TrueUnified,
+        shared_path: None,
+        ..UnifiedStorageConfig::default()
+    };
 
     // Validation should fail
-    assert!(config.validate().is_err(), "TrueUnified without shared_path should fail validation");
+    assert!(
+        config.validate().is_err(),
+        "TrueUnified without shared_path should fail validation"
+    );
 }
 
 // =============================================================================
@@ -490,7 +530,10 @@ fn test_shared_resources_configuration() {
     // Share all
     config.share_all_resources();
     for resource in SharedResourceType::all() {
-        assert!(config.is_resource_shared(*resource), "All resources should be shared");
+        assert!(
+            config.is_resource_shared(*resource),
+            "All resources should be shared"
+        );
     }
 
     // Unshare all
@@ -530,7 +573,10 @@ fn test_setup_only_links_configured_resources() {
         // This is a bit tricky to test without checking if it's a symlink
     }
 
-    assert_eq!(result.resources_linked, 1, "Should have linked only 1 resource (Skins)");
+    assert_eq!(
+        result.resources_linked, 1,
+        "Should have linked only 1 resource (Skins)"
+    );
 }
 
 // =============================================================================
@@ -551,18 +597,18 @@ fn test_setup_is_idempotent() {
     .expect("Failed to create engine");
 
     // First setup
-    let result1 = engine.setup().expect("First setup failed");
+    engine.setup().expect("First setup failed");
+    let verify1 = engine.verify().expect("Verify after first setup failed");
 
     // Second setup should be safe (idempotent)
-    let result2 = engine.setup().expect("Second setup failed");
-
-    // Both should succeed
-    assert!(result1.warnings.is_empty() || result2.warnings.is_empty() || true,
-        "Setup should be idempotent");
+    engine.setup().expect("Second setup failed");
 
     // Verify state is still correct
-    let verify = engine.verify().expect("Verify failed");
-    assert!(verify.is_healthy());
+    let verify2 = engine.verify().expect("Verify failed");
+    assert!(verify2.is_healthy());
+    assert_eq!(verify1.total_links, verify2.total_links);
+    assert_eq!(verify1.active, verify2.active);
+    assert_eq!(verify1.broken, verify2.broken);
 }
 
 #[test]
@@ -606,11 +652,19 @@ fn test_setup_with_empty_source_directory() {
     )
     .expect("Failed to create engine");
 
-    let result = engine.setup().expect("Setup should succeed even with empty source");
+    let result = engine
+        .setup()
+        .expect("Setup should succeed even with empty source");
 
     // Should have warnings about missing resources
-    assert!(!result.warnings.is_empty(), "Should warn about missing resources");
-    assert_eq!(result.links_created, 0, "No links should be created for missing resources");
+    assert!(
+        !result.warnings.is_empty(),
+        "Should warn about missing resources"
+    );
+    assert_eq!(
+        result.links_created, 0,
+        "No links should be created for missing resources"
+    );
 }
 
 #[test]
@@ -635,8 +689,13 @@ fn test_setup_with_special_characters_in_paths() {
     let mut engine = UnifiedStorageEngine::new(config, stable_path.clone(), lazer_path.clone())
         .expect("Failed to create engine");
 
-    let result = engine.setup().expect("Setup should handle special characters");
-    assert!(result.links_created >= 1, "Should create link despite special characters");
+    let result = engine
+        .setup()
+        .expect("Setup should handle special characters");
+    assert!(
+        result.links_created >= 1,
+        "Should create link despite special characters"
+    );
 }
 
 #[test]
@@ -664,7 +723,10 @@ fn test_setup_preserves_existing_backup() {
     let result = engine.setup();
 
     // The operation should complete (either by removing old backup or warning)
-    assert!(result.is_ok() || result.is_err(), "Should handle existing backup gracefully");
+    assert!(
+        result.is_ok() || result.is_err(),
+        "Should handle existing backup gracefully"
+    );
 }
 
 #[test]
@@ -777,13 +839,26 @@ fn test_multiple_setup_teardown_cycles() {
         )
         .expect("Failed to create engine");
 
-        let setup_result = engine.setup().expect(&format!("Setup failed on cycle {}", cycle));
-        assert!(setup_result.links_created >= 1 || cycle > 0, "Should create links on first cycle");
+        let setup_result = engine
+            .setup()
+            .unwrap_or_else(|_| panic!("Setup failed on cycle {}", cycle));
+        assert!(
+            setup_result.links_created >= 1 || cycle > 0,
+            "Should create links on first cycle"
+        );
 
-        let verify_result = engine.verify().expect(&format!("Verify failed on cycle {}", cycle));
-        assert!(verify_result.is_healthy(), "Should be healthy on cycle {}", cycle);
+        let verify_result = engine
+            .verify()
+            .unwrap_or_else(|_| panic!("Verify failed on cycle {}", cycle));
+        assert!(
+            verify_result.is_healthy(),
+            "Should be healthy on cycle {}",
+            cycle
+        );
 
-        engine.teardown().expect(&format!("Teardown failed on cycle {}", cycle));
+        engine
+            .teardown()
+            .unwrap_or_else(|_| panic!("Teardown failed on cycle {}", cycle));
     }
 }
 
@@ -811,7 +886,7 @@ fn test_sync_detects_new_beatmaps() {
     writeln!(file, "osu file format v14").expect("Failed to write");
 
     // Sync should pick up the new beatmap (via link)
-    let sync_result = engine.sync().expect("Sync failed");
+    let _sync_result = engine.sync().expect("Sync failed");
 
     // The new beatmap should be accessible through the link
     let lazer_songs = fixture.lazer_path.join("Songs");
@@ -819,7 +894,10 @@ fn test_sync_detects_new_beatmaps() {
         .map(|entries| entries.count())
         .unwrap_or(0);
 
-    assert_eq!(accessible_beatmaps, 4, "Should have 4 beatmaps (3 original + 1 new)");
+    assert_eq!(
+        accessible_beatmaps, 4,
+        "Should have 4 beatmaps (3 original + 1 new)"
+    );
 }
 
 #[test]
@@ -869,7 +947,10 @@ fn test_true_unified_creates_shared_directory() {
     engine.setup().expect("Setup failed");
 
     // Shared directory should now exist with content
-    assert!(fixture.shared_path.exists(), "Shared path should be created");
+    assert!(
+        fixture.shared_path.exists(),
+        "Shared path should be created"
+    );
     let shared_songs = fixture.shared_path.join("Songs");
     assert!(shared_songs.exists(), "Shared Songs should exist");
 }
@@ -881,7 +962,10 @@ fn test_config_validation_empty_resources() {
 
     // Validation should fail with no resources
     let validation = config.validate();
-    assert!(validation.is_err(), "Should fail validation with no shared resources");
+    assert!(
+        validation.is_err(),
+        "Should fail validation with no shared resources"
+    );
 }
 
 #[test]
