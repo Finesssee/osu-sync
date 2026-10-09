@@ -148,8 +148,17 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
                     set_ids: None,
                 });
             }
+            // Flags main reads itself; the path flags are normally taken out already.
+            "--cli" | "--gui" | "--allow-live" | "--help" | "-h" => {}
+            "--stable-path" | "--lazer-path" => i += 1,
+            _ if arg.starts_with("--stable-path=") || arg.starts_with("--lazer-path=") => {}
+            "--dry-run" => return Err(
+                "Unknown flag: --dry-run. For a dry run use the subcommand: dry-run <direction>"
+                    .to_string(),
+            ),
+            _ if arg.starts_with('-') => return Err(format!("Unknown flag: {}", arg)),
             _ => {
-                if !arg.starts_with('-') && command.is_none() {
+                if command.is_none() {
                     return Err(format!("Unknown command: {}", arg));
                 }
             }
@@ -616,6 +625,54 @@ mod tests {
             ..Default::default()
         };
         assert!(failures(&clean).is_ok());
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert_eq!(
+            parse_args(&strings(&["sync", "l2s", "--dry-run"])).unwrap_err(),
+            "Unknown flag: --dry-run. For a dry run use the subcommand: dry-run <direction>"
+        );
+        assert_eq!(
+            parse_args(&strings(&["sync", "l2s", "--jsno"])).unwrap_err(),
+            "Unknown flag: --jsno"
+        );
+        assert_eq!(
+            parse_args(&strings(&["-x", "scan"])).unwrap_err(),
+            "Unknown flag: -x"
+        );
+    }
+
+    #[test]
+    fn known_flags_are_accepted_after_global_flags_are_taken() {
+        let (_, rest) = GlobalFlags::take(strings(&[
+            "osu-sync",
+            "--stable-path",
+            "D:/stable",
+            "--allow-live",
+            "--cli",
+            "--lazer-path=D:/lazer",
+            "sync",
+            "l2s",
+            "--json",
+            "--set-ids",
+            "1,2",
+            "--gui",
+            "--allow-live",
+            "--stable-path=D:/other",
+        ]))
+        .unwrap();
+        let cli = rest.iter().position(|a| a == "--cli").unwrap();
+        let (command, options) = parse_args(&rest[cli + 1..]).unwrap();
+        assert!(options.json);
+        assert!(matches!(
+            command,
+            CliCommand::Sync {
+                direction: SyncDirection::LazerToStable,
+                set_ids: Some(ref ids),
+            } if ids.len() == 2
+        ));
+        assert!(parse_args(&strings(&["--cli", "--stable-path", "D:/s", "scan"])).is_ok());
     }
 
     #[test]
