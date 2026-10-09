@@ -132,6 +132,8 @@ pub struct SetCounts {
     pub copied: usize,
     pub present: usize,
     pub link_limit_copies: usize,
+    /// Files copied because hard-linking them failed for any other reason.
+    pub link_error_copies: usize,
     pub skipped: usize,
 }
 
@@ -185,6 +187,8 @@ pub struct MaterializeReport {
     pub cross_volume: bool,
     /// Temporary files left by an interrupted run and removed by this one.
     pub temps_removed: usize,
+    /// The first hard-link error that made a file fall back to a copy.
+    pub link_error: Option<String>,
 }
 
 impl MaterializeReport {
@@ -196,10 +200,41 @@ impl MaterializeReport {
                 total.copied += c.copied;
                 total.present += c.present;
                 total.link_limit_copies += c.link_limit_copies;
+                total.link_error_copies += c.link_error_copies;
                 total.skipped += c.skipped;
             }
         }
         total
+    }
+
+    /// Facts about the whole run for the sync result, one line each.
+    pub fn notes(&self, songs: &Path) -> Vec<String> {
+        let totals = self.totals();
+        let mut notes = Vec::new();
+        if self.cross_volume {
+            notes.push(format!(
+                "osu!lazer's files and {} are on different volumes, so every file was copied instead of linked",
+                songs.display()
+            ));
+        }
+        if totals.link_limit_copies > 0 {
+            notes.push(format!(
+                "{} files were copied because their lazer file already has the most hard links NTFS allows",
+                totals.link_limit_copies
+            ));
+        }
+        if let (n @ 1.., Some(error)) = (totals.link_error_copies, &self.link_error) {
+            notes.push(format!(
+                "{n} files were copied because hard-linking them failed, first error: {error}"
+            ));
+        }
+        if self.temps_removed > 0 {
+            notes.push(format!(
+                "Removed {} temporary files left by an interrupted run",
+                self.temps_removed
+            ));
+        }
+        notes
     }
 
     pub fn skipped(&self) -> impl Iterator<Item = (&SetReport, &SkipReason)> {
@@ -510,6 +545,7 @@ impl Materializer {
                         &planned,
                         &present,
                         &mut report.cross_volume,
+                        &mut report.link_error,
                         &mut checked_dirs,
                     ) {
                         Ok(counts) => SetOutcome::Materialized(counts),
@@ -632,6 +668,7 @@ impl Materializer {
         set: &PlannedSet,
         present: &[bool],
         cross_volume: &mut bool,
+        link_error: &mut Option<String>,
         checked_dirs: &mut HashSet<PathBuf>,
     ) -> Result<SetCounts> {
         let folder = self.songs.join(&set.folder);
@@ -667,7 +704,10 @@ impl Materializer {
                     Err(e) => match classify_hard_link_error(&e) {
                         HardLinkFailure::LinkLimit => counts.link_limit_copies += 1,
                         HardLinkFailure::CrossVolume => *cross_volume = true,
-                        HardLinkFailure::Other => return Err(e.into()),
+                        HardLinkFailure::Other => {
+                            counts.link_error_copies += 1;
+                            link_error.get_or_insert_with(|| e.to_string());
+                        }
                     },
                 }
             }
@@ -1085,6 +1125,43 @@ mod tests {
             }
         );
         assert!(!report.cross_volume);
+        assert_eq!(
+            report.notes(&fx.songs),
+            ["1 files were copied because their lazer file already has the most hard links NTFS allows"]
+        );
+    }
+
+    #[test]
+    fn any_link_error_falls_back_to_copy_with_one_note() {
+        let fx = Fixture::new();
+        let mut s = fx.basic_set();
+        s.files.push(LazerNamedFile {
+            filename: "bg.jpg".to_string(),
+            hash: fx.blob(b"not really a jpeg"),
+        });
+        let mut m = fx.materializer();
+        m.link = |_, _| Err(io::Error::from_raw_os_error(1));
+        let report = fx.run(&m, &[s]);
+
+        let dest = fx.songs.join("1001 Artist - Title").join("audio.mp3");
+        let blob = fx.blob_path(&fx.blob(b"ID3 not really audio"));
+        assert_eq!(fs::read(&dest).unwrap(), b"ID3 not really audio");
+        assert!(!same_file::is_same_file(&dest, &blob).unwrap());
+        assert_eq!(
+            only_counts(&report),
+            SetCounts {
+                copied: 3,
+                link_error_copies: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            report.notes(&fx.songs),
+            [format!(
+                "2 files were copied because hard-linking them failed, first error: {}",
+                io::Error::from_raw_os_error(1)
+            )]
+        );
     }
 
     #[test]

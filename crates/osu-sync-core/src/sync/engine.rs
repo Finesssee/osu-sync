@@ -895,24 +895,7 @@ impl SyncEngine {
             totals.copied,
             totals.present
         );
-        if report.cross_volume {
-            result.notes.push(format!(
-                "osu!lazer's files and {} are on different volumes, so every file was copied instead of linked",
-                songs.display()
-            ));
-        }
-        if totals.link_limit_copies > 0 {
-            result.notes.push(format!(
-                "{} files were copied because their lazer file already has the most hard links NTFS allows",
-                totals.link_limit_copies
-            ));
-        }
-        if report.temps_removed > 0 {
-            result.notes.push(format!(
-                "Removed {} temporary files left by an interrupted run",
-                report.temps_removed
-            ));
-        }
+        result.notes.extend(report.notes(&songs));
 
         Ok(result)
     }
