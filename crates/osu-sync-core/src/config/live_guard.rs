@@ -269,18 +269,34 @@ pub fn lazer_launch() -> Result<LazerLaunch> {
 /// Checks the folders a sync in `direction` writes to, and the game launch an
 /// import into lazer ends with.
 pub fn check_sync(direction: SyncDirection, config: &Config) -> Result<()> {
-    if direction.syncs_from_lazer() {
-        if let Some(songs) = config.stable_songs_path() {
-            check_write(&songs)?;
-        }
+    let links = match (config.lazer_files_path(), config.stable_songs_path()) {
+        (Some(files), Some(songs)) => crate::unified::same_volume(&files, &songs).unwrap_or(true),
+        _ => true,
+    };
+    for target in sync_write_targets(direction, config, links) {
+        check_write(&target)?;
     }
     if direction.syncs_from_stable() {
-        if let Some(lazer) = &config.lazer_path {
-            check_write(lazer)?;
-        }
         lazer_launch()?;
     }
     Ok(())
+}
+
+/// The folders a sync in `direction` writes to. Lazer to stable hard-links each
+/// asset to its lazer file when both are on one volume, and a link shares the
+/// file, so the lazer store counts as written to.
+fn sync_write_targets(direction: SyncDirection, config: &Config, links: bool) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    if direction.syncs_from_lazer() {
+        targets.extend(config.stable_songs_path());
+        if links {
+            targets.extend(config.lazer_files_path());
+        }
+    }
+    if direction.syncs_from_stable() {
+        targets.extend(config.lazer_path.clone());
+    }
+    targets
 }
 
 /// True when `path` equals `root` or lies inside it, compared component by component.
@@ -536,6 +552,55 @@ mod tests {
         assert_eq!(refused_root(&roots, &config_dir.join("config.json")), None);
 
         assert_eq!(lazer_live_dirs(&target), vec![target.clone()]);
+    }
+
+    fn config(stable: PathBuf, lazer: PathBuf) -> Config {
+        Config {
+            stable_path: Some(stable),
+            lazer_path: Some(lazer),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn l2s_writes_to_the_lazer_store_when_it_links() {
+        let stable = PathBuf::from(r"D:\osu-sync-sandbox\p4fix1-unit\stable");
+        let lazer = PathBuf::from(r"D:\osu!lazer");
+        let config = config(stable.clone(), lazer.clone());
+
+        assert_eq!(
+            sync_write_targets(SyncDirection::LazerToStable, &config, true),
+            vec![stable.join("Songs"), lazer.join("files")]
+        );
+        assert_eq!(
+            sync_write_targets(SyncDirection::LazerToStable, &config, false),
+            vec![stable.join("Songs")]
+        );
+        assert_eq!(
+            sync_write_targets(SyncDirection::StableToLazer, &config, true),
+            vec![lazer]
+        );
+    }
+
+    #[test]
+    fn l2s_from_a_live_lazer_store_is_refused() {
+        let dir = TempDir::new().unwrap();
+        set_test_roots(LiveRoots::new(installs(dir.path()), Vec::new(), None));
+        let stable = dir.path().join("sandbox").join("stable");
+        std::fs::create_dir_all(stable.join("Songs")).unwrap();
+
+        let live = config(stable.clone(), dir.path().join("osu!lazer"));
+        match check_sync(SyncDirection::LazerToStable, &live) {
+            Err(Error::LiveWriteRefused { root, .. }) => {
+                assert_eq!(root, dir.path().join("osu!lazer"))
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let sandbox_lazer = dir.path().join("sandbox").join("lazer");
+        std::fs::create_dir_all(sandbox_lazer.join("files")).unwrap();
+        let sandbox = config(stable, sandbox_lazer);
+        assert!(check_sync(SyncDirection::LazerToStable, &sandbox).is_ok());
     }
 
     #[test]
