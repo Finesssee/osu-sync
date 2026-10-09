@@ -1,132 +1,53 @@
-//! osu!lazer Realm database reader
+//! osu!lazer and osu!stable database readers
 //!
-//! This module provides database reading capabilities for osu! beatmap data.
-//!
-//! ## Supported formats:
-//! - **osu!stable osu!.db**: Full support via the `osu-db` crate
-//! - **osu!lazer Realm**: Full support via the `realm-db-reader` crate
-//!
-//! ## osu!lazer Realm Schema:
-//! - **BeatmapSet** table: Contains beatmap set metadata (OnlineID, Hash, Status, etc.)
-//! - **Beatmap** table: Contains individual beatmap difficulties
-//! - **File** table: Content-addressed file storage (SHA-256 hash as key)
+//! - **osu!stable osu!.db**: read with the `osu-db` crate
+//! - **osu!lazer client.realm**: read by the `realm-export` helper in `tools/realm-export`,
+//!   which loads the `Realm.dll` shipped with osu!lazer and prints the library as JSON
 
 use crate::beatmap::{
     BeatmapDifficulty, BeatmapFile, BeatmapInfo, BeatmapMetadata, BeatmapSet, GameMode,
 };
-use crate::config::scan_cache;
 use crate::error::{Error, Result};
 use crate::lazer::LazerFileStore;
 use crate::stats::RankedStatus;
-use blake3;
-use realm_db_reader::{Group, Realm, Row, Table, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Timing breakdown for lazer scan operations
+/// Environment variable naming the `realm-export` helper when it is not next to osu-sync
+pub const REALM_EXPORT_ENV: &str = "OSU_SYNC_REALM_EXPORT";
+
+const DOTNET_DOWNLOAD: &str = "https://dotnet.microsoft.com/download/dotnet/8.0";
+
+/// Timing for reading the lazer library
 #[derive(Debug, Clone, Default)]
 pub struct LazerScanTiming {
-    /// Total scan duration
+    /// Time from starting the realm export to a parsed set list
     pub total: Duration,
-    /// Time spent listing files in the store
-    pub file_listing: Duration,
-    /// Time spent detecting .osu files (header check)
-    pub header_detection: Duration,
-    /// Time spent parsing .osu files
-    pub osu_parsing: Duration,
-    /// Time spent grouping beatmaps into sets
-    pub grouping: Duration,
-    /// Number of files in the store
-    pub total_files: usize,
-    /// Number of .osu files found
-    pub osu_files_found: usize,
-    /// Number of .osu files successfully parsed
-    pub osu_files_parsed: usize,
-    /// Number of beatmap sets created
-    pub sets_created: usize,
-    /// Whether result was loaded from cache
-    pub from_cache: bool,
-    /// Whether parallel scanning was used
-    pub parallel: bool,
-    /// Number of threads used
-    pub thread_count: usize,
+    pub sets: usize,
+    pub beatmaps: usize,
+    pub named_files: usize,
 }
 
 impl LazerScanTiming {
-    /// Format as human-readable report (similar to stable's format)
     pub fn report(&self) -> String {
-        if self.from_cache {
-            format!(
-                "Lazer scan completed in {:.2}s (cached)\n\
-                 - Cache load: {:.2}s\n\
-                 - {} sets, {} beatmaps",
-                self.total.as_secs_f64(),
-                self.total.as_secs_f64(),
-                self.sets_created,
-                self.osu_files_parsed,
-            )
-        } else {
-            let mode_info = if self.parallel {
-                format!(" (parallel, {} threads)", self.thread_count)
-            } else {
-                " (sequential)".to_string()
-            };
-
-            let parse_speed = if self.osu_parsing.as_secs_f64() > 0.0 {
-                self.osu_files_parsed as f64 / self.osu_parsing.as_secs_f64()
-            } else {
-                0.0
-            };
-
-            format!(
-                "Lazer scan completed in {:.2}s{}\n\
-                 - File listing: {:.2}s ({} files)\n\
-                 - Header detection: {:.2}s ({} .osu files found)\n\
-                 - .osu parsing: {:.2}s ({} files, {:.0} files/sec)\n\
-                 - Grouping: {:.2}s ({} sets)",
-                self.total.as_secs_f64(),
-                mode_info,
-                self.file_listing.as_secs_f64(),
-                self.total_files,
-                self.header_detection.as_secs_f64(),
-                self.osu_files_found,
-                self.osu_parsing.as_secs_f64(),
-                self.osu_files_parsed,
-                parse_speed,
-                self.grouping.as_secs_f64(),
-                self.sets_created,
-            )
-        }
+        format!(
+            "Lazer realm export completed in {:.2}s\n - {} sets, {} beatmaps, {} named files",
+            self.total.as_secs_f64(),
+            self.sets,
+            self.beatmaps,
+            self.named_files,
+        )
     }
-}
-
-/// Cache for file-scanned beatmap sets
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BeatmapCache {
-    /// Number of files in the file store when cache was created
-    file_count: usize,
-    /// File store last-modified time when cache was created
-    #[serde(default)]
-    file_store_mtime_secs: Option<u64>,
-    /// File store signature (hash of file store contents)
-    #[serde(default)]
-    file_store_signature: Option<String>,
-    /// Number of beatmaps parsed
-    beatmaps_parsed: usize,
-    /// Cached beatmap sets
-    sets: Vec<LazerBeatmapSet>,
 }
 
 /// Reader for osu!lazer's Realm database
 pub struct LazerDatabase {
-    data_path: PathBuf,
     file_store: LazerFileStore,
-    /// The Realm database group (root of all tables)
-    realm_group: Option<Group>,
-    /// Where the scan cache lives; `None` disables caching
-    cache_root: Option<PathBuf>,
+    sets: Vec<LazerBeatmapSet>,
+    export_time: Duration,
 }
 
 /// Beatmap info as stored in lazer's Realm database
@@ -180,56 +101,86 @@ pub struct LazerNamedFile {
     pub hash: String,
 }
 
+#[derive(Deserialize)]
+struct ExportedSet {
+    id: String,
+    online_id: i32,
+    delete_pending: bool,
+    beatmaps: Vec<ExportedBeatmap>,
+    files: Vec<ExportedFile>,
+}
+
+#[derive(Deserialize)]
+struct ExportedBeatmap {
+    id: String,
+    online_id: i32,
+    hash: Option<String>,
+    md5_hash: Option<String>,
+    difficulty_name: Option<String>,
+    ruleset: i32,
+    length_ms: f64,
+    bpm: f64,
+    star_rating: f64,
+    status: i32,
+    hidden: bool,
+    title: Option<String>,
+    title_unicode: Option<String>,
+    artist: Option<String>,
+    artist_unicode: Option<String>,
+    author: Option<String>,
+    source: Option<String>,
+    tags: Option<String>,
+    drain_rate: f32,
+    circle_size: f32,
+    overall_difficulty: f32,
+    approach_rate: f32,
+    slider_multiplier: f64,
+    slider_tick_rate: f64,
+}
+
+#[derive(Deserialize)]
+struct ExportedFile {
+    filename: Option<String>,
+    hash: Option<String>,
+}
+
 impl LazerDatabase {
-    /// Open the lazer database at the given path
+    /// Read the lazer library at `data_path` through the `realm-export` helper
+    ///
+    /// Fails with a message naming the missing piece when the helper, the .NET 8 runtime
+    /// or osu!lazer's `Realm.dll` cannot be found.
     pub fn open(data_path: &Path) -> Result<Self> {
         let realm_path = data_path.join("client.realm");
         if !realm_path.exists() {
             return Err(Error::OsuNotFound(data_path.to_path_buf()));
         }
 
-        // Try to open the Realm database
-        // Note: This may fail if osu!lazer is running (database locked)
-        let realm_group = match Realm::open(&realm_path) {
-            Ok(realm) => match realm.into_group() {
-                Ok(group) => {
-                    tracing::info!("Successfully opened Realm database at {:?}", realm_path);
-                    Some(group)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read Realm database group: {}. Database may be locked by osu!lazer.",
-                        e
-                    );
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to open Realm database: {}. Database may be locked by osu!lazer.",
-                    e
-                );
-                None
-            }
-        };
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf));
+        let helper = find_realm_export(exe_dir.as_deref(), std::env::var_os(REALM_EXPORT_ENV))?;
+
+        let start = Instant::now();
+        let json = run_realm_export(&helper, &realm_path)?;
+        let sets = parse_realm_export(&json)?;
+        let export_time = start.elapsed();
+        tracing::info!(
+            "Read {} lazer sets from {:?} in {:.2}s",
+            sets.len(),
+            realm_path,
+            export_time.as_secs_f64()
+        );
 
         Ok(Self {
-            data_path: data_path.to_path_buf(),
             file_store: LazerFileStore::new(data_path),
-            realm_group,
-            cache_root: scan_cache::default_root(),
+            sets,
+            export_time,
         })
     }
 
-    /// Keep the scan cache under `root` instead of the per-user cache dir
-    pub fn with_cache_root(mut self, root: PathBuf) -> Self {
-        self.cache_root = Some(root);
-        self
-    }
-
-    /// Check if the Realm database is available for reading
+    /// Always true, because `open` fails when the realm cannot be read
     pub fn is_realm_available(&self) -> bool {
-        self.realm_group.is_some()
+        true
     }
 
     /// Get the file store
@@ -237,805 +188,20 @@ impl LazerDatabase {
         &self.file_store
     }
 
-    /// Get all beatmap sets from the database
-    ///
-    /// Tries to read from the Realm database first. If that fails (unsupported version,
-    /// database locked, etc.), falls back to scanning .osu files from the file store.
+    /// Get all beatmap sets that are not pending deletion
     pub fn get_all_beatmap_sets(&self) -> Result<Vec<LazerBeatmapSet>> {
-        let (sets, _timing) = self.get_all_beatmap_sets_timed()?;
-        Ok(sets)
+        Ok(self.sets.clone())
     }
 
-    /// Get all beatmap sets with detailed timing information
-    ///
-    /// Tries to read from the Realm database first. If that fails (unsupported version,
-    /// database locked, etc.), falls back to scanning .osu files from the file store.
+    /// Get all beatmap sets with the time the realm export took
     pub fn get_all_beatmap_sets_timed(&self) -> Result<(Vec<LazerBeatmapSet>, LazerScanTiming)> {
-        // Try Realm database first
-        if let Some(group) = &self.realm_group {
-            match self.get_beatmap_sets_from_realm(group) {
-                Ok(sets) if !sets.is_empty() => {
-                    let timing = LazerScanTiming {
-                        sets_created: sets.len(),
-                        osu_files_parsed: sets.iter().map(|s| s.beatmaps.len()).sum(),
-                        from_cache: false, // Realm is not cache
-                        ..Default::default()
-                    };
-                    return Ok((sets, timing));
-                }
-                Ok(_) => {
-                    tracing::info!("Realm returned empty, trying file scan fallback");
-                }
-                Err(e) => {
-                    tracing::warn!("Realm read failed: {}, trying file scan fallback", e);
-                }
-            }
-        }
-
-        // Fallback: scan .osu files from the file store
-        tracing::info!("Using file scan fallback to enumerate beatmaps");
-        self.get_beatmap_sets_from_file_scan_timed()
-    }
-
-    /// Get the cache file path
-    fn cache_path(&self) -> Option<PathBuf> {
-        let root = self.cache_root.as_deref()?;
-        Some(scan_cache::file_for(root, "lazer", &self.data_path, "json"))
-    }
-
-    /// Compute a stable signature for the file store contents
-    fn compute_file_store_signature(hashes: &[String]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        for hash in hashes {
-            hasher.update(hash.as_bytes());
-            hasher.update(b"\n");
-        }
-        hasher.finalize().to_hex().to_string()
-    }
-
-    /// Try to load beatmap sets from cache
-    fn load_from_cache(
-        &self,
-        current_file_count: usize,
-        current_signature: Option<&str>,
-    ) -> Option<(Vec<LazerBeatmapSet>, usize)> {
-        let data = std::fs::read_to_string(self.cache_path()?).ok()?;
-        let cache: BeatmapCache = serde_json::from_str(&data).ok()?;
-        let current_mtime = self.file_store.store_mtime_secs();
-
-        // Validate cache - file count must match
-        if cache.file_count != current_file_count {
-            tracing::info!(
-                "Cache invalidated: file count changed ({} -> {})",
-                cache.file_count,
-                current_file_count
-            );
-            return None;
-        }
-
-        // Validate cache - file store mtime must match (when available)
-        if let (Some(cache_mtime), Some(current_mtime)) =
-            (cache.file_store_mtime_secs, current_mtime)
-        {
-            if cache_mtime != current_mtime {
-                tracing::info!(
-                    "Cache invalidated: file store modified time changed ({} -> {})",
-                    cache_mtime,
-                    current_mtime
-                );
-                return None;
-            }
-        } else if cache.file_store_mtime_secs.is_some() && current_mtime.is_none() {
-            tracing::info!("Cache invalidated: file store mtime unavailable");
-            return None;
-        }
-
-        // Validate cache - file store signature must match (when available)
-        if let Some(current_signature) = current_signature {
-            match cache.file_store_signature.as_deref() {
-                Some(cache_signature) if cache_signature == current_signature => {}
-                Some(_) => {
-                    tracing::info!("Cache invalidated: file store signature changed");
-                    return None;
-                }
-                None => {
-                    tracing::info!("Cache invalidated: file store signature missing");
-                    return None;
-                }
-            }
-        }
-
-        tracing::info!("Loaded {} beatmap sets from cache", cache.sets.len());
-        Some((cache.sets, cache.beatmaps_parsed))
-    }
-
-    /// Save beatmap sets to cache
-    fn save_to_cache(
-        &self,
-        sets: &[LazerBeatmapSet],
-        file_count: usize,
-        beatmaps_parsed: usize,
-        file_store_signature: Option<String>,
-    ) {
-        let cache = BeatmapCache {
-            file_count,
-            file_store_mtime_secs: self.file_store.store_mtime_secs(),
-            file_store_signature,
-            beatmaps_parsed,
-            sets: sets.to_vec(),
+        let timing = LazerScanTiming {
+            total: self.export_time,
+            sets: self.sets.len(),
+            beatmaps: self.sets.iter().map(|s| s.beatmaps.len()).sum(),
+            named_files: self.sets.iter().map(|s| s.files.len()).sum(),
         };
-
-        if let Ok(data) = serde_json::to_string(&cache) {
-            let Some(cache_path) = self.cache_path() else {
-                return;
-            };
-            if let Err(e) = scan_cache::write(&cache_path, data.as_bytes()) {
-                tracing::warn!("Failed to save cache: {}", e);
-            } else {
-                tracing::debug!("Saved {} beatmap sets to cache", sets.len());
-            }
-        }
-    }
-
-    /// Scan .osu files from the file store to build beatmap sets with detailed timing
-    ///
-    /// This is a fallback method when Realm database reading isn't available.
-    /// Uses parallel processing for fast scanning and caching for instant subsequent loads.
-    fn get_beatmap_sets_from_file_scan_timed(
-        &self,
-    ) -> Result<(Vec<LazerBeatmapSet>, LazerScanTiming)> {
-        use rayon::prelude::*;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let total_start = Instant::now();
-        let mut timing = LazerScanTiming {
-            parallel: true,
-            thread_count: rayon::current_num_threads(),
-            ..Default::default()
-        };
-
-        // Phase 0: List all files
-        let listing_start = Instant::now();
-        let mut all_hashes = self.file_store.list_all()?;
-        timing.file_listing = listing_start.elapsed();
-        timing.total_files = all_hashes.len();
-        tracing::info!("Found {} files in lazer file store", timing.total_files);
-
-        // Compute a stable signature for cache validation
-        all_hashes.sort();
-        let store_signature = Some(Self::compute_file_store_signature(&all_hashes));
-
-        // Try to load from cache first
-        if let Some((cached_sets, beatmaps_parsed)) =
-            self.load_from_cache(timing.total_files, store_signature.as_deref())
-        {
-            timing.total = total_start.elapsed();
-            timing.from_cache = true;
-            timing.sets_created = cached_sets.len();
-            timing.osu_files_parsed = beatmaps_parsed;
-            timing.osu_files_found = beatmaps_parsed;
-            return Ok((cached_sets, timing));
-        }
-
-        let scanned = AtomicUsize::new(0);
-        let parsed = AtomicUsize::new(0);
-
-        // Phase 1: Filter to only .osu files by checking header (parallel, fast)
-        let header_start = Instant::now();
-        let osu_file_header = b"osu file format";
-        let osu_hashes: Vec<&String> = all_hashes
-            .par_iter()
-            .filter(|hash| {
-                // Read just the first 20 bytes to check header
-                if let Ok(prefix) = self.file_store.read_prefix(hash, 20) {
-                    if prefix.len() >= 15 && prefix.starts_with(osu_file_header) {
-                        return true;
-                    }
-                }
-                false
-            })
-            .collect();
-        timing.header_detection = header_start.elapsed();
-        timing.osu_files_found = osu_hashes.len();
-
-        tracing::info!(
-            "Found {} .osu files out of {} total files",
-            timing.osu_files_found,
-            timing.total_files
-        );
-
-        // Phase 2: Parse all .osu files in parallel
-        let parsing_start = Instant::now();
-        let beatmap_infos: Vec<(String, LazerBeatmapInfo)> = osu_hashes
-            .par_iter()
-            .filter_map(|hash| {
-                scanned.fetch_add(1, Ordering::Relaxed);
-
-                // Read full file content
-                let content = match self.file_store.read(hash) {
-                    Ok(c) => c,
-                    Err(_) => return None,
-                };
-
-                // Parse the .osu file using rosu-map
-                let beatmap = match rosu_map::from_bytes::<rosu_map::Beatmap>(&content) {
-                    Ok(b) => b,
-                    Err(_) => return None,
-                };
-
-                parsed.fetch_add(1, Ordering::Relaxed);
-
-                // Convert to LazerBeatmapInfo
-                let beatmap_info = self.convert_rosu_beatmap(&beatmap, hash);
-                Some((hash.to_string(), beatmap_info))
-            })
-            .collect();
-        timing.osu_parsing = parsing_start.elapsed();
-        timing.osu_files_parsed = parsed.load(Ordering::Relaxed);
-
-        // Phase 3: Group by beatmapset_id (single-threaded, fast)
-        let grouping_start = Instant::now();
-        let mut sets_map: HashMap<i32, LazerBeatmapSet> = HashMap::new();
-        let mut orphan_beatmaps: Vec<LazerBeatmapInfo> = Vec::new();
-
-        for (_hash, beatmap_info) in beatmap_infos {
-            if let Some(set_id) = beatmap_info.metadata.beatmap_set_id {
-                let set = sets_map.entry(set_id).or_insert_with(|| LazerBeatmapSet {
-                    id: format!("scan-{}", set_id),
-                    online_id: Some(set_id),
-                    beatmaps: Vec::new(),
-                    files: Vec::new(),
-                });
-                set.beatmaps.push(beatmap_info);
-            } else {
-                orphan_beatmaps.push(beatmap_info);
-            }
-        }
-        timing.grouping = grouping_start.elapsed();
-
-        tracing::info!(
-            "Scanned {} .osu files, parsed {} successfully, found {} sets",
-            scanned.load(Ordering::Relaxed),
-            timing.osu_files_parsed,
-            sets_map.len()
-        );
-
-        // Convert to Vec and add orphans as individual sets
-        let mut result: Vec<LazerBeatmapSet> = sets_map.into_values().collect();
-
-        for (i, beatmap) in orphan_beatmaps.into_iter().enumerate() {
-            result.push(LazerBeatmapSet {
-                id: format!("orphan-{}", i),
-                online_id: None,
-                beatmaps: vec![beatmap],
-                files: Vec::new(),
-            });
-        }
-
-        timing.sets_created = result.len();
-        timing.total = total_start.elapsed();
-
-        // Save to cache for next time
-        self.save_to_cache(
-            &result,
-            timing.total_files,
-            timing.osu_files_parsed,
-            store_signature,
-        );
-
-        Ok((result, timing))
-    }
-
-    /// Convert a rosu_map::Beatmap to LazerBeatmapInfo
-    fn convert_rosu_beatmap(&self, beatmap: &rosu_map::Beatmap, hash: &str) -> LazerBeatmapInfo {
-        let mode = match beatmap.mode {
-            rosu_map::section::general::GameMode::Osu => GameMode::Osu,
-            rosu_map::section::general::GameMode::Taiko => GameMode::Taiko,
-            rosu_map::section::general::GameMode::Catch => GameMode::Catch,
-            rosu_map::section::general::GameMode::Mania => GameMode::Mania,
-        };
-
-        let metadata = BeatmapMetadata {
-            title: beatmap.title.clone(),
-            title_unicode: if beatmap.title_unicode.is_empty() {
-                None
-            } else {
-                Some(beatmap.title_unicode.clone())
-            },
-            artist: beatmap.artist.clone(),
-            artist_unicode: if beatmap.artist_unicode.is_empty() {
-                None
-            } else {
-                Some(beatmap.artist_unicode.clone())
-            },
-            creator: beatmap.creator.clone(),
-            source: if beatmap.source.is_empty() {
-                None
-            } else {
-                Some(beatmap.source.clone())
-            },
-            tags: beatmap.tags.split_whitespace().map(String::from).collect(),
-            beatmap_id: if beatmap.beatmap_id > 0 {
-                Some(beatmap.beatmap_id)
-            } else {
-                None
-            },
-            beatmap_set_id: if beatmap.beatmap_set_id > 0 {
-                Some(beatmap.beatmap_set_id)
-            } else {
-                None
-            },
-        };
-
-        let difficulty = BeatmapDifficulty {
-            hp_drain: beatmap.hp_drain_rate,
-            circle_size: beatmap.circle_size,
-            overall_difficulty: beatmap.overall_difficulty,
-            approach_rate: beatmap.approach_rate,
-            slider_multiplier: beatmap.slider_multiplier,
-            slider_tick_rate: beatmap.slider_tick_rate,
-        };
-
-        // Calculate BPM from timing points
-        let bpm = beatmap
-            .control_points
-            .timing_points
-            .first()
-            .map(|tp| 60000.0 / tp.beat_len)
-            .unwrap_or(120.0);
-
-        // Calculate length from hit objects
-        let length_ms = beatmap
-            .hit_objects
-            .last()
-            .map(|ho| ho.start_time as u64)
-            .unwrap_or(0);
-
-        LazerBeatmapInfo {
-            id: format!("scan-{}", hash),
-            online_id: metadata.beatmap_id,
-            hash: hash.to_string(),
-            md5_hash: String::new(), // Would need to calculate
-            metadata,
-            difficulty,
-            version: beatmap.version.clone(),
-            mode,
-            length_ms,
-            bpm,
-            star_rating: None, // Not available from .osu file
-            ranked_status: None,
-        }
-    }
-
-    /// Get beatmap sets from the Realm database
-    fn get_beatmap_sets_from_realm(&self, group: &Group) -> Result<Vec<LazerBeatmapSet>> {
-        // Log available table names for debugging
-        let table_names = group.get_table_names();
-        tracing::debug!("Available tables in Realm: {:?}", table_names);
-
-        // Get the BeatmapSet table (class_BeatmapSetInfo in Realm)
-        let beatmap_set_table = match group.get_table_by_name("class_BeatmapSetInfo") {
-            Ok(table) => table,
-            Err(e) => {
-                tracing::warn!(
-                    "BeatmapSetInfo table not found: {}. Trying alternative names...",
-                    e
-                );
-                // Try alternative table names
-                match group.get_table_by_name("BeatmapSetInfo") {
-                    Ok(table) => table,
-                    Err(_) => {
-                        tracing::error!("Could not find BeatmapSetInfo table in Realm database");
-                        return Ok(Vec::new());
-                    }
-                }
-            }
-        };
-
-        // Get the Beatmap table for beatmap info
-        let beatmap_table = group.get_table_by_name("class_BeatmapInfo").ok();
-
-        // Get the Metadata table
-        let metadata_table = group.get_table_by_name("class_BeatmapMetadata").ok();
-
-        // Get the RulesetInfo table
-        let ruleset_table = group.get_table_by_name("class_RulesetInfo").ok();
-
-        // Get the File table for hash lookups
-        let file_table = group.get_table_by_name("class_RealmFile").ok();
-
-        let row_count = beatmap_set_table.row_count().unwrap_or(0);
-        tracing::info!("Found {} beatmap sets in Realm database", row_count);
-
-        let mut result = Vec::with_capacity(row_count);
-
-        for row_idx in 0..row_count {
-            let row = match beatmap_set_table.get_row(row_idx) {
-                Ok(row) => row,
-                Err(e) => {
-                    tracing::debug!("Failed to get row {}: {}", row_idx, e);
-                    continue;
-                }
-            };
-
-            // Skip sets marked for deletion
-            if let Some(Value::Bool(true)) = row.get("DeletePending") {
-                continue;
-            }
-
-            // Parse the beatmap set
-            if let Some(set) = self.parse_beatmap_set(
-                &row,
-                beatmap_table.as_ref(),
-                metadata_table.as_ref(),
-                ruleset_table.as_ref(),
-                file_table.as_ref(),
-            ) {
-                result.push(set);
-            }
-        }
-
-        tracing::info!(
-            "Successfully loaded {} beatmap sets from Realm database",
-            result.len()
-        );
-        Ok(result)
-    }
-
-    /// Parse a BeatmapSetInfo row into a LazerBeatmapSet
-    fn parse_beatmap_set(
-        &self,
-        row: &Row,
-        beatmap_table: Option<&Table>,
-        metadata_table: Option<&Table>,
-        ruleset_table: Option<&Table>,
-        file_table: Option<&Table>,
-    ) -> Option<LazerBeatmapSet> {
-        // Get the ID (stored as string in Realm for UUIDs)
-        let id = match row.get("ID") {
-            Some(Value::String(uuid)) => uuid.clone(),
-            Some(Value::Binary(bytes)) => {
-                // UUID might be stored as binary
-                hex::encode(bytes)
-            }
-            _ => {
-                // Generate a fallback ID
-                format!("set-{}", row.entries().count())
-            }
-        };
-
-        // Get online ID
-        let online_id = match row.get("OnlineID") {
-            Some(Value::Int(id)) if *id > 0 => Some(*id as i32),
-            _ => None,
-        };
-
-        // Parse beatmaps (linked list)
-        let beatmaps =
-            self.parse_linked_beatmaps(row, beatmap_table, metadata_table, ruleset_table);
-
-        // Parse files (embedded list of RealmNamedFileUsage)
-        let files = self.parse_files(row, file_table);
-
-        Some(LazerBeatmapSet {
-            id,
-            online_id,
-            beatmaps,
-            files,
-        })
-    }
-
-    /// Parse beatmaps linked to a beatmap set
-    fn parse_linked_beatmaps(
-        &self,
-        set_row: &Row,
-        beatmap_table: Option<&Table>,
-        metadata_table: Option<&Table>,
-        ruleset_table: Option<&Table>,
-    ) -> Vec<LazerBeatmapInfo> {
-        let beatmap_table = match beatmap_table {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-
-        let mut beatmaps = Vec::new();
-
-        // Get the Beatmaps link list from the set
-        if let Some(Value::LinkList(links)) = set_row.get("Beatmaps") {
-            for link in links {
-                if let Ok(beatmap_row) = beatmap_table.get_row(link.row_number) {
-                    // Skip hidden beatmaps
-                    if let Some(Value::Bool(true)) = beatmap_row.get("Hidden") {
-                        continue;
-                    }
-
-                    if let Some(beatmap) =
-                        self.parse_beatmap(&beatmap_row, metadata_table, ruleset_table)
-                    {
-                        beatmaps.push(beatmap);
-                    }
-                }
-            }
-        }
-
-        beatmaps
-    }
-
-    /// Parse a single beatmap row
-    fn parse_beatmap(
-        &self,
-        row: &Row,
-        metadata_table: Option<&Table>,
-        ruleset_table: Option<&Table>,
-    ) -> Option<LazerBeatmapInfo> {
-        // Get ID (stored as string or binary UUID)
-        let id = match row.get("ID") {
-            Some(Value::String(uuid)) => uuid.clone(),
-            Some(Value::Binary(bytes)) => hex::encode(bytes),
-            _ => format!("beatmap-{}", row.entries().count()),
-        };
-
-        // Get online ID
-        let online_id = match row.get("OnlineID") {
-            Some(Value::Int(id)) if *id > 0 => Some(*id as i32),
-            _ => None,
-        };
-
-        // Get hash (SHA-256)
-        let hash = match row.get("Hash") {
-            Some(Value::String(h)) => h.clone(),
-            _ => String::new(),
-        };
-
-        // Get MD5 hash
-        let md5_hash = match row.get("MD5Hash") {
-            Some(Value::String(h)) => h.clone(),
-            _ => String::new(),
-        };
-
-        // Get version/difficulty name
-        let version = match row.get("DifficultyName") {
-            Some(Value::String(v)) => v.clone(),
-            _ => String::new(),
-        };
-
-        // Get length in milliseconds (Length is stored in seconds as double)
-        let length_ms = match row.get("Length") {
-            Some(Value::Double(len)) => (*len * 1000.0) as u64,
-            _ => 0,
-        };
-
-        // Get BPM
-        let bpm = match row.get("BPM") {
-            Some(Value::Double(b)) => *b,
-            _ => 120.0,
-        };
-
-        // Get star rating
-        let star_rating = match row.get("StarRating") {
-            Some(Value::Double(sr)) => Some(*sr as f32),
-            _ => None,
-        };
-
-        // Get status
-        let ranked_status = match row.get("StatusInt") {
-            Some(Value::Int(status)) => Self::convert_lazer_status(*status as i32),
-            _ => None,
-        };
-
-        // Get game mode from Ruleset link
-        let mode = self.parse_ruleset(row, ruleset_table);
-
-        // Get metadata from linked BeatmapMetadata
-        let metadata = self.parse_metadata(row, metadata_table);
-
-        // Get difficulty settings from embedded Difficulty object
-        let difficulty = self.parse_difficulty(row);
-
-        Some(LazerBeatmapInfo {
-            id,
-            online_id,
-            hash,
-            md5_hash,
-            metadata,
-            difficulty,
-            version,
-            mode,
-            length_ms,
-            bpm,
-            star_rating,
-            ranked_status,
-        })
-    }
-
-    /// Parse metadata from a linked BeatmapMetadata object
-    fn parse_metadata(&self, beatmap_row: &Row, metadata_table: Option<&Table>) -> BeatmapMetadata {
-        let metadata_table = match metadata_table {
-            Some(t) => t,
-            None => return BeatmapMetadata::default(),
-        };
-
-        // Get the Metadata link
-        let metadata_row = match beatmap_row.get("Metadata") {
-            Some(Value::Link(link)) => match metadata_table.get_row(link.row_number) {
-                Ok(row) => row,
-                Err(_) => return BeatmapMetadata::default(),
-            },
-            _ => return BeatmapMetadata::default(),
-        };
-
-        let title = match metadata_row.get("Title") {
-            Some(Value::String(t)) => t.clone(),
-            _ => String::new(),
-        };
-
-        let title_unicode = match metadata_row.get("TitleUnicode") {
-            Some(Value::String(t)) if !t.is_empty() => Some(t.clone()),
-            _ => None,
-        };
-
-        let artist = match metadata_row.get("Artist") {
-            Some(Value::String(a)) => a.clone(),
-            _ => String::new(),
-        };
-
-        let artist_unicode = match metadata_row.get("ArtistUnicode") {
-            Some(Value::String(a)) if !a.is_empty() => Some(a.clone()),
-            _ => None,
-        };
-
-        let creator = match metadata_row.get("Author") {
-            // Note: lazer uses "Author" not "Creator"
-            Some(Value::String(c)) => c.clone(),
-            _ => String::new(),
-        };
-
-        let source = match metadata_row.get("Source") {
-            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
-            _ => None,
-        };
-
-        let tags: Vec<String> = match metadata_row.get("Tags") {
-            Some(Value::String(t)) => t.split_whitespace().map(String::from).collect(),
-            _ => Vec::new(),
-        };
-
-        // Get beatmap IDs from the beatmap row, not metadata
-        let beatmap_id = match beatmap_row.get("OnlineID") {
-            Some(Value::Int(id)) if *id > 0 => Some(*id as i32),
-            _ => None,
-        };
-
-        // Get set ID from linked BeatmapSet if available
-        let beatmap_set_id = None; // Will be set by the caller
-
-        BeatmapMetadata {
-            title,
-            title_unicode,
-            artist,
-            artist_unicode,
-            creator,
-            source,
-            tags,
-            beatmap_id,
-            beatmap_set_id,
-        }
-    }
-
-    /// Parse difficulty settings from a beatmap row
-    fn parse_difficulty(&self, beatmap_row: &Row) -> BeatmapDifficulty {
-        // In lazer, Difficulty is stored as an embedded object (subtable)
-        // Try to access it as a Table value first
-        if let Some(Value::Table(difficulty_rows)) = beatmap_row.get("Difficulty") {
-            if let Some(diff_row) = difficulty_rows.first() {
-                return BeatmapDifficulty {
-                    hp_drain: Self::get_float_value(diff_row, "DrainRate").unwrap_or(5.0),
-                    circle_size: Self::get_float_value(diff_row, "CircleSize").unwrap_or(5.0),
-                    overall_difficulty: Self::get_float_value(diff_row, "OverallDifficulty")
-                        .unwrap_or(5.0),
-                    approach_rate: Self::get_float_value(diff_row, "ApproachRate").unwrap_or(5.0),
-                    slider_multiplier: Self::get_double_value(diff_row, "SliderMultiplier")
-                        .unwrap_or(1.4),
-                    slider_tick_rate: Self::get_double_value(diff_row, "SliderTickRate")
-                        .unwrap_or(1.0),
-                };
-            }
-        }
-
-        // Fallback: try to get difficulty values directly from the beatmap row
-        BeatmapDifficulty {
-            hp_drain: Self::get_float_value(beatmap_row, "DrainRate").unwrap_or(5.0),
-            circle_size: Self::get_float_value(beatmap_row, "CircleSize").unwrap_or(5.0),
-            overall_difficulty: Self::get_float_value(beatmap_row, "OverallDifficulty")
-                .unwrap_or(5.0),
-            approach_rate: Self::get_float_value(beatmap_row, "ApproachRate").unwrap_or(5.0),
-            slider_multiplier: Self::get_double_value(beatmap_row, "SliderMultiplier")
-                .unwrap_or(1.4),
-            slider_tick_rate: Self::get_double_value(beatmap_row, "SliderTickRate").unwrap_or(1.0),
-        }
-    }
-
-    /// Helper to get a float value from a row
-    fn get_float_value(row: &Row, name: &str) -> Option<f32> {
-        match row.get(name) {
-            Some(Value::Float(v)) => Some(*v),
-            Some(Value::Double(v)) => Some(*v as f32),
-            _ => None,
-        }
-    }
-
-    /// Helper to get a double value from a row
-    fn get_double_value(row: &Row, name: &str) -> Option<f64> {
-        match row.get(name) {
-            Some(Value::Double(v)) => Some(*v),
-            Some(Value::Float(v)) => Some(*v as f64),
-            _ => None,
-        }
-    }
-
-    /// Parse ruleset (game mode) from a linked RulesetInfo
-    fn parse_ruleset(&self, beatmap_row: &Row, ruleset_table: Option<&Table>) -> GameMode {
-        let ruleset_table = match ruleset_table {
-            Some(t) => t,
-            None => return GameMode::Osu,
-        };
-
-        let ruleset_row = match beatmap_row.get("Ruleset") {
-            Some(Value::Link(link)) => match ruleset_table.get_row(link.row_number) {
-                Ok(row) => row,
-                Err(_) => return GameMode::Osu,
-            },
-            _ => return GameMode::Osu,
-        };
-
-        // Get OnlineID which corresponds to game mode
-        match ruleset_row.get("OnlineID") {
-            Some(Value::Int(0)) => GameMode::Osu,
-            Some(Value::Int(1)) => GameMode::Taiko,
-            Some(Value::Int(2)) => GameMode::Catch,
-            Some(Value::Int(3)) => GameMode::Mania,
-            _ => GameMode::Osu,
-        }
-    }
-
-    /// Parse files from embedded RealmNamedFileUsage list
-    fn parse_files(&self, set_row: &Row, file_table: Option<&Table>) -> Vec<LazerNamedFile> {
-        let mut files = Vec::new();
-
-        // Files are stored as an embedded list (subtable)
-        if let Some(Value::Table(file_rows)) = set_row.get("Files") {
-            for file_row in file_rows {
-                let filename = match file_row.get("Filename") {
-                    Some(Value::String(f)) => f.clone(),
-                    _ => continue,
-                };
-
-                // Get the hash from the linked File object
-                let hash = match file_row.get("File") {
-                    Some(Value::Link(link)) => {
-                        // Look up the File in the file table to get its Hash
-                        if let Some(ft) = file_table {
-                            if let Ok(file_entry) = ft.get_row(link.row_number) {
-                                match file_entry.get("Hash") {
-                                    Some(Value::String(h)) => h.clone(),
-                                    _ => String::new(),
-                                }
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            // Can't look up, use placeholder
-                            format!("file-{}", link.row_number)
-                        }
-                    }
-                    _ => String::new(),
-                };
-
-                files.push(LazerNamedFile { filename, hash });
-            }
-        }
-
-        files
+        Ok((self.sets.clone(), timing))
     }
 
     /// Convert lazer's BeatmapOnlineStatus enum to our RankedStatus
@@ -1145,94 +311,260 @@ impl LazerDatabase {
     }
 }
 
+/// Find `realm-export` next to the running executable, then through `OSU_SYNC_REALM_EXPORT`
+fn find_realm_export(exe_dir: Option<&Path>, env_value: Option<OsString>) -> Result<PathBuf> {
+    if let Some(dir) = exe_dir {
+        for name in ["realm-export.exe", "realm-export.dll"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    if let Some(value) = env_value.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(Error::Realm(format!(
+            "realm-export helper not found: {} points to {}, which is not a file",
+            REALM_EXPORT_ENV,
+            path.display()
+        )));
+    }
+
+    let searched = exe_dir.map_or_else(
+        || "the osu-sync folder".to_string(),
+        |dir| dir.display().to_string(),
+    );
+    Err(Error::Realm(format!(
+        "realm-export helper not found in {searched} and {REALM_EXPORT_ENV} is not set. \
+         Build it with `dotnet publish tools/realm-export -c Release -o <osu-sync folder>` \
+         or set {REALM_EXPORT_ENV} to the path of realm-export.exe"
+    )))
+}
+
+fn run_realm_export(helper: &Path, realm_path: &Path) -> Result<Vec<u8>> {
+    let is_dll = helper
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"));
+    let mut command = if is_dll {
+        let mut dotnet = Command::new("dotnet");
+        dotnet.arg(helper);
+        dotnet
+    } else {
+        Command::new(helper)
+    };
+
+    let output = command
+        .arg("export")
+        .arg(realm_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| {
+            if is_dll && e.kind() == std::io::ErrorKind::NotFound {
+                Error::Realm(missing_runtime_message("`dotnet` is not on PATH."))
+            } else {
+                Error::Realm(format!("could not start {}: {}", helper.display(), e))
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(Error::Realm(match output.status.code() {
+        Some(code) if is_dotnet_host_failure(code) => missing_runtime_message(&stderr),
+        _ => format!("realm-export failed ({}): {}", output.status, stderr),
+    }))
+}
+
+/// The .NET host reports a missing or unusable runtime with HRESULTs 0x800080xx
+fn is_dotnet_host_failure(code: i32) -> bool {
+    (code as u32) & 0xFFFF_FF00 == 0x8000_8000
+}
+
+fn missing_runtime_message(detail: &str) -> String {
+    format!(
+        "realm-export needs the .NET 8 runtime, which was not found. \
+         Install it from {DOTNET_DOWNLOAD}. {detail}"
+    )
+}
+
+fn parse_realm_export(json: &[u8]) -> Result<Vec<LazerBeatmapSet>> {
+    let exported: Vec<ExportedSet> = serde_json::from_slice(json)
+        .map_err(|e| Error::Realm(format!("could not parse realm-export output: {}", e)))?;
+    Ok(exported
+        .into_iter()
+        .filter(|set| !set.delete_pending)
+        .map(convert_exported_set)
+        .collect())
+}
+
+fn positive(id: i32) -> Option<i32> {
+    (id > 0).then_some(id)
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
+fn convert_exported_set(set: ExportedSet) -> LazerBeatmapSet {
+    let online_id = positive(set.online_id);
+    LazerBeatmapSet {
+        id: set.id,
+        online_id,
+        beatmaps: set
+            .beatmaps
+            .into_iter()
+            .filter(|beatmap| !beatmap.hidden)
+            .map(|beatmap| convert_exported_beatmap(beatmap, online_id))
+            .collect(),
+        files: set
+            .files
+            .into_iter()
+            .filter_map(|file| {
+                Some(LazerNamedFile {
+                    filename: file.filename?,
+                    hash: file.hash?,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn convert_exported_beatmap(
+    beatmap: ExportedBeatmap,
+    set_online_id: Option<i32>,
+) -> LazerBeatmapInfo {
+    let online_id = positive(beatmap.online_id);
+    LazerBeatmapInfo {
+        id: beatmap.id,
+        online_id,
+        hash: beatmap.hash.unwrap_or_default(),
+        md5_hash: beatmap.md5_hash.unwrap_or_default(),
+        metadata: BeatmapMetadata {
+            title: beatmap.title.unwrap_or_default(),
+            title_unicode: non_empty(beatmap.title_unicode),
+            artist: beatmap.artist.unwrap_or_default(),
+            artist_unicode: non_empty(beatmap.artist_unicode),
+            creator: beatmap.author.unwrap_or_default(),
+            source: non_empty(beatmap.source),
+            tags: beatmap
+                .tags
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
+            beatmap_id: online_id,
+            beatmap_set_id: set_online_id,
+        },
+        difficulty: BeatmapDifficulty {
+            hp_drain: beatmap.drain_rate,
+            circle_size: beatmap.circle_size,
+            overall_difficulty: beatmap.overall_difficulty,
+            approach_rate: beatmap.approach_rate,
+            slider_multiplier: beatmap.slider_multiplier,
+            slider_tick_rate: beatmap.slider_tick_rate,
+        },
+        version: beatmap.difficulty_name.unwrap_or_default(),
+        mode: match beatmap.ruleset {
+            1 => GameMode::Taiko,
+            2 => GameMode::Catch,
+            3 => GameMode::Mania,
+            _ => GameMode::Osu,
+        },
+        length_ms: beatmap.length_ms as u64,
+        bpm: beatmap.bpm,
+        star_rating: (beatmap.star_rating >= 0.0).then_some(beatmap.star_rating as f32),
+        ranked_status: LazerDatabase::convert_lazer_status(beatmap.status),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
-    fn make_db(temp_dir: &TempDir) -> LazerDatabase {
-        let data_path = temp_dir.path().join("lazer");
-        fs::create_dir_all(data_path.join("files")).expect("Failed to create files dir");
-        LazerDatabase {
-            data_path: data_path.clone(),
-            file_store: LazerFileStore::new(&data_path),
-            realm_group: None,
-            cache_root: Some(temp_dir.path().join("cache")),
-        }
-    }
-
-    fn listing(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = walkdir::WalkDir::new(dir)
-            .into_iter()
-            .map(|e| {
-                e.unwrap()
-                    .path()
-                    .strip_prefix(dir)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        names.sort();
-        names
-    }
-
     #[test]
-    fn scan_writes_cache_outside_install() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let db = make_db(&temp_dir);
-        let blob = temp_dir.path().join("lazer/files/ab/abcd/abcdef");
-        fs::create_dir_all(blob.parent().unwrap()).unwrap();
-        fs::write(&blob, b"not a beatmap").unwrap();
-        let before = listing(&temp_dir.path().join("lazer"));
+    fn parses_realm_export_json() {
+        let sets = parse_realm_export(include_bytes!("fixtures/realm-export.json")).unwrap();
 
-        db.get_all_beatmap_sets_timed().unwrap();
-
+        let ids: Vec<&str> = sets.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
-            before,
-            vec![
-                "",
-                "files",
-                "files/ab",
-                "files/ab/abcd",
-                "files/ab/abcd/abcdef"
+            ids,
+            [
+                "095c3dda-8978-4df0-ba2e-c76e1198636c",
+                "28beffbe-be5f-436a-9264-51be6287a34c"
             ]
         );
-        assert_eq!(listing(&temp_dir.path().join("lazer")), before);
-        let cached = listing(&temp_dir.path().join("cache"));
-        assert_eq!(cached.len(), 2);
+
+        let triangles = &sets[0];
+        assert_eq!(triangles.online_id, None);
+        assert_eq!(triangles.beatmaps.len(), 1);
+        assert_eq!(triangles.beatmaps[0].version, "peppy");
+        assert_eq!(triangles.beatmaps[0].ranked_status, None);
+        assert_eq!(triangles.files.len(), 2);
+        assert_eq!(triangles.files[0].filename, "audio.mp3");
         assert_eq!(
-            cached[1],
-            db.cache_path()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
+            triangles.files[0].hash,
+            "47b895484e7751f3ab429694ff6dbf21e774ab023e4f6c5b481476f04ff22f0f"
         );
-        assert!(cached[1].starts_with("lazer-") && cached[1].ends_with(".json"));
+
+        let marisa = &sets[1];
+        assert_eq!(marisa.online_id, Some(243));
+        assert_eq!(marisa.files.len(), 5);
+        let versions: Vec<&str> = marisa.beatmaps.iter().map(|b| b.version.as_str()).collect();
+        assert_eq!(versions, ["Easy", "Normal"]);
+
+        let easy = &marisa.beatmaps[0];
+        assert_eq!(easy.id, "3e8bafd7-0772-40db-86d3-3673752153dd");
+        assert_eq!(easy.online_id, Some(1145));
+        assert_eq!(easy.md5_hash, "8b29e773161340bc1fff247a6ab749d1");
+        assert_eq!(easy.mode, GameMode::Osu);
+        assert_eq!(easy.length_ms, 220942);
+        assert_eq!(easy.star_rating, Some(1.918_921_2));
+        assert_eq!(easy.ranked_status, Some(RankedStatus::Ranked));
+        assert_eq!(easy.metadata.artist, "IOSYS");
+        assert_eq!(easy.metadata.creator, "DJPop");
+        assert_eq!(easy.metadata.beatmap_id, Some(1145));
+        assert_eq!(easy.metadata.beatmap_set_id, Some(243));
+        assert_eq!(easy.difficulty.circle_size, 5.0);
+        assert_eq!(easy.difficulty.slider_multiplier, 0.5);
     }
 
     #[test]
-    fn cache_load_respects_file_store_signature() {
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let db = make_db(&temp_dir);
+    fn missing_helper_is_an_error() {
+        let dir = TempDir::new().unwrap();
 
-        let sets: Vec<LazerBeatmapSet> = Vec::new();
-        db.save_to_cache(&sets, 0, 0, Some("signature-a".to_string()));
+        let err = find_realm_export(Some(dir.path()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("realm-export helper not found"), "{err}");
+        assert!(err.contains(REALM_EXPORT_ENV), "{err}");
 
-        let loaded = db.load_from_cache(0, Some("signature-a"));
-        assert!(
-            loaded.is_some(),
-            "Cache should load with matching signature"
+        let missing = dir.path().join("nowhere").join("realm-export.exe");
+        let err = find_realm_export(Some(dir.path()), Some(missing.clone().into_os_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+
+        std::fs::write(dir.path().join("realm-export.dll"), b"").unwrap();
+        assert_eq!(
+            find_realm_export(Some(dir.path()), Some(missing.into_os_string())).unwrap(),
+            dir.path().join("realm-export.dll")
         );
+    }
 
-        let loaded = db.load_from_cache(0, Some("signature-b"));
-        assert!(
-            loaded.is_none(),
-            "Cache should invalidate when signature changes"
-        );
+    #[test]
+    fn missing_runtime_names_dotnet_8() {
+        assert!(is_dotnet_host_failure(0x8000_8096_u32 as i32));
+        assert!(!is_dotnet_host_failure(1));
+        let message = missing_runtime_message("");
+        assert!(message.contains(".NET 8"), "{message}");
+        assert!(message.contains(DOTNET_DOWNLOAD), "{message}");
     }
 }
 

@@ -83,7 +83,7 @@ LinkType { Symlink, Junction, HardLink }
 
 ## NOTES
 
-- **LazerDatabase** uses realm-db-reader (read-only)
+- **LazerDatabase** runs the `realm-export` helper (tools/realm-export) and parses its JSON
 - **StableDatabase** uses osu-db crate (read-only)
 - **LazerFileStore**: Files stored as `{hash[0..2]}/{hash}` in files directory
 - **Junctions on Windows**: Preferred over symlinks (no admin)

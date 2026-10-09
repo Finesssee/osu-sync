@@ -223,19 +223,11 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
     };
 
     let lazer_result = if let Some(ref lazer_path) = config.lazer_path {
-        match LazerDatabase::open(lazer_path) {
-            Ok(db) => match db.get_all_beatmap_sets() {
-                Ok(sets) => Some((lazer_path.clone(), sets.len())),
-                Err(e) => {
-                    eprintln!("Warning: Failed to read lazer database: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("Warning: Failed to open lazer database: {}", e);
-                None
-            }
-        }
+        let db = LazerDatabase::open(lazer_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open lazer database: {}", e))?;
+        let sets = db.get_all_beatmap_sets()?;
+        let named_files: usize = sets.iter().map(|s| s.files.len()).sum();
+        Some((lazer_path.clone(), sets.len(), named_files))
     } else {
         None
     };
@@ -250,10 +242,11 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
                         "beatmap_sets": count
                     })
                 }),
-                "lazer": lazer_result.as_ref().map(|(path, count)| {
+                "lazer": lazer_result.as_ref().map(|(path, count, named_files)| {
                     serde_json::json!({
                         "path": path.to_string_lossy(),
-                        "beatmap_sets": count
+                        "beatmap_sets": count,
+                        "named_files": named_files
                     })
                 })
             })
@@ -266,7 +259,7 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
         } else {
             println!("osu!stable: Not configured or not found");
         }
-        if let Some((path, count)) = lazer_result {
+        if let Some((path, count, _)) = lazer_result {
             println!("osu!lazer:  {} ({} beatmap sets)", path.display(), count);
         } else {
             println!("osu!lazer:  Not configured or not found");

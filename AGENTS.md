@@ -27,7 +27,7 @@ osu-sync/
 | Add sync feature | `core/src/sync/` | SyncEngine orchestrates |
 | Add beatmap filter | `core/src/filter/` | FilterCriteria + FilterEngine |
 | New TUI screen | `cli/src/screens/` | Add module + AppState variant |
-| Lazer DB queries | `core/src/lazer/database.rs` | Uses realm-db-reader |
+| Lazer DB queries | `core/src/lazer/database.rs` | Runs tools/realm-export (.NET 8) |
 | Stable DB queries | `core/src/lazer/database.rs` | StableDatabase uses osu-db crate |
 | Add widget | `cli/src/widgets/` | Reusable TUI components |
 | Unified storage | `core/src/unified/` | Symlink/junction logic |
@@ -119,7 +119,7 @@ cargo run -- --gui             # GUI mode (requires feature)
 | `iced` | Optional GUI (feature-gated) |
 | `rosu-map` | osu! beatmap parsing |
 | `osu-db` | osu!stable database parsing |
-| `realm-db-reader` | osu!lazer Realm database |
+| `tools/realm-export` | .NET 8 helper that exports osu!lazer's Realm database as JSON |
 | `rayon` | Parallel processing |
 | `notify` | File watching |
 | `sysinfo` | Process detection |
