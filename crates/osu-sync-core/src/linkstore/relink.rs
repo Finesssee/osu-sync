@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -239,56 +240,53 @@ impl Relinker {
             version: CACHE_VERSION,
             entries: HashMap::new(),
         };
-        let mut limited: HashSet<PathBuf> = HashSet::new();
+        let limited = Mutex::new(HashSet::new());
         let total = inspected.len();
-        for (i, c) in inspected.into_iter().enumerate() {
-            if c.hashed {
-                report.hashed_files += 1;
-                report.hashed_bytes += c.size;
-            }
-            let mut stat = (c.size, c.mtime);
-            match &c.found {
-                Found::Error(e) => report.errors.push(e.clone()),
-                Found::Skip(reason, note) => {
-                    report.skip(*reason);
-                    report.notes.extend(note.clone());
+        let mut done = 0;
+        for batch in folder_batches(inspected) {
+            let settled: Vec<Vec<(Candidate, Settled)>> = batch
+                .into_par_iter()
+                .map(|folder| {
+                    folder
+                        .into_iter()
+                        .map(|c| {
+                            let settled = self.settle(&c, &limited);
+                            (c, settled)
+                        })
+                        .collect()
+                })
+                .collect();
+            for (c, settled) in settled.into_iter().flatten() {
+                if c.hashed {
+                    report.hashed_files += 1;
+                    report.hashed_bytes += c.size;
                 }
-                Found::Blob {
-                    blob,
-                    already_linked,
-                } => {
-                    let plan = Relink {
-                        stable: c.stable.clone(),
-                        blob: blob.clone(),
-                        decision: decide(&c.rel, true, *already_linked, limited.contains(blob)),
-                    };
-                    match self.apply(&plan, &c, &mut limited) {
-                        Ok(None) => {
-                            report.relinked += 1;
-                            report.bytes_reclaimed += c.size;
-                            if let Ok(meta) = fs::metadata(&c.stable) {
-                                stat = (meta.len(), mtime_key(&meta));
-                            }
-                        }
-                        Ok(Some((reason, note))) => {
-                            report.skip(reason);
-                            report.notes.extend(note);
-                        }
-                        Err(e) => report.errors.push(format!("{}: {e}", c.stable.display())),
+                let mut stat = (c.size, c.mtime);
+                match settled {
+                    Settled::Error(e) => report.errors.push(e),
+                    Settled::Skip(reason, note) => {
+                        report.skip(reason);
+                        report.notes.extend(note);
+                    }
+                    Settled::Relinked(after) => {
+                        report.relinked += 1;
+                        report.bytes_reclaimed += c.size;
+                        stat = after.unwrap_or(stat);
                     }
                 }
+                if let (Some(key), false) = (c.stable.to_str(), c.sha.is_empty()) {
+                    next.entries.insert(
+                        key.to_string(),
+                        CachedHash {
+                            size: stat.0,
+                            mtime: stat.1,
+                            sha: c.sha.clone(),
+                        },
+                    );
+                }
+                done += 1;
             }
-            if let (Some(key), false) = (c.stable.to_str(), c.sha.is_empty()) {
-                next.entries.insert(
-                    key.to_string(),
-                    CachedHash {
-                        size: stat.0,
-                        mtime: stat.1,
-                        sha: c.sha.clone(),
-                    },
-                );
-            }
-            progress(i + 1, total);
+            progress(done, total);
         }
 
         let limit_hits = report.skipped.get(&RelinkSkip::LinkLimit).copied();
@@ -415,13 +413,42 @@ impl Relinker {
         Some(c)
     }
 
+    /// Settles one inspected candidate: replaces it when its plan says so. Runs in
+    /// parallel across folders, so a blob that hit the link limit is shared through `limited`.
+    fn settle(&self, c: &Candidate, limited: &Mutex<HashSet<PathBuf>>) -> Settled {
+        match &c.found {
+            Found::Error(e) => Settled::Error(e.clone()),
+            Found::Skip(reason, note) => Settled::Skip(*reason, note.clone()),
+            Found::Blob {
+                blob,
+                already_linked,
+            } => {
+                let limit_hit = limited.lock().is_ok_and(|set| set.contains(blob));
+                let plan = Relink {
+                    stable: c.stable.clone(),
+                    blob: blob.clone(),
+                    decision: decide(&c.rel, true, *already_linked, limit_hit),
+                };
+                match self.apply(&plan, c, limited) {
+                    Ok(None) => Settled::Relinked(
+                        fs::metadata(&c.stable)
+                            .ok()
+                            .map(|meta| (meta.len(), mtime_key(&meta))),
+                    ),
+                    Ok(Some((reason, note))) => Settled::Skip(reason, note),
+                    Err(e) => Settled::Error(format!("{}: {e}", c.stable.display())),
+                }
+            }
+        }
+    }
+
     /// Replaces the stable file with a link to its blob when the plan says so.
     /// Returns the skip reason and note when it leaves the file as it is.
     fn apply(
         &self,
         plan: &Relink,
         c: &Candidate,
-        limited: &mut HashSet<PathBuf>,
+        limited: &Mutex<HashSet<PathBuf>>,
     ) -> io::Result<Option<(RelinkSkip, Option<String>)>> {
         if let Decision::Skip(reason) = plan.decision {
             return Ok(Some((reason, None)));
@@ -439,7 +466,9 @@ impl Relinker {
             Err(e) => {
                 return match classify_hard_link_error(&e) {
                     HardLinkFailure::LinkLimit => {
-                        limited.insert(plan.blob.clone());
+                        if let Ok(mut set) = limited.lock() {
+                            set.insert(plan.blob.clone());
+                        }
                         Ok(Some((RelinkSkip::LinkLimit, None)))
                     }
                     HardLinkFailure::CrossVolume => Ok(Some((RelinkSkip::CrossVolume, None))),
@@ -475,6 +504,35 @@ impl Relinker {
             }
         }
     }
+}
+
+/// What happened to one candidate in the replace phase.
+enum Settled {
+    Error(String),
+    Skip(RelinkSkip, Option<String>),
+    /// Replaced; holds the size and mtime of the link now in its place.
+    Relinked(Option<(u64, (u64, u32))>),
+}
+
+/// Folders per parallel batch; progress is reported after each batch.
+const FOLDERS_PER_BATCH: usize = 256;
+
+/// Splits candidates in walk order into runs of one folder, then into batches. A run stays
+/// on one thread; `link_temp` claims temp names atomically, so two runs of a folder may share it.
+fn folder_batches(candidates: Vec<Candidate>) -> Vec<Vec<Vec<Candidate>>> {
+    let mut folders: Vec<Vec<Candidate>> = Vec::new();
+    for c in candidates {
+        match folders.last_mut() {
+            Some(folder) if folder[0].stable.parent() == c.stable.parent() => folder.push(c),
+            _ => folders.push(vec![c]),
+        }
+    }
+    let mut batches = Vec::new();
+    let mut rest = folders.into_iter().peekable();
+    while rest.peek().is_some() {
+        batches.push(rest.by_ref().take(FOLDERS_PER_BATCH).collect());
+    }
+    batches
 }
 
 fn locked(path: &Path, e: &io::Error) -> Found {
@@ -966,6 +1024,52 @@ mod tests {
             assert!(!same(stable, &blob));
         }
         assert_eq!(names(&fx.songs.join("1 A - B")), vec!["audio.mp3"]);
+    }
+
+    #[test]
+    fn link_limit_reached_midway_across_parallel_folders_is_exact() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static LINKS_LEFT: AtomicUsize = AtomicUsize::new(5);
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let folders = FOLDERS_PER_BATCH + 44;
+        let mut stables = Vec::new();
+        for i in 0..folders {
+            stables.push(fx.stable(&format!("{i} A - B/audio.mp3"), AUDIO));
+            stables.push(fx.stable(&format!("{i} A - B/hit.wav"), AUDIO));
+        }
+        let mut r = fx.relinker();
+        r.link = |src, dst| match LINKS_LEFT
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        {
+            Ok(_) => fs::hard_link(src, dst),
+            Err(_) => Err(io::Error::from_raw_os_error(LINK_LIMIT_OS_ERROR)),
+        };
+        let mut calls = Vec::new();
+
+        let report = r.run(&mut |done, total| calls.push((done, total))).unwrap();
+
+        let total = 2 * folders;
+        assert_eq!(report.relinked, 5);
+        assert_eq!(
+            report.skipped,
+            skipped(&[(RelinkSkip::LinkLimit, total - 5)])
+        );
+        assert_eq!(report.errors, Vec::<String>::new());
+        assert_eq!(report.bytes_reclaimed, 5 * AUDIO.len() as u64);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.last(), Some(&(total, total)));
+        let linked = stables.iter().filter(|s| same(s, &blob)).count();
+        assert_eq!(linked, 5);
+        for stable in &stables {
+            assert_eq!(fs::read(stable).unwrap(), AUDIO);
+        }
+        for i in 0..folders {
+            assert_eq!(
+                names(&fx.songs.join(format!("{i} A - B"))),
+                vec!["audio.mp3", "hit.wav"]
+            );
+        }
     }
 
     #[test]
