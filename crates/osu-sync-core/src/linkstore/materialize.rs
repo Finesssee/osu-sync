@@ -116,8 +116,16 @@ pub enum SkipReason {
     NoOsuFiles,
     #[error("already in stable as {folder} (md5 {md5})")]
     AlreadyInStable { md5: String, folder: String },
-    #[error("{filename} already exists in {folder}")]
-    DuplicateOsuFilename { filename: String, folder: String },
+    /// A `.osu` name of the set is taken, so none of its `maps` reach stable.
+    #[error("skipped the whole set because {filename} already exists in {folder}; maps not placed: {maps}")]
+    DuplicateOsuFilename {
+        filename: String,
+        folder: String,
+        maps: usize,
+    },
+    /// One `.osu` file of a placed row whose name is taken; the row's other maps are placed.
+    #[error("{filename} already exists in {folder}, so this map was not placed")]
+    OsuFilenameTaken { filename: String, folder: String },
     #[error("{a} and {b} differ only in case or normalization")]
     CaseCollision { a: String, b: String },
     #[error("unsafe filename {filename:?}")]
@@ -482,19 +490,28 @@ impl StableClaims {
                     _ => continue,
                 },
             };
-            let duplicate = SkipReason::DuplicateOsuFilename {
-                filename: filename.clone(),
-                folder: owner.to_string(),
-            };
             if repeated.is_none() {
-                return Err(duplicate);
+                return Err(SkipReason::DuplicateOsuFilename {
+                    filename: filename.clone(),
+                    folder: owner.to_string(),
+                    maps: osu_keys.len(),
+                });
             }
             placements.retain(|p| name_key(&p.dest.to_string_lossy()) != *key);
-            left_out.push(duplicate);
+            left_out.push((filename.clone(), owner.to_string()));
         }
         if left_out.len() == osu_keys.len() {
-            return Err(left_out.remove(0));
+            let (filename, folder) = left_out.swap_remove(0);
+            return Err(SkipReason::DuplicateOsuFilename {
+                filename,
+                folder,
+                maps: osu_keys.len(),
+            });
         }
+        let left_out = left_out
+            .into_iter()
+            .map(|(filename, folder)| SkipReason::OsuFilenameTaken { filename, folder })
+            .collect();
 
         placements.sort_by_key(|p| is_osu(&p.dest));
         Ok(PlannedSet {
@@ -1433,7 +1450,46 @@ mod tests {
             SkipReason::DuplicateOsuFilename {
                 filename: OSU_NAME.to_string(),
                 folder: "Old Folder".to_string(),
+                maps: 1,
             }
+        );
+        assert_eq!(
+            only_skip(&report).to_string(),
+            "skipped the whole set because Artist - Title (Mapper) [Easy].osu already exists in Old Folder; maps not placed: 1"
+        );
+        assert!(!fx.songs.join("1001 Artist - Title").exists());
+    }
+
+    #[test]
+    fn duplicate_osu_filename_skip_counts_every_map_of_the_set() {
+        let fx = Fixture::new();
+        let mut s = fx.basic_set();
+        let hard: &[u8] = b"osu file format v14
+
+[General]
+AudioFilename: audio.mp3
+// hard
+";
+        let hash = fx.blob(hard);
+        s.files.push(LazerNamedFile {
+            filename: "Artist - Title (Mapper) [Hard].osu".to_string(),
+            hash: hash.clone(),
+        });
+        s.beatmaps.push(LazerBeatmapInfo {
+            hash,
+            md5_hash: format!("{:x}", Md5::digest(hard)),
+            ..s.beatmaps[0].clone()
+        });
+        let mut claims = StableClaims::default();
+        claims.claim("Old Folder", Some(OSU_NAME), None);
+        let report = fx
+            .materializer()
+            .run(&[&s], &mut claims, &mut |_, _, _| ControlFlow::Continue(()))
+            .unwrap();
+
+        assert_eq!(
+            only_skip(&report).to_string(),
+            "skipped the whole set because Artist - Title (Mapper) [Easy].osu already exists in Old Folder; maps not placed: 2"
         );
         assert!(!fx.songs.join("1001 Artist - Title").exists());
     }
@@ -1454,6 +1510,7 @@ mod tests {
             SetOutcome::Skipped(SkipReason::DuplicateOsuFilename {
                 filename: OSU_NAME.to_string(),
                 folder: "1001 Artist - Title".to_string(),
+                maps: 1,
             })
         );
         assert!(!fx.songs.join("2002 Artist - Title").exists());
@@ -1474,6 +1531,7 @@ mod tests {
         let reason = SkipReason::DuplicateOsuFilename {
             filename: OSU_NAME.to_string(),
             folder: "1001 Artist - Title".to_string(),
+            maps: 1,
         };
 
         let mut claims = StableClaims::default();
@@ -1526,6 +1584,7 @@ mod tests {
             SetOutcome::Skipped(SkipReason::DuplicateOsuFilename {
                 filename: "artist - title (mapper) [easy].osu".to_string(),
                 folder: "1001 Artist - Title".to_string(),
+                maps: 1,
             })
         );
         assert!(!fx.songs.join("2002 Other - Song").exists());
@@ -1830,7 +1889,7 @@ mod tests {
 
         assert_eq!(
             report.sets[1].left_out,
-            [SkipReason::DuplicateOsuFilename {
+            [SkipReason::OsuFilenameTaken {
                 filename: normal_name.to_string(),
                 folder: "1001 Artist - Title".to_string(),
             }]
