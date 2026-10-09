@@ -32,7 +32,7 @@ pub enum RelinkSkip {
     SongsRoot,
     /// No lazer blob has this content.
     NoBlob,
-    /// The blob named by the content hash has another size, so it is not trusted.
+    /// The blob named by the content hash has another size or other bytes, so it is not trusted.
     BlobMismatch,
     /// The stable file already is the blob.
     AlreadyLinked,
@@ -42,7 +42,8 @@ pub enum RelinkSkip {
     CrossVolume,
     /// The stable file is open elsewhere or read-only.
     Locked,
-    /// The stable file changed between hashing and replacing.
+    /// The stable file changed between hashing and replacing, or no longer has the
+    /// content its cached hash says. Its cache entry is dropped.
     Changed,
 }
 
@@ -262,9 +263,11 @@ impl Relinker {
                     report.hashed_bytes += c.size;
                 }
                 let mut stat = (c.size, c.mtime);
+                let mut forget = false;
                 match settled {
                     Settled::Error(e) => report.errors.push(e),
                     Settled::Skip(reason, note) => {
+                        forget = reason == RelinkSkip::Changed;
                         report.skip(reason);
                         report.notes.extend(note);
                     }
@@ -274,7 +277,7 @@ impl Relinker {
                         stat = after.unwrap_or(stat);
                     }
                 }
-                if let (Some(key), false) = (c.stable.to_str(), c.sha.is_empty()) {
+                if let (Some(key), false) = (c.stable.to_str(), c.sha.is_empty() || forget) {
                     next.entries.insert(
                         key.to_string(),
                         CachedHash {
@@ -375,7 +378,8 @@ impl Relinker {
                     c.hashed = true;
                 }
                 Err(e) if is_locked(&e) => {
-                    c.found = locked(&c.stable, &e);
+                    let (reason, note) = locked(&c.stable, &e);
+                    c.found = Found::Skip(reason, note);
                     return Some(c);
                 }
                 Err(e) => {
@@ -406,7 +410,10 @@ impl Relinker {
                     blob,
                     already_linked,
                 },
-                Err(e) if is_locked(&e) => locked(&c.stable, &e),
+                Err(e) if is_locked(&e) => {
+                    let (reason, note) = locked(&c.stable, &e);
+                    Found::Skip(reason, note)
+                }
                 Err(e) => Found::Error(format!("{}: {e}", c.stable.display())),
             },
         };
@@ -457,6 +464,9 @@ impl Relinker {
         if meta.len() != c.size || mtime_key(&meta) != c.mtime {
             return Ok(Some((RelinkSkip::Changed, None)));
         }
+        if let Some(left) = verify(plan, c)? {
+            return Ok(Some(left));
+        }
         let folder = plan
             .stable
             .parent()
@@ -481,10 +491,7 @@ impl Relinker {
             Err(e) => {
                 let _ = fs::remove_file(&temp);
                 if is_locked(&e) {
-                    match locked(&plan.stable, &e) {
-                        Found::Skip(reason, note) => Ok(Some((reason, note))),
-                        _ => Err(e),
-                    }
+                    Ok(Some(locked(&plan.stable, &e)))
                 } else {
                     Err(e)
                 }
@@ -535,14 +542,72 @@ fn folder_batches(candidates: Vec<Candidate>) -> Vec<Vec<Vec<Candidate>>> {
     batches
 }
 
-fn locked(path: &Path, e: &io::Error) -> Found {
-    Found::Skip(
+fn locked(path: &Path, e: &io::Error) -> (RelinkSkip, Option<String>) {
+    (
         RelinkSkip::Locked,
         Some(format!(
             "left {} as it is: it is in use or read-only ({e})",
             path.display()
         )),
     )
+}
+
+/// Reads the stable file and its blob side by side right before the replace, so neither a
+/// blob with wrong bytes nor a stale cached hash can put other bytes in the stable file.
+/// Returns why the file stays as it is, or `None` when both hold the same bytes.
+fn verify(plan: &Relink, c: &Candidate) -> io::Result<Option<(RelinkSkip, Option<String>)>> {
+    let same = {
+        let mut stable = match File::open(&plan.stable) {
+            Ok(file) => file,
+            Err(e) if is_locked(&e) => return Ok(Some(locked(&plan.stable, &e))),
+            Err(e) => return Err(e),
+        };
+        let mut blob = File::open(&plan.blob)?;
+        same_bytes(&mut stable, &mut blob, c.size)?
+    };
+    if same {
+        return Ok(None);
+    }
+    if sha256(&plan.stable)? != c.sha {
+        return Ok(Some((RelinkSkip::Changed, None)));
+    }
+    Ok(Some((
+        RelinkSkip::BlobMismatch,
+        Some(format!(
+            "{} has the content hash that names {}, but their bytes differ",
+            plan.stable.display(),
+            plan.blob.display()
+        )),
+    )))
+}
+
+/// True when both readers hold the same bytes to the end. Stops at the first difference.
+fn same_bytes(a: &mut impl Read, b: &mut impl Read, size: u64) -> io::Result<bool> {
+    let chunk = usize::try_from(size).map_or(1 << 20, |n| n.clamp(1 << 12, 1 << 20));
+    let (mut x, mut y) = (vec![0u8; chunk], vec![0u8; chunk]);
+    loop {
+        let n = read_full(a, &mut x)?;
+        if read_full(b, &mut y)? != n || x[..n] != y[..n] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Reads until `buf` is full or the reader ends; returns the bytes read.
+fn read_full(input: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match input.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
 }
 
 /// Sharing and lock violations, and access denied, which a read-only file gives on rename.
@@ -1141,5 +1206,110 @@ mod tests {
             json["skipped"],
             serde_json::json!({"never_relinked": 1, "no_blob": 2})
         );
+    }
+
+    const AUDIO_SHA256: &str = "27bcb9e8840262151723ad63edf27cbab63d0e4c45d6283ba1c853d210f2e58d";
+
+    /// Hard links of the file at `path`.
+    fn links(path: &Path) -> u32 {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            };
+            let file = File::open(path).unwrap();
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: the handle stays open for the call and `info` is a valid out pointer.
+            unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle() as isize), &mut info) }
+                .unwrap();
+            info.nNumberOfLinks
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(path).unwrap().nlink() as u32
+        }
+    }
+
+    #[test]
+    fn same_bytes_reads_both_to_the_end() {
+        let big = vec![7u8; (1 << 20) + 5];
+        let mut late = big.clone();
+        late[(1 << 20) + 4] = 8;
+        let size = big.len() as u64;
+        assert!(same_bytes(&mut &big[..], &mut &big[..], size).unwrap());
+        assert!(!same_bytes(&mut &big[..], &mut &late[..], size).unwrap());
+        assert!(!same_bytes(&mut &big[..], &mut &big[..big.len() - 1], size).unwrap());
+        assert!(same_bytes(&mut &b""[..], &mut &b""[..], 0).unwrap());
+        assert!(!same_bytes(&mut &b""[..], &mut &b"x"[..], 0).unwrap());
+    }
+
+    #[test]
+    fn same_size_blob_with_other_bytes_is_never_linked() {
+        let fx = Fixture::new();
+        let blob = BlobHash::parse(AUDIO_SHA256).unwrap().path_in(&fx.files);
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        let mut tampered = AUDIO.to_vec();
+        tampered[0] ^= 0xff;
+        fs::write(&blob, &tampered).unwrap();
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+
+        let report = run(&fx.relinker());
+
+        assert_eq!(report.relinked, 0);
+        assert_eq!(report.bytes_reclaimed, 0);
+        assert_eq!(report.skipped, skipped(&[(RelinkSkip::BlobMismatch, 1)]));
+        assert_eq!(report.errors, Vec::<String>::new());
+        assert_eq!(
+            report.notes,
+            [format!(
+                "{} has the content hash that names {}, but their bytes differ",
+                stable.display(),
+                blob.display()
+            )]
+        );
+        assert_eq!(sha256(&stable).unwrap(), AUDIO_SHA256);
+        assert_eq!(links(&stable), 1);
+        assert_eq!(links(&blob), 1);
+        assert_eq!(names(stable.parent().unwrap()), ["audio.mp3"]);
+    }
+
+    #[test]
+    fn stale_cache_entry_never_replaces_new_content() {
+        let fx = Fixture::new();
+        let a: &[u8] = b"AAAAAAAAAAAAAAAAAAAA";
+        let b: &[u8] = b"BBBBBBBBBBBBBBBBBBBB";
+        let stable = fx.stable("1 A - B/audio.mp3", a);
+        let first = run(&fx.relinker());
+        assert_eq!(first.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
+        // New content at the same size and mtime, so the cache entry still matches.
+        let mtime = fs::metadata(&stable).unwrap().modified().unwrap();
+        fs::write(&stable, b).unwrap();
+        File::options()
+            .write(true)
+            .open(&stable)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let blob = fx.blob(a);
+
+        let second = run(&fx.relinker());
+
+        assert_eq!(second.relinked, 0);
+        assert_eq!(second.hashed_files, 0);
+        assert_eq!(second.skipped, skipped(&[(RelinkSkip::Changed, 1)]));
+        assert_eq!(second.errors, Vec::<String>::new());
+        assert_eq!(fs::read(&stable).unwrap(), b);
+        assert_eq!(links(&stable), 1);
+        assert!(!same(&stable, &blob));
+
+        // The stale entry was dropped, so the next run hashes the new content.
+        let third = run(&fx.relinker());
+        assert_eq!(third.hashed_files, 1);
+        assert_eq!(third.relinked, 0);
+        assert_eq!(third.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
+        assert_eq!(fs::read(&stable).unwrap(), b);
     }
 }
