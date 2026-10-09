@@ -40,7 +40,7 @@ function Test-Under([string]$Path, [string]$Parent) {
 $Root = Get-FullPath $Root
 foreach ($live in 'D:\osu!', 'D:\osu!lazer', $LazerSource, $StableSource) {
     if (Test-Under $Root $live) {
-        Write-Error "Refusing to build a sandbox at $Root because it is inside the live folder $live"
+        [Console]::Error.WriteLine("Refusing to build a sandbox at $Root because it is inside the live folder $live")
         exit 2
     }
 }
@@ -63,7 +63,7 @@ $started = Get-Date
 $allSets = Get-Content -LiteralPath $SetsJson -Raw | ConvertFrom-Json
 $chosen = @($allSets | Select-Object -First $Sets)
 if ($chosen.Count -lt $Sets) {
-    Write-Error "$SetsJson lists only $($chosen.Count) sets, fewer than -Sets $Sets"
+    [Console]::Error.WriteLine("$SetsJson lists only $($chosen.Count) sets, fewer than -Sets $Sets")
     exit 1
 }
 
