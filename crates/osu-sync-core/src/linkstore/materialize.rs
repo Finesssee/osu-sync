@@ -7,6 +7,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use md5::Md5;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
@@ -24,6 +25,9 @@ pub const STABLE_PATH_LIMIT: usize = 248;
 
 /// A space and eight characters of the set's realm ID, added when another set owns the folder name.
 const SUFFIX_LEN: usize = 9;
+
+/// MD5 of each `.osu` blob read ahead of the per-set checks, `None` when it could not be read.
+type OsuMd5s = HashMap<BlobHash, Option<String>>;
 
 const TEMP_PREFIX: &str = "osu-sync_tmp_";
 const TEMP_SUFFIX: &str = ".part";
@@ -442,9 +446,10 @@ impl Materializer {
 
     /// Plans and checks every set without writing anything.
     pub fn preview(&self, sets: &[&LazerBeatmapSet], claims: &mut StableClaims) -> Vec<SetPlan> {
+        let md5s = self.osu_md5s(sets, claims);
         sets.iter()
             .map(|set| {
-                let (plan, _) = self.check(set, claims);
+                let (plan, _) = self.check(set, claims, &md5s);
                 if let Ok(planned) = &plan.result {
                     claims.record(planned);
                 }
@@ -471,9 +476,10 @@ impl Materializer {
             report.temps_removed += 1;
         }
 
+        let md5s = self.osu_md5s(sets, claims);
         let mut checked_dirs = HashSet::new();
         for (i, set) in sets.iter().enumerate() {
-            let (plan, present) = self.check(set, claims);
+            let (plan, present) = self.check(set, claims, &md5s);
             let outcome = match plan.result {
                 Err(reason) => SetOutcome::Skipped(reason),
                 Ok(planned) => {
@@ -503,11 +509,34 @@ impl Materializer {
         Ok(report)
     }
 
-    fn check(&self, set: &LazerBeatmapSet, claims: &StableClaims) -> (SetPlan, Vec<bool>) {
+    /// Reads the MD5 of every `.osu` blob the sets plan to place, in parallel. The
+    /// first read of a file waits for the antivirus scan, which made one-at-a-time
+    /// reads most of a run. `check` reads any blob missing here itself.
+    fn osu_md5s(&self, sets: &[&LazerBeatmapSet], claims: &StableClaims) -> OsuMd5s {
+        let blobs: HashSet<BlobHash> = sets
+            .iter()
+            .filter_map(|set| claims.plan(set, &self.songs).result.ok())
+            .flat_map(|planned| planned.osu_md5.into_keys())
+            .collect();
+        blobs
+            .into_par_iter()
+            .map(|blob| {
+                let md5 = digests(&blob.path_in(&self.files)).ok().map(|(_, md5)| md5);
+                (blob, md5)
+            })
+            .collect()
+    }
+
+    fn check(
+        &self,
+        set: &LazerBeatmapSet,
+        claims: &StableClaims,
+        md5s: &OsuMd5s,
+    ) -> (SetPlan, Vec<bool>) {
         let mut plan = claims.plan(set, &self.songs);
         let mut present = Vec::new();
         if let Ok(planned) = &plan.result {
-            match self.preflight(planned) {
+            match self.preflight(planned, md5s) {
                 Ok(p) => {
                     plan.to_create = planned
                         .placements
@@ -525,7 +554,11 @@ impl Materializer {
 
     /// Checks blobs, `.osu` MD5s and files already in the folder. Returns which
     /// placements are already in place.
-    fn preflight(&self, set: &PlannedSet) -> std::result::Result<Vec<bool>, SkipReason> {
+    fn preflight(
+        &self,
+        set: &PlannedSet,
+        md5s: &OsuMd5s,
+    ) -> std::result::Result<Vec<bool>, SkipReason> {
         let folder = self.songs.join(&set.folder);
         set.placements
             .iter()
@@ -542,7 +575,11 @@ impl Materializer {
                     return Err(missing());
                 }
                 if let Some(expected) = set.osu_md5.get(&p.blob) {
-                    let (_, actual) = digests(&blob).map_err(|_| missing())?;
+                    let actual = match md5s.get(&p.blob) {
+                        Some(md5) => md5.clone(),
+                        None => digests(&blob).ok().map(|(_, md5)| md5),
+                    }
+                    .ok_or_else(missing)?;
                     if &actual != expected {
                         return Err(SkipReason::Md5Mismatch {
                             filename,
@@ -555,7 +592,7 @@ impl Materializer {
                 if fs::symlink_metadata(&dest).is_err() {
                     return Ok(false);
                 }
-                if same_file::is_same_file(&dest, &blob).unwrap_or(false) {
+                if is_same_file(&dest, &blob).unwrap_or(false) {
                     return Ok(true);
                 }
                 match digests(&dest) {
@@ -716,6 +753,27 @@ fn digests(path: &Path) -> io::Result<(String, String)> {
         format!("{:x}", sha.finalize()),
         format!("{:x}", md5.finalize()),
     ))
+}
+
+/// Opens both files for attributes only. Opening a file for reading waits for an
+/// antivirus scan of any file not scanned yet, such as an asset no one has opened.
+fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
+    Ok(attributes_handle(a)? == attributes_handle(b)?)
+}
+
+#[cfg(windows)]
+fn attributes_handle(path: &Path) -> io::Result<same_file::Handle> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .open(path)?;
+    same_file::Handle::from_file(file)
+}
+
+#[cfg(not(windows))]
+fn attributes_handle(path: &Path) -> io::Result<same_file::Handle> {
+    same_file::Handle::from_path(path)
 }
 
 fn invalid_data(message: String) -> io::Error {
@@ -1026,6 +1084,20 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, [OSU_NAME, "audio.mp3"]);
+    }
+
+    #[test]
+    fn same_file_tells_a_link_from_a_copy() {
+        let fx = Fixture::new();
+        let blob = fx.blob_path(&fx.blob(b"background"));
+        fs::create_dir_all(&fx.songs).unwrap();
+        let link = fx.songs.join("link.jpg");
+        let copy = fx.songs.join("copy.jpg");
+        fs::hard_link(&blob, &link).unwrap();
+        fs::copy(&blob, &copy).unwrap();
+
+        assert!(is_same_file(&link, &blob).unwrap());
+        assert!(!is_same_file(&copy, &blob).unwrap());
     }
 
     #[test]
