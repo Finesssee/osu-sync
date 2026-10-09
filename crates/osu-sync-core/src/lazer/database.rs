@@ -10,6 +10,7 @@ use crate::beatmap::{
 use crate::error::{Error, Result};
 use crate::lazer::LazerFileStore;
 use crate::stats::RankedStatus;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -118,6 +119,8 @@ pub struct LazerBeatmapSet {
     pub beatmaps: Vec<LazerBeatmapInfo>,
     /// Files in this set (with original names)
     pub files: Vec<LazerNamedFile>,
+    /// When lazer imported the set; stable sorts by the `.osu` modified time, so exports use it
+    pub date_added: DateTime<Utc>,
 }
 
 /// File reference with original filename
@@ -140,6 +143,7 @@ struct ExportedSet {
     id: String,
     online_id: i32,
     delete_pending: bool,
+    date_added: DateTime<Utc>,
     beatmaps: Vec<ExportedBeatmap>,
     files: Vec<ExportedFile>,
 }
@@ -478,6 +482,7 @@ fn convert_exported_set(set: ExportedSet) -> LazerBeatmapSet {
     LazerBeatmapSet {
         id: set.id,
         online_id,
+        date_added: set.date_added,
         beatmaps: set
             .beatmaps
             .into_iter()
@@ -577,6 +582,10 @@ mod tests {
         assert_eq!(triangles.beatmaps[0].metadata.beatmap_id, None);
         assert_eq!(triangles.beatmaps[0].bpm, 160.0);
         assert_eq!(triangles.beatmaps[0].ranked_status, None);
+        assert_eq!(
+            triangles.date_added.to_rfc3339(),
+            "2023-09-06T08:07:08+00:00"
+        );
         assert_eq!(triangles.files.len(), 2);
         assert_eq!(triangles.files[0].filename, "audio.mp3");
         assert_eq!(
@@ -587,6 +596,7 @@ mod tests {
         let marisa = &sets[1];
         assert_eq!(marisa.online_id, Some(243));
         assert_eq!(marisa.files.len(), 5);
+        assert_eq!(marisa.date_added.to_rfc3339(), "2025-11-06T13:27:40+00:00");
         let versions: Vec<&str> = marisa.beatmaps.iter().map(|b| b.version.as_str()).collect();
         assert_eq!(versions, ["Easy", "Normal", "Hard"]);
 
@@ -608,7 +618,7 @@ mod tests {
 
     #[test]
     fn parses_null_numbers_and_skips_hidden_beatmaps() {
-        let json = br#"{"sets":[{"id":"s1","online_id":0,"protected":false,"delete_pending":false,"artist":null,"title":null,"creator":null,"beatmaps":[{"id":"b1","online_id":0,"hash":null,"md5_hash":"m1","difficulty_name":"Inf","ruleset":3,"length_ms":null,"bpm":null,"star_rating":null,"status":1,"hidden":false,"title":null,"title_unicode":null,"artist":null,"artist_unicode":null,"author":null,"source":null,"tags":null,"drain_rate":null,"circle_size":4,"overall_difficulty":null,"approach_rate":null,"slider_multiplier":null,"slider_tick_rate":null},{"id":"b2","online_id":7,"hash":"h","md5_hash":"m2","difficulty_name":"Hidden","ruleset":0,"length_ms":1000,"bpm":120,"star_rating":2,"status":1,"hidden":true,"title":"t","title_unicode":"","artist":"a","artist_unicode":"","author":"c","source":"","tags":"","drain_rate":5,"circle_size":4,"overall_difficulty":5,"approach_rate":5,"slider_multiplier":1,"slider_tick_rate":1}],"files":[{"filename":"a.osu","hash":null}]}],"skipped":null}"#;
+        let json = br#"{"sets":[{"id":"s1","online_id":0,"protected":false,"delete_pending":false,"date_added":"2024-01-02T03:04:05+00:00","artist":null,"title":null,"creator":null,"beatmaps":[{"id":"b1","online_id":0,"hash":null,"md5_hash":"m1","difficulty_name":"Inf","ruleset":3,"length_ms":null,"bpm":null,"star_rating":null,"status":1,"hidden":false,"title":null,"title_unicode":null,"artist":null,"artist_unicode":null,"author":null,"source":null,"tags":null,"drain_rate":null,"circle_size":4,"overall_difficulty":null,"approach_rate":null,"slider_multiplier":null,"slider_tick_rate":null},{"id":"b2","online_id":7,"hash":"h","md5_hash":"m2","difficulty_name":"Hidden","ruleset":0,"length_ms":1000,"bpm":120,"star_rating":2,"status":1,"hidden":true,"title":"t","title_unicode":"","artist":"a","artist_unicode":"","author":"c","source":"","tags":"","drain_rate":5,"circle_size":4,"overall_difficulty":5,"approach_rate":5,"slider_multiplier":1,"slider_tick_rate":1}],"files":[{"filename":"a.osu","hash":null}]}],"skipped":null}"#;
         let (sets, _) = parse_realm_export(json).unwrap();
 
         assert_eq!(sets.len(), 1);
@@ -629,8 +639,20 @@ mod tests {
     }
 
     #[test]
+    fn export_without_date_added_is_an_error() {
+        let json = br#"{"sets":[{"id":"s1","online_id":5,"protected":false,"delete_pending":false,"artist":"a","title":"t","creator":"c","beatmaps":[],"files":[]}],"skipped":null}"#;
+
+        let err = parse_realm_export(json).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "Realm database error: could not parse realm-export output: missing field `date_added` at line 1 column 139"
+        );
+    }
+
+    #[test]
     fn parses_skipped_sets_as_a_warning() {
-        let json = br#"{"sets":[{"id":"s1","online_id":5,"protected":false,"delete_pending":false,"artist":"a","title":"t","creator":"c","beatmaps":[],"files":[]}],"skipped":{"count":7026,"first_error":"InvalidCastException: Unable to cast"}}"#;
+        let json = br#"{"sets":[{"id":"s1","online_id":5,"protected":false,"delete_pending":false,"date_added":"2024-01-02T03:04:05+00:00","artist":"a","title":"t","creator":"c","beatmaps":[],"files":[]}],"skipped":{"count":7026,"first_error":"InvalidCastException: Unable to cast"}}"#;
         let (sets, skipped) = parse_realm_export(json).unwrap();
 
         assert_eq!(sets.len(), 1);
@@ -908,6 +930,11 @@ impl StableDatabase {
                 online_id: Some(set_id),
                 beatmaps: lazer_beatmaps,
                 files,
+                date_added: beatmaps
+                    .iter()
+                    .map(|b| b.last_modified)
+                    .min()
+                    .unwrap_or_default(),
             });
         }
 
@@ -921,6 +948,7 @@ impl StableDatabase {
                 online_id: None,
                 beatmaps: vec![lazer_beatmap],
                 files,
+                date_added: beatmap.last_modified,
             });
         }
 
