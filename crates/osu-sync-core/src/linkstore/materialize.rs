@@ -27,7 +27,14 @@ pub const STABLE_PATH_LIMIT: usize = 248;
 const SUFFIX_LEN: usize = 9;
 
 /// MD5 of each `.osu` blob read ahead of the per-set checks, `None` when it could not be read.
-type OsuMd5s = HashMap<BlobHash, Option<String>>;
+/// What the parallel prefetch learned about the blobs a run will read.
+#[derive(Debug, Default)]
+struct Probes {
+    /// MD5 of each `.osu` blob, `None` when the read failed.
+    md5s: HashMap<BlobHash, Option<String>>,
+    /// Other blobs that will be placed and opened for reading without error.
+    readable: HashSet<BlobHash>,
+}
 
 const TEMP_PREFIX: &str = "osu-sync_tmp_";
 const TEMP_SUFFIX: &str = ".part";
@@ -530,10 +537,10 @@ impl Materializer {
 
     /// Plans and checks every set without writing anything.
     pub fn preview(&self, sets: &[&LazerBeatmapSet], claims: &mut StableClaims) -> Vec<SetPlan> {
-        let md5s = self.osu_md5s(sets, claims);
+        let probes = self.probe(sets, claims);
         sets.iter()
             .map(|set| {
-                let (plan, _) = self.check(set, claims, &md5s);
+                let (plan, _) = self.check(set, claims, &probes);
                 if let Ok(planned) = &plan.result {
                     claims.record(&plan.id, planned);
                 }
@@ -560,10 +567,10 @@ impl Materializer {
             report.temps_removed += 1;
         }
 
-        let md5s = self.osu_md5s(sets, claims);
+        let probes = self.probe(sets, claims);
         let mut checked_dirs = HashSet::new();
         for (i, set) in sets.iter().enumerate() {
-            let (plan, present) = self.check(set, claims, &md5s);
+            let (plan, present) = self.check(set, claims, &probes);
             let left_out = plan
                 .result
                 .as_ref()
@@ -600,34 +607,53 @@ impl Materializer {
         Ok(report)
     }
 
-    /// Reads the MD5 of every `.osu` blob the sets plan to place, in parallel. The
-    /// first read of a file waits for the antivirus scan, which made one-at-a-time
-    /// reads most of a run. `check` reads any blob missing or unread here itself.
-    fn osu_md5s(&self, sets: &[&LazerBeatmapSet], claims: &StableClaims) -> OsuMd5s {
-        let blobs: HashSet<BlobHash> = sets
+    /// Reads the MD5 of every `.osu` blob the sets plan to place, and opens every
+    /// other blob whose file is not in Songs yet, in parallel. The first read of a
+    /// file waits for the antivirus scan, which made one-at-a-time reads most of a
+    /// run. `preflight` checks any blob missing or failed here itself.
+    fn probe(&self, sets: &[&LazerBeatmapSet], claims: &StableClaims) -> Probes {
+        let planned: Vec<PlannedSet> = sets
             .iter()
             .filter_map(|set| claims.plan(set, &self.songs).result.ok())
-            .flat_map(|planned| planned.osu_md5.into_keys())
             .collect();
-        blobs
+        let osu: HashSet<&BlobHash> = planned.iter().flat_map(|p| p.osu_md5.keys()).collect();
+        let others: Vec<(&BlobHash, PathBuf)> = planned
+            .iter()
+            .flat_map(|set| {
+                let folder = self.songs.join(&set.folder);
+                set.placements
+                    .iter()
+                    .filter(|p| p.how != How::Skip && !set.osu_md5.contains_key(&p.blob))
+                    .map(move |p| (&p.blob, folder.join(&p.dest)))
+            })
+            .collect();
+        let md5s = osu
             .into_par_iter()
             .map(|blob| {
                 let md5 = digests(&blob.path_in(&self.files)).ok().map(|(_, md5)| md5);
-                (blob, md5)
+                (blob.clone(), md5)
             })
-            .collect()
+            .collect();
+        let readable = others
+            .into_par_iter()
+            .filter(|(blob, dest)| {
+                fs::symlink_metadata(dest).is_err() && readable(&blob.path_in(&self.files))
+            })
+            .map(|(blob, _)| blob.clone())
+            .collect();
+        Probes { md5s, readable }
     }
 
     fn check(
         &self,
         set: &LazerBeatmapSet,
         claims: &StableClaims,
-        md5s: &OsuMd5s,
+        probes: &Probes,
     ) -> (SetPlan, Vec<bool>) {
         let mut plan = claims.plan(set, &self.songs);
         let mut present = Vec::new();
         if let Ok(planned) = &plan.result {
-            match self.preflight(planned, md5s) {
+            match self.preflight(planned, probes) {
                 Ok(p) => {
                     plan.to_create = planned
                         .placements
@@ -643,12 +669,13 @@ impl Materializer {
         (plan, present)
     }
 
-    /// Checks blobs, `.osu` MD5s and files already in the folder. Returns which
-    /// placements are already in place.
+    /// Checks that every blob the set needs exists and can be read, the `.osu`
+    /// MD5s, and the files already in the folder, before anything is written.
+    /// Returns which placements are already in place.
     fn preflight(
         &self,
         set: &PlannedSet,
-        md5s: &OsuMd5s,
+        probes: &Probes,
     ) -> std::result::Result<Vec<bool>, SkipReason> {
         let folder = self.songs.join(&set.folder);
         set.placements
@@ -667,7 +694,8 @@ impl Materializer {
                 }
                 if let Some(expected) = set.osu_md5.get(&p.blob) {
                     // A failed prefetch read is tried once more here.
-                    let actual = md5s
+                    let actual = probes
+                        .md5s
                         .get(&p.blob)
                         .cloned()
                         .flatten()
@@ -683,6 +711,13 @@ impl Materializer {
                 }
                 let dest = folder.join(&p.dest);
                 if fs::symlink_metadata(&dest).is_err() {
+                    // The prefetch opened it, or it is opened here once more.
+                    if !set.osu_md5.contains_key(&p.blob)
+                        && !probes.readable.contains(&p.blob)
+                        && !readable(&blob)
+                    {
+                        return Err(missing());
+                    }
                     return Ok(false);
                 }
                 if is_same_file(&dest, &blob).unwrap_or(false) {
@@ -751,6 +786,12 @@ impl Materializer {
         }
         Ok(counts)
     }
+}
+
+/// True when the file opens for reading. A blob that is locked or denied would
+/// fail the set halfway through, after its folder was created.
+fn readable(path: &Path) -> bool {
+    File::open(path).is_ok()
 }
 
 /// Copies a blob to a temp file in the set folder, verifies it, then moves it into
@@ -1855,6 +1896,81 @@ mod tests {
         assert!(!fx.songs.join("1001 Artist - Title").exists());
     }
 
+    /// Holds a blob so that opening it for reading fails, as a lock or a denied
+    /// read does. Returns `None` where the platform cannot (unix as root).
+    fn lock_for_reading(path: &Path) -> Option<Box<dyn std::any::Any>> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(path)
+                .unwrap();
+            Some(Box::new(held))
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            struct Restore(PathBuf);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o644));
+                }
+            }
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            let restore = Restore(path.to_path_buf());
+            File::open(path)
+                .is_err()
+                .then(|| Box::new(restore) as Box<dyn std::any::Any>)
+        }
+    }
+
+    #[test]
+    fn unreadable_blob_fails_set_before_its_folder_is_made() {
+        let fx = Fixture::new();
+        let mut s = fx.basic_set();
+        let cover = fx.blob(b"not really a png");
+        s.files.push(LazerNamedFile {
+            filename: "cover.png".to_string(),
+            hash: cover.clone(),
+        });
+        let Some(_held) = lock_for_reading(&fx.blob_path(&cover)) else {
+            return;
+        };
+        let report = fx.run(&fx.materializer(), &[s]);
+
+        assert_eq!(
+            report.sets[0].outcome,
+            SetOutcome::Failed(
+                "cover.png is missing from the lazer store or cannot be read".to_string()
+            )
+        );
+        assert!(!fx.songs.join("1001 Artist - Title").exists());
+    }
+
+    #[test]
+    fn row_with_a_missing_extra_file_fails_and_leaves_the_first_row_intact() {
+        let fx = Fixture::new();
+        let (first, mut second) = subset_pair(&fx);
+        second.files.push(LazerNamedFile {
+            filename: "audio 1.5x.mp3".to_string(),
+            hash: "cd".repeat(32),
+        });
+        let report = fx.run(&fx.materializer(), &[first, second]);
+
+        assert_eq!(
+            report.sets[1].outcome,
+            SetOutcome::Failed(
+                "audio 1.5x.mp3 is missing from the lazer store or cannot be read".to_string()
+            )
+        );
+        assert_eq!(folder_names(&fx.songs), ["1001 Artist - Title"]);
+        let folder = fx.songs.join("1001 Artist - Title");
+        assert!(folder.join(OSU_NAME).is_file());
+        assert!(folder.join("audio.mp3").is_file());
+    }
+
     #[test]
     fn lazer_store_without_files_fails_every_set() {
         let fx = Fixture::new();
@@ -1888,8 +2004,11 @@ mod tests {
         let m = fx.materializer();
         let claims = StableClaims::default();
         let osu = BlobHash::parse(&s.files[0].hash).unwrap();
-        let md5s: OsuMd5s = HashMap::from([(osu, None)]);
-        let (plan, present) = m.check(&s, &claims, &md5s);
+        let probes = Probes {
+            md5s: HashMap::from([(osu, None)]),
+            ..Default::default()
+        };
+        let (plan, present) = m.check(&s, &claims, &probes);
 
         assert_eq!(
             plan.result.map(|p| p.folder),
