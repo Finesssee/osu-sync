@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::ops::ControlFlow;
@@ -98,6 +98,9 @@ pub struct PlannedSet {
     pub placements: Vec<Placement>,
     /// MD5 realm expects for each `.osu` blob it references.
     pub osu_md5: HashMap<BlobHash, String>,
+    /// `.osu` files of a row that repeats maps already in stable, left out because
+    /// their name is taken. The row's other files are still placed.
+    pub left_out: Vec<SkipReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -171,6 +174,8 @@ pub struct SetReport {
     pub online_id: Option<i32>,
     pub folder: String,
     pub outcome: SetOutcome,
+    /// `.osu` files of a placed row that were left out, see [`PlannedSet::left_out`].
+    pub left_out: Vec<SkipReason>,
 }
 
 /// A set's plan without writing anything, for dry runs.
@@ -368,7 +373,7 @@ impl StableClaims {
     ) -> std::result::Result<PlannedSet, SkipReason> {
         let mut seen: HashMap<String, &str> = HashMap::new();
         let mut placements = Vec::with_capacity(set.files.len());
-        let mut osu_keys = HashMap::new();
+        let mut osu_keys = BTreeMap::new();
         let mut longest = 0;
         for file in &set.files {
             let unsafe_name = || SkipReason::UnsafeFilename {
@@ -435,37 +440,52 @@ impl StableClaims {
             }
         }
 
+        // A row that repeats maps another folder already holds places only its new
+        // maps, plus its other files, so its extra difficulties still reach stable.
         let folder_key = name_key(&folder);
-        for p in &placements {
-            let Some(md5) = osu_md5.get(&p.blob) else {
-                continue;
-            };
-            if let Some(owner) = self.md5s.get(md5) {
-                if name_key(owner) != folder_key {
-                    return Err(SkipReason::AlreadyInStable {
-                        md5: md5.clone(),
-                        folder: owner.clone(),
-                    });
-                }
+        let mut repeated = None;
+        placements.retain(|p| {
+            let owner = osu_md5
+                .get(&p.blob)
+                .filter(|_| is_top_level_osu(&p.dest))
+                .and_then(|md5| Some((md5, self.md5s.get(md5)?)))
+                .filter(|(_, owner)| name_key(owner) != folder_key);
+            if let Some((md5, owner)) = owner {
+                osu_keys.remove(&name_key(&p.dest.to_string_lossy()));
+                repeated.get_or_insert_with(|| SkipReason::AlreadyInStable {
+                    md5: md5.clone(),
+                    folder: owner.clone(),
+                });
             }
+            owner.is_none()
+        });
+        if osu_keys.is_empty() {
+            return Err(repeated.unwrap_or(SkipReason::NoOsuFiles));
         }
+
         let held = self.folders.get(&folder_key);
+        let mut left_out = Vec::new();
         for (key, (filename, blob)) in &osu_keys {
-            let duplicate = |folder: &str| SkipReason::DuplicateOsuFilename {
-                filename: filename.clone(),
-                folder: folder.to_string(),
-            };
-            if let Some(owner) = self.osu_names.get(key) {
-                if name_key(owner) != folder_key {
-                    return Err(duplicate(owner));
-                }
-            }
             let theirs = held.and_then(|keys| keys.get(key)).and_then(Option::as_ref);
-            if let (Some(theirs), Some(ours)) = (theirs, osu_md5.get(blob)) {
-                if theirs != ours {
-                    return Err(duplicate(&folder));
-                }
+            let owner = match self.osu_names.get(key) {
+                Some(owner) if name_key(owner) != folder_key => owner.as_str(),
+                _ => match (theirs, osu_md5.get(blob)) {
+                    (Some(theirs), Some(ours)) if theirs != ours => folder.as_str(),
+                    _ => continue,
+                },
+            };
+            let duplicate = SkipReason::DuplicateOsuFilename {
+                filename: filename.clone(),
+                folder: owner.to_string(),
+            };
+            if repeated.is_none() {
+                return Err(duplicate);
             }
+            placements.retain(|p| name_key(&p.dest.to_string_lossy()) != *key);
+            left_out.push(duplicate);
+        }
+        if left_out.len() == osu_keys.len() {
+            return Err(left_out.remove(0));
         }
 
         placements.sort_by_key(|p| is_osu(&p.dest));
@@ -474,6 +494,7 @@ impl StableClaims {
             date_added: set.date_added,
             placements,
             osu_md5,
+            left_out,
         })
     }
 }
@@ -543,6 +564,11 @@ impl Materializer {
         let mut checked_dirs = HashSet::new();
         for (i, set) in sets.iter().enumerate() {
             let (plan, present) = self.check(set, claims, &md5s);
+            let left_out = plan
+                .result
+                .as_ref()
+                .map(|p| p.left_out.clone())
+                .unwrap_or_default();
             let outcome = match plan.result {
                 Err(reason) => reason.into(),
                 Ok(planned) => {
@@ -565,6 +591,7 @@ impl Materializer {
                 online_id: plan.online_id,
                 folder: plan.folder,
                 outcome,
+                left_out,
             });
             if progress(i + 1, sets.len(), &report.sets[i].folder).is_break() {
                 break;
@@ -1637,6 +1664,15 @@ mod tests {
         (first, second)
     }
 
+    fn folder_names(songs: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(songs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn second_row_of_one_online_set_does_not_merge_into_the_first() {
         let fx = Fixture::new();
@@ -1644,21 +1680,76 @@ mod tests {
         let report = fx.run(&fx.materializer(), &[first, second]);
 
         assert_eq!(report.sets[0].folder, "1001 Artist - Title");
+        assert_eq!(report.sets[1].folder, "1001 Artist - Title ee35504e");
         assert_eq!(
             report.sets[1].outcome,
-            SetOutcome::Skipped(SkipReason::AlreadyInStable {
-                md5: OSU_MD5.to_string(),
-                folder: "1001 Artist - Title".to_string(),
+            SetOutcome::Materialized(SetCounts {
+                linked: 1,
+                copied: 1,
+                ..Default::default()
             })
         );
-        let folders: Vec<String> = fs::read_dir(&fx.songs)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(folders, ["1001 Artist - Title"]);
+        assert_eq!(report.sets[1].left_out, []);
+        assert_eq!(
+            folder_names(&fx.songs),
+            ["1001 Artist - Title", "1001 Artist - Title ee35504e"]
+        );
         let folder = fx.songs.join("1001 Artist - Title");
         assert!(!folder.join("Artist - Title (Mapper) [Hard].osu").exists());
         assert_eq!(mtime(&folder.join(OSU_NAME)), "2025-01-29T01:02:03+00:00");
+        let extra = fx.songs.join("1001 Artist - Title ee35504e");
+        assert_eq!(
+            mtime(&extra.join("Artist - Title (Mapper) [Hard].osu")),
+            "2024-06-29T04:05:06+00:00"
+        );
+        assert!(extra.join("audio.mp3").is_file());
+        assert!(!extra.join(OSU_NAME).exists());
+    }
+
+    #[test]
+    fn new_map_whose_name_is_taken_is_left_out_of_a_partial_row() {
+        let fx = Fixture::new();
+        let (mut first, mut second) = subset_pair(&fx);
+        let normal_name = "Artist - Title (Mapper) [Normal].osu";
+        for (row, content) in [
+            (
+                &mut first,
+                &b"osu file format v14
+
+[Normal one]
+"[..],
+            ),
+            (
+                &mut second,
+                &b"osu file format v14
+
+[Normal two]
+"[..],
+            ),
+        ] {
+            let hash = fx.blob(content);
+            row.files.push(LazerNamedFile {
+                filename: normal_name.to_string(),
+                hash: hash.clone(),
+            });
+            let mut map = row.beatmaps[0].clone();
+            map.hash = hash;
+            map.md5_hash = format!("{:x}", Md5::digest(content));
+            row.beatmaps.push(map);
+        }
+        let report = fx.run(&fx.materializer(), &[first, second]);
+
+        assert_eq!(
+            report.sets[1].left_out,
+            [SkipReason::DuplicateOsuFilename {
+                filename: normal_name.to_string(),
+                folder: "1001 Artist - Title".to_string(),
+            }]
+        );
+        let extra = fx.songs.join("1001 Artist - Title ee35504e");
+        assert!(extra.join("Artist - Title (Mapper) [Hard].osu").is_file());
+        assert!(!extra.join(normal_name).exists());
+        assert!(!extra.join(OSU_NAME).exists());
     }
 
     #[test]
@@ -1678,11 +1769,12 @@ mod tests {
         );
         assert_eq!(
             report.sets[1].outcome,
-            SetOutcome::Skipped(SkipReason::AlreadyInStable {
-                md5: OSU_MD5.to_string(),
-                folder: "1001 Artist - Title".to_string(),
+            SetOutcome::Materialized(SetCounts {
+                present: 2,
+                ..Default::default()
             })
         );
+        assert_eq!(report.sets[1].folder, "1001 Artist - Title ee35504e");
     }
 
     #[test]

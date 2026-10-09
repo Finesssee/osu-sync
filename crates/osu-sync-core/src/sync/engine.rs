@@ -576,6 +576,9 @@ impl SyncEngine {
                 ..Default::default()
             });
 
+            for reason in plan.result.iter().flat_map(|p| &p.left_out) {
+                tracing::info!("Would leave out of {}: {}", plan.folder, reason);
+            }
             let action = match &plan.result {
                 Err(
                     SkipReason::AlreadyInStable { .. } | SkipReason::DuplicateOsuFilename { .. },
@@ -870,6 +873,11 @@ impl SyncEngine {
         })?;
 
         for set in &report.sets {
+            for reason in &set.left_out {
+                result
+                    .skips
+                    .push(SyncError::new(Some(set.folder.clone()), reason.to_string()));
+            }
             match &set.outcome {
                 SetOutcome::Materialized(counts) if counts.created() > 0 => result.imported += 1,
                 SetOutcome::Materialized(_) => result.skipped += 1,
