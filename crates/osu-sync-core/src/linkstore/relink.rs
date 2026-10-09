@@ -236,6 +236,23 @@ impl Relinker {
             .into_par_iter()
             .filter_map(|(stable, rel)| self.inspect(stable, rel, &cache))
             .collect();
+        // A shard folder under `files` can be a junction into a live store, so each
+        // blob folder is guarded on its own before any temp is linked from it.
+        let mut checked_dirs = HashSet::new();
+        for c in &inspected {
+            if let Found::Blob {
+                blob,
+                already_linked: false,
+            } = &c.found
+            {
+                if let Some(dir) = blob.parent() {
+                    if !checked_dirs.contains(dir) {
+                        live_guard::check_write(dir)?;
+                        checked_dirs.insert(dir.to_path_buf());
+                    }
+                }
+            }
+        }
 
         let mut next = HashCache {
             version: CACHE_VERSION,
@@ -1311,5 +1328,50 @@ mod tests {
         assert_eq!(third.relinked, 0);
         assert_eq!(third.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
         assert_eq!(fs::read(&stable).unwrap(), b);
+    }
+
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn blob_shard_junctioned_into_live_lazer_is_refused() {
+        let fx = Fixture::new();
+        let live = fx.dir.path().join("live-lazer");
+        let live_files = live.join("files");
+        let live_blob = BlobHash::parse(AUDIO_SHA256).unwrap().path_in(&live_files);
+        fs::create_dir_all(live_blob.parent().unwrap()).unwrap();
+        fs::write(&live_blob, AUDIO).unwrap();
+        set_test_roots(LiveRoots::new(
+            InstallPaths {
+                stable: None,
+                lazer: Some(live.clone()),
+            },
+            Vec::new(),
+            None,
+        ));
+        fs::create_dir_all(&fx.files).unwrap();
+        junction(&fx.files.join("2"), &live_files.join("2"));
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+        let mut r = fx.relinker();
+        r.link = |_, _| panic!("a refused run must not link");
+
+        match r.run(&mut |_, _| panic!("no progress")) {
+            Err(Error::LiveWriteRefused { root, .. }) => assert_eq!(root, live),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(links(&stable), 1);
+        assert_eq!(links(&live_blob), 1);
+        assert_eq!(names(stable.parent().unwrap()), ["audio.mp3"]);
+        assert_eq!(sha256(&stable).unwrap(), AUDIO_SHA256);
+        assert!(!fx.cache().exists());
     }
 }
