@@ -204,7 +204,8 @@ pub struct MaterializeReport {
     /// The first hard-link error that made a file fall back to a copy.
     pub link_error: Option<String>,
     /// Files copied because hard-linking them failed for any reason other than
-    /// the link limit, counted in every set, including sets that failed later.
+    /// the link limit, counted once the copy is in place, in every set,
+    /// including sets that failed later.
     pub link_error_copies: usize,
 }
 
@@ -759,6 +760,7 @@ impl Materializer {
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
+            let (mut limited, mut link_failed) = (false, false);
             if p.how == How::Link && !*cross_volume {
                 if let Some(dir) = blob.parent() {
                     if !checked_dirs.contains(dir) {
@@ -772,10 +774,10 @@ impl Materializer {
                         continue;
                     }
                     Err(e) => match classify_hard_link_error(&e) {
-                        HardLinkFailure::LinkLimit => counts.link_limit_copies += 1,
+                        HardLinkFailure::LinkLimit => limited = true,
                         HardLinkFailure::CrossVolume => *cross_volume = true,
                         HardLinkFailure::Other => {
-                            *link_error_copies += 1;
+                            link_failed = true;
                             link_error.get_or_insert_with(|| e.to_string());
                         }
                     },
@@ -785,6 +787,8 @@ impl Materializer {
             let mtime = is_osu(&p.dest).then_some(date_added);
             copy_via_temp(&blob, &p.blob, &dest, &folder, expected_md5, mtime)?;
             counts.copied += 1;
+            counts.link_limit_copies += usize::from(limited);
+            *link_error_copies += usize::from(link_failed);
         }
         Ok(counts)
     }
@@ -1269,6 +1273,24 @@ mod tests {
                 io::Error::from_raw_os_error(1)
             )]
         );
+    }
+
+    #[test]
+    fn link_error_counted_only_when_copy_succeeds() {
+        let fx = Fixture::new();
+        let s = fx.basic_set();
+        let mut m = fx.materializer();
+        // The link fails after a folder took the asset's name, so the fallback
+        // copy cannot be renamed into place either.
+        m.link = |_, dst| {
+            fs::create_dir(dst)?;
+            Err(io::Error::from_raw_os_error(1))
+        };
+        let report = fx.run(&m, &[s]);
+
+        assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
+        assert_eq!(report.link_error_copies, 0);
+        assert_eq!(report.notes(&fx.songs), Vec::<String>::new());
     }
 
     #[test]
