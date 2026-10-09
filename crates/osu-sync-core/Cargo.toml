@@ -24,6 +24,7 @@ osu-db = { git = "https://github.com/kovaxis/osu-db", branch = "master" }
 # File handling
 zip.workspace = true
 walkdir.workspace = true
+same-file.workspace = true
 sha2.workspace = true
 md-5.workspace = true
 directories.workspace = true

@@ -60,6 +60,10 @@ pub fn render(frame: &mut Frame, area: Rect, result: &SyncResult) {
             Span::styled(format!("{}", result.imported), Style::default().fg(SUCCESS)),
         ]),
         Line::from(vec![
+            Span::styled("  Staged:      ", Style::default().fg(SUBTLE)),
+            Span::styled(format!("{}", result.staged), Style::default().fg(TEXT)),
+        ]),
+        Line::from(vec![
             Span::styled("  Skipped:     ", Style::default().fg(SUBTLE)),
             Span::styled(format!("{}", result.skipped), Style::default().fg(TEXT)),
         ]),

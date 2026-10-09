@@ -663,6 +663,7 @@ impl BackupManager {
         dest_path: &Path,
         progress: Option<BackupProgressCallback>,
     ) -> Result<()> {
+        crate::config::live_guard::check_write(dest_path)?;
         if !backup_path.exists() {
             return Err(Error::Other(format!(
                 "Backup file not found: {}",
@@ -878,6 +879,7 @@ impl BackupManager {
         options: &RestoreOptions,
         progress: Option<BackupProgressCallback>,
     ) -> Result<usize> {
+        crate::config::live_guard::check_write(dest_path)?;
         if !backup_path.exists() {
             return Err(Error::Other(format!(
                 "Backup file not found: {}",

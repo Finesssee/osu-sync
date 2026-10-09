@@ -56,6 +56,7 @@ impl StableImporter {
             .unwrap_or_else(|| beatmap_set.generate_folder_name());
 
         let dest_path = self.songs_path.join(&folder_name);
+        crate::config::live_guard::check_write(&dest_path)?;
 
         // Check if folder already exists
         if dest_path.exists() {
@@ -90,6 +91,7 @@ impl StableImporter {
             .unwrap_or_else(|| beatmap_set.generate_folder_name());
 
         let dest_path = self.songs_path.join(&folder_name);
+        crate::config::live_guard::check_write(&dest_path)?;
 
         // Check if folder already exists
         if dest_path.exists() {

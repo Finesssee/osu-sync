@@ -3356,6 +3356,7 @@ dependencies = [
  "rayon",
  "realm-db-reader",
  "rosu-map",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

@@ -14,6 +14,7 @@
 use crate::beatmap::{
     BeatmapDifficulty, BeatmapFile, BeatmapInfo, BeatmapMetadata, BeatmapSet, GameMode,
 };
+use crate::config::scan_cache;
 use crate::error::{Error, Result};
 use crate::lazer::LazerFileStore;
 use crate::stats::RankedStatus;
@@ -120,11 +121,12 @@ struct BeatmapCache {
 
 /// Reader for osu!lazer's Realm database
 pub struct LazerDatabase {
-    #[allow(dead_code)]
     data_path: PathBuf,
     file_store: LazerFileStore,
     /// The Realm database group (root of all tables)
     realm_group: Option<Group>,
+    /// Where the scan cache lives; `None` disables caching
+    cache_root: Option<PathBuf>,
 }
 
 /// Beatmap info as stored in lazer's Realm database
@@ -215,7 +217,14 @@ impl LazerDatabase {
             data_path: data_path.to_path_buf(),
             file_store: LazerFileStore::new(data_path),
             realm_group,
+            cache_root: scan_cache::default_root(),
         })
+    }
+
+    /// Keep the scan cache under `root` instead of the per-user cache dir
+    pub fn with_cache_root(mut self, root: PathBuf) -> Self {
+        self.cache_root = Some(root);
+        self
     }
 
     /// Check if the Realm database is available for reading
@@ -269,8 +278,9 @@ impl LazerDatabase {
     }
 
     /// Get the cache file path
-    fn cache_path(&self) -> PathBuf {
-        self.data_path.join(".osu-sync-cache.json")
+    fn cache_path(&self) -> Option<PathBuf> {
+        let root = self.cache_root.as_deref()?;
+        Some(scan_cache::file_for(root, "lazer", &self.data_path, "json"))
     }
 
     /// Compute a stable signature for the file store contents
@@ -289,12 +299,7 @@ impl LazerDatabase {
         current_file_count: usize,
         current_signature: Option<&str>,
     ) -> Option<(Vec<LazerBeatmapSet>, usize)> {
-        let cache_path = self.cache_path();
-        if !cache_path.exists() {
-            return None;
-        }
-
-        let data = std::fs::read_to_string(&cache_path).ok()?;
+        let data = std::fs::read_to_string(self.cache_path()?).ok()?;
         let cache: BeatmapCache = serde_json::from_str(&data).ok()?;
         let current_mtime = self.file_store.store_mtime_secs();
 
@@ -361,7 +366,10 @@ impl LazerDatabase {
         };
 
         if let Ok(data) = serde_json::to_string(&cache) {
-            if let Err(e) = std::fs::write(self.cache_path(), data) {
+            let Some(cache_path) = self.cache_path() else {
+                return;
+            };
+            if let Err(e) = scan_cache::write(&cache_path, data.as_bytes()) {
                 tracing::warn!("Failed to save cache: {}", e);
             } else {
                 tracing::debug!("Saved {} beatmap sets to cache", sets.len());
@@ -1145,13 +1153,65 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_db(temp_dir: &TempDir) -> LazerDatabase {
-        let data_path = temp_dir.path().to_path_buf();
+        let data_path = temp_dir.path().join("lazer");
         fs::create_dir_all(data_path.join("files")).expect("Failed to create files dir");
         LazerDatabase {
             data_path: data_path.clone(),
             file_store: LazerFileStore::new(&data_path),
             realm_group: None,
+            cache_root: Some(temp_dir.path().join("cache")),
         }
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = walkdir::WalkDir::new(dir)
+            .into_iter()
+            .map(|e| {
+                e.unwrap()
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn scan_writes_cache_outside_install() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let db = make_db(&temp_dir);
+        let blob = temp_dir.path().join("lazer/files/ab/abcd/abcdef");
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        fs::write(&blob, b"not a beatmap").unwrap();
+        let before = listing(&temp_dir.path().join("lazer"));
+
+        db.get_all_beatmap_sets_timed().unwrap();
+
+        assert_eq!(
+            before,
+            vec![
+                "",
+                "files",
+                "files/ab",
+                "files/ab/abcd",
+                "files/ab/abcd/abcdef"
+            ]
+        );
+        assert_eq!(listing(&temp_dir.path().join("lazer")), before);
+        let cached = listing(&temp_dir.path().join("cache"));
+        assert_eq!(cached.len(), 2);
+        assert_eq!(
+            cached[1],
+            db.cache_path()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert!(cached[1].starts_with("lazer-") && cached[1].ends_with(".json"));
     }
 
     #[test]

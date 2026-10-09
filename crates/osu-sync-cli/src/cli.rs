@@ -12,10 +12,13 @@
 //!   --json             Output in JSON format
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use osu_sync_core::config::Config;
+use osu_sync_core::config::{
+    live_guard, validate_lazer_path, validate_stable_path, Config, PathOverrides,
+};
 use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
@@ -40,6 +43,68 @@ pub enum CliCommand {
 #[derive(Debug, Clone, Default)]
 pub struct CliOptions {
     pub json: bool,
+}
+
+/// Flags accepted in every mode, before or after `--cli`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlobalFlags {
+    pub overrides: PathOverrides,
+    pub allow_live: bool,
+}
+
+impl GlobalFlags {
+    /// Removes the global flags from `args` and returns them with the remaining args.
+    pub fn take(args: Vec<String>) -> Result<(Self, Vec<String>), String> {
+        let mut flags = Self::default();
+        let mut rest = Vec::with_capacity(args.len());
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let (name, inline) = match arg.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (arg.as_str(), None),
+            };
+            let slot = match name {
+                "--stable-path" => &mut flags.overrides.stable,
+                "--lazer-path" => &mut flags.overrides.lazer,
+                "--allow-live" if inline.is_none() => {
+                    flags.allow_live = true;
+                    continue;
+                }
+                _ => {
+                    rest.push(arg);
+                    continue;
+                }
+            };
+            let value = match inline {
+                Some(value) => Some(value),
+                None => args.next().filter(|v| !v.starts_with("--")),
+            }
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("{} requires a folder", name))?;
+            *slot = Some(PathBuf::from(value));
+        }
+        Ok((flags, rest))
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(stable) = &self.overrides.stable {
+            if !validate_stable_path(stable) {
+                return Err(format!(
+                    "--stable-path {} is not an osu!stable folder (no Songs folder)",
+                    stable.display()
+                ));
+            }
+        }
+        if let Some(lazer) = &self.overrides.lazer {
+            if !validate_lazer_path(lazer) {
+                return Err(format!(
+                    "--lazer-path {} is not an osu!lazer data folder (needs client.realm and files)",
+                    lazer.display()
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Parse CLI arguments and return command + options
@@ -266,6 +331,8 @@ fn run_sync(
         .lazer_path
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("osu!lazer path not configured"))?;
+    live_guard::check_sync(direction, &config)?;
+    let import_dir = config.lazer_import_path().unwrap_or_default();
 
     let songs_path = stable_path.join("Songs");
     let scanner = StableScanner::new(songs_path).skip_hashing();
@@ -305,7 +372,15 @@ fn run_sync(
         eprintln!(); // New line after progress
     }
 
+    let json = options.json;
     print_sync_result(&result, options);
+    if result.staged > 0 && !json {
+        println!();
+        println!(
+            "osu!lazer was not started. The staged .osz files are in {}",
+            import_dir.display()
+        );
+    }
 
     Ok(())
 }
@@ -423,6 +498,7 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
             "{}",
             serde_json::json!({
                 "imported": result.imported,
+                "staged": result.staged,
                 "failed": result.failed,
                 "skipped": result.skipped,
                 "errors": errors,
@@ -431,6 +507,7 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
     } else {
         println!("Sync Complete:");
         println!("  Imported: {}", result.imported);
+        println!("  Staged:   {}", result.staged);
         println!("  Failed:   {}", result.failed);
         println!("  Skipped:  {}", result.skipped);
 
@@ -468,6 +545,9 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!("    --set-ids <ids>             Comma-separated beatmap set IDs");
     println!("    --json                      Output in JSON format");
+    println!("    --stable-path <dir>         Use this osu!stable folder");
+    println!("    --lazer-path <dir>          Use this osu!lazer data folder");
+    println!("    --allow-live                Allow writes into the detected live installs");
     println!();
     println!("EXAMPLES:");
     println!("    osu-sync --cli scan");
@@ -479,6 +559,95 @@ pub fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use osu_sync_core::config::SaveOutcome;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_path_overrides() {
+        let (flags, rest) = GlobalFlags::take(strings(&[
+            "osu-sync",
+            "--stable-path",
+            "D:/osu-sync-sandbox/a/stable",
+            "--cli",
+            "sync",
+            "l2s",
+            "--lazer-path",
+            "D:/osu-sync-sandbox/a/lazer",
+            "--json",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            flags,
+            GlobalFlags {
+                overrides: PathOverrides {
+                    stable: Some(PathBuf::from("D:/osu-sync-sandbox/a/stable")),
+                    lazer: Some(PathBuf::from("D:/osu-sync-sandbox/a/lazer")),
+                },
+                allow_live: false,
+            }
+        );
+        assert_eq!(
+            rest,
+            strings(&["osu-sync", "--cli", "sync", "l2s", "--json"])
+        );
+
+        let (flags, rest) = GlobalFlags::take(strings(&["osu-sync", "--allow-live"])).unwrap();
+        assert!(flags.allow_live);
+        assert!(flags.overrides.is_empty());
+        assert_eq!(rest, strings(&["osu-sync"]));
+
+        assert_eq!(
+            GlobalFlags::take(strings(&["osu-sync", "--lazer-path", "--cli"])).unwrap_err(),
+            "--lazer-path requires a folder"
+        );
+    }
+
+    #[test]
+    fn parses_path_overrides_with_equals() {
+        let (flags, rest) = GlobalFlags::take(strings(&[
+            "osu-sync",
+            "--stable-path=D:/osu-sync-sandbox/a/stable",
+            "--cli",
+            "scan",
+            "--lazer-path=D:/osu-sync-sandbox/a b/lazer",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            flags.overrides,
+            PathOverrides {
+                stable: Some(PathBuf::from("D:/osu-sync-sandbox/a/stable")),
+                lazer: Some(PathBuf::from("D:/osu-sync-sandbox/a b/lazer")),
+            }
+        );
+        assert_eq!(rest, strings(&["osu-sync", "--cli", "scan"]));
+
+        assert_eq!(
+            GlobalFlags::take(strings(&["osu-sync", "--lazer-path="])).unwrap_err(),
+            "--lazer-path requires a folder"
+        );
+
+        let (flags, _) =
+            GlobalFlags::take(strings(&["osu-sync", "--stable-path=D:/missing-folder"])).unwrap();
+        assert_eq!(
+            flags.validate().unwrap_err(),
+            "--stable-path D:/missing-folder is not an osu!stable folder (no Songs folder)"
+        );
+    }
+
+    #[test]
+    fn override_skips_config_save() {
+        let (flags, _) =
+            GlobalFlags::take(strings(&["osu-sync", "--lazer-path", "D:/sandbox/lazer"])).unwrap();
+        assert!(!flags.overrides.is_empty());
+
+        let outcome = Config::default().save_with(Some(&flags.overrides)).unwrap();
+        assert_eq!(outcome, SaveOutcome::SkippedForPathOverrides);
+    }
 
     #[test]
     fn test_parse_direction() {
