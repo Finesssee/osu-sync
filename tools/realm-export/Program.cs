@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using Microsoft.Win32.SafeHandles;
 
 namespace RealmExport;
 
@@ -44,7 +45,10 @@ static class Program
         switch (command)
         {
             case "export":
-                Commands.Export(realmPath, options.GetValueOrDefault("--out"));
+                string outPath = options.GetValueOrDefault("--out");
+                if (outPath != null)
+                    Sandbox.RequireExportTarget(realmPath, outPath);
+                Commands.Export(realmPath, outPath);
                 return 0;
             case "trim":
                 Sandbox.Require(realmPath);
@@ -87,7 +91,8 @@ static class Program
         {
             if (!File.Exists(Path.Combine(lazerDir, name)))
                 throw new ToolException(3,
-                    $"{name} not found in {lazerDir}. Install osu!lazer or pass --lazer-dir with the folder that holds Realm.dll.");
+                    $"{name} not found in {lazerDir}. Install osu!lazer, or pass --lazer-dir with the folder that holds Realm.dll " +
+                    "(osu-sync passes the OSU_SYNC_LAZER_DIR environment variable as --lazer-dir).");
         }
 
         NativeLibrary.Load(Path.Combine(lazerDir, "realm-wrappers.dll"));
@@ -125,5 +130,57 @@ static class Sandbox
         }
         if (new FileInfo(full).Attributes.HasFlag(FileAttributes.ReparsePoint))
             throw new ToolException(4, $"Refusing to write {full} because it is a symbolic link");
+        if (FileIdentity.Of(full).Links > 1)
+            throw new ToolException(4, $"Refusing to write {full} because it is a hard link to another file");
+
+        foreach (string suffix in new[] { ".lock", ".management", ".note" })
+        {
+            string companion = full + suffix;
+            if (!File.Exists(companion) && !Directory.Exists(companion))
+                continue;
+            if (File.GetAttributes(companion).HasFlag(FileAttributes.ReparsePoint))
+                throw new ToolException(4, $"Refusing to write {full} because {companion} is a junction or symbolic link");
+            if (File.Exists(companion) && FileIdentity.Of(companion).Links > 1)
+                throw new ToolException(4, $"Refusing to write {full} because {companion} is a hard link to another file");
+        }
+    }
+
+    public static void RequireExportTarget(string realmPath, string outPath)
+    {
+        string full = Path.GetFullPath(outPath);
+        if (full.EndsWith(".realm", StringComparison.OrdinalIgnoreCase))
+            throw new ToolException(4, $"Refusing to write export output to {full} because it ends in .realm");
+        if (string.Equals(full, realmPath, StringComparison.OrdinalIgnoreCase)
+            || (File.Exists(full) && FileIdentity.Of(full).SameFileAs(FileIdentity.Of(realmPath))))
+            throw new ToolException(4, $"Refusing to write export output to {full} because it is the input realm {realmPath}");
+    }
+}
+
+readonly record struct FileIdentity(uint Volume, ulong Index, uint Links)
+{
+    public bool SameFileAs(FileIdentity other) => Volume == other.Volume && Index == other.Index;
+
+    public static FileIdentity Of(string path)
+    {
+        using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (!GetFileInformationByHandle(handle, out var info))
+            throw new ToolException(1, $"could not read file information for {path} (Win32 error {Marshal.GetLastWin32Error()})");
+        return new FileIdentity(info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow, info.NumberOfLinks);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandle(SafeFileHandle file, out ByHandleFileInformation info);
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow, CreationTimeHigh;
+        public uint LastAccessTimeLow, LastAccessTimeHigh;
+        public uint LastWriteTimeLow, LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh, FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh, FileIndexLow;
     }
 }

@@ -512,13 +512,15 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Confi
     ));
 
     // Scan lazer
-    let lazer_sets = if let Some(path) = config.lazer_path.as_ref() {
-        match LazerDatabase::open(path) {
-            Ok(db) => db.get_all_beatmap_sets().unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    } else {
-        Vec::new()
+    let (lazer_sets, lazer_error) = match config.lazer_path.as_ref() {
+        Some(path) => match LazerDatabase::open(path).and_then(|db| db.get_all_beatmap_sets()) {
+            Ok(sets) => (sets, None),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("osu!lazer could not be read: {}", e)),
+            ),
+        },
+        None => (Vec::new(), None),
     };
 
     let _ = app_tx.send(AppMessage::StatsProgress(
@@ -529,6 +531,9 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Confi
     let stats = StatsAnalyzer::compare(&stable_sets, &lazer_sets);
 
     let _ = app_tx.send(AppMessage::StatsComplete(stats));
+    if let Some(error) = lazer_error {
+        let _ = app_tx.send(AppMessage::StatsProgress(error));
+    }
 }
 
 fn handle_load_collections(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {

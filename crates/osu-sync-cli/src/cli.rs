@@ -222,15 +222,18 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
         None
     };
 
-    let lazer_result = if let Some(ref lazer_path) = config.lazer_path {
-        let db = LazerDatabase::open(lazer_path)
-            .map_err(|e| anyhow::anyhow!("Failed to open lazer database: {}", e))?;
-        let sets = db.get_all_beatmap_sets()?;
-        let named_files: usize = sets.iter().map(|s| s.files.len()).sum();
-        Some((lazer_path.clone(), sets.len(), named_files))
-    } else {
-        None
-    };
+    let lazer_result = config.lazer_path.as_ref().map(|lazer_path| {
+        let counts = LazerDatabase::open(lazer_path)
+            .and_then(|db| db.get_all_beatmap_sets())
+            .map(|sets| {
+                (
+                    sets.len(),
+                    sets.iter().map(|s| s.files.len()).sum::<usize>(),
+                )
+            })
+            .map_err(|e| format!("Failed to open lazer database: {}", e));
+        (lazer_path.clone(), counts)
+    });
 
     if options.json {
         println!(
@@ -242,12 +245,16 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
                         "beatmap_sets": count
                     })
                 }),
-                "lazer": lazer_result.as_ref().map(|(path, count, named_files)| {
-                    serde_json::json!({
+                "lazer": lazer_result.as_ref().map(|(path, counts)| match counts {
+                    Ok((count, named_files)) => serde_json::json!({
                         "path": path.to_string_lossy(),
                         "beatmap_sets": count,
                         "named_files": named_files
-                    })
+                    }),
+                    Err(error) => serde_json::json!({
+                        "path": path.to_string_lossy(),
+                        "error": error
+                    }),
                 })
             })
         );
@@ -259,14 +266,19 @@ fn run_scan(options: CliOptions) -> anyhow::Result<()> {
         } else {
             println!("osu!stable: Not configured or not found");
         }
-        if let Some((path, count, _)) = lazer_result {
-            println!("osu!lazer:  {} ({} beatmap sets)", path.display(), count);
-        } else {
-            println!("osu!lazer:  Not configured or not found");
+        match &lazer_result {
+            Some((path, Ok((count, _)))) => {
+                println!("osu!lazer:  {} ({} beatmap sets)", path.display(), count)
+            }
+            Some((path, Err(error))) => println!("osu!lazer:  {} ({})", path.display(), error),
+            None => println!("osu!lazer:  Not configured or not found"),
         }
     }
 
-    Ok(())
+    match lazer_result {
+        Some((_, Err(error))) => Err(anyhow::anyhow!(error)),
+        _ => Ok(()),
+    }
 }
 
 fn run_dry_run(

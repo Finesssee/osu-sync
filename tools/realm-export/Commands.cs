@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 using Realms;
 
@@ -16,17 +17,28 @@ static class Commands
             using (var target = File.Create(copy))
                 source.CopyTo(target);
 
+            var skipped = new Skipped();
             List<SetRecord> sets;
             using (var realm = Realm.GetInstance(new RealmConfiguration(copy) { IsDynamic = true, IsReadOnly = true }))
-                sets = ReadSets(realm);
+                sets = ReadSets(realm, skipped);
 
-            using Stream output = outPath == null ? Console.OpenStandardOutput() : File.Create(outPath);
-            Write(sets, output);
-            Console.Error.WriteLine($"exported {sets.Count} sets, {sets.Count(s => s.DeletePending)} delete-pending");
+            int written;
+            using (Stream output = outPath == null ? Console.OpenStandardOutput() : File.Create(outPath))
+                written = Write(sets, output, skipped);
+            Console.Error.WriteLine($"exported {written} sets, {sets.Count(s => s.DeletePending)} delete-pending");
+            if (skipped.Count > 0)
+                Console.Error.WriteLine($"warning: skipped {skipped.Count} sets that could not be exported; first error: {skipped.First}");
         }
         finally
         {
-            Directory.Delete(tempDir, true);
+            try
+            {
+                Directory.Delete(tempDir, true);
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"warning: could not delete {tempDir}: {e.Message}");
+            }
         }
     }
 
@@ -86,42 +98,54 @@ static class Commands
         realm.Remove(set);
     }
 
-    static List<SetRecord> ReadSets(Realm realm)
+    static List<SetRecord> ReadSets(Realm realm, Skipped skipped)
     {
         var sets = new List<SetRecord>();
         foreach (var set in realm.DynamicApi.All("BeatmapSet"))
         {
-            var api = set.DynamicApi;
-            var beatmaps = api.GetList<IRealmObject>("Beatmaps").Select(ReadBeatmap).ToList();
-            beatmaps.Sort((a, b) => a.OnlineId != b.OnlineId
-                ? a.OnlineId.CompareTo(b.OnlineId)
-                : string.CompareOrdinal(a.Id, b.Id));
-
-            var files = api.GetList<IEmbeddedObject>("Files").Select(usage =>
+            try
             {
-                var file = usage.DynamicApi.Get<IRealmObject>("File");
-                return new FileRecord(usage.DynamicApi.Get<string>("Filename"), file?.DynamicApi.Get<string>("Hash"));
-            }).ToList();
-            files.Sort((a, b) => string.CompareOrdinal(a.Filename, b.Filename) is var c && c != 0
-                ? c
-                : string.CompareOrdinal(a.Hash, b.Hash));
-
-            var first = beatmaps.Count > 0 ? beatmaps[0] : null;
-            sets.Add(new SetRecord(
-                api.Get<Guid>("ID").ToString(),
-                api.Get<int>("OnlineID"),
-                api.Get<bool>("Protected"),
-                api.Get<bool>("DeletePending"),
-                first?.Artist,
-                first?.Title,
-                first?.Author,
-                beatmaps,
-                files));
+                sets.Add(ReadSet(set));
+            }
+            catch (Exception e)
+            {
+                skipped.Add(e);
+            }
         }
         sets.Sort((a, b) => a.OnlineId != b.OnlineId
             ? a.OnlineId.CompareTo(b.OnlineId)
             : string.CompareOrdinal(a.Id, b.Id));
         return sets;
+    }
+
+    static SetRecord ReadSet(IRealmObject set)
+    {
+        var api = set.DynamicApi;
+        var beatmaps = api.GetList<IRealmObject>("Beatmaps").Select(ReadBeatmap).ToList();
+        beatmaps.Sort((a, b) => a.OnlineId != b.OnlineId
+            ? a.OnlineId.CompareTo(b.OnlineId)
+            : string.CompareOrdinal(a.Id, b.Id));
+
+        var files = api.GetList<IEmbeddedObject>("Files").Select(usage =>
+        {
+            var file = usage.DynamicApi.Get<IRealmObject>("File");
+            return new FileRecord(usage.DynamicApi.Get<string>("Filename"), file?.DynamicApi.Get<string>("Hash"));
+        }).ToList();
+        files.Sort((a, b) => string.CompareOrdinal(a.Filename, b.Filename) is var c && c != 0
+            ? c
+            : string.CompareOrdinal(a.Hash, b.Hash));
+
+        var first = beatmaps.Count > 0 ? beatmaps[0] : null;
+        return new SetRecord(
+            api.Get<Guid>("ID").ToString(),
+            api.Get<int>("OnlineID"),
+            api.Get<bool>("Protected"),
+            api.Get<bool>("DeletePending"),
+            first?.Artist,
+            first?.Title,
+            first?.Author,
+            beatmaps,
+            files);
     }
 
     static BeatmapRecord ReadBeatmap(IRealmObject beatmap)
@@ -160,63 +184,110 @@ static class Commands
             difficulty?.DynamicApi.Get<double>("SliderTickRate") ?? 0);
     }
 
-    static void Write(List<SetRecord> sets, Stream output)
+    static int Write(List<SetRecord> sets, Stream output, Skipped skipped)
     {
+        int written = 0;
         using var w = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false });
         w.WriteStartArray();
         foreach (var set in sets)
         {
+            var buffer = new ArrayBufferWriter<byte>();
+            try
+            {
+                using (var setWriter = new Utf8JsonWriter(buffer))
+                    WriteSet(setWriter, set);
+            }
+            catch (Exception e)
+            {
+                skipped.Add(e);
+                continue;
+            }
+            w.WriteRawValue(buffer.WrittenSpan, skipInputValidation: true);
+            written++;
+        }
+        w.WriteEndArray();
+        return written;
+    }
+
+    static void WriteNumberOrNull(Utf8JsonWriter w, string name, double value)
+    {
+        if (double.IsFinite(value))
+            w.WriteNumber(name, value);
+        else
+            w.WriteNull(name);
+    }
+
+    static void WriteNumberOrNull(Utf8JsonWriter w, string name, float value)
+    {
+        if (float.IsFinite(value))
+            w.WriteNumber(name, value);
+        else
+            w.WriteNull(name);
+    }
+
+    static void WriteSet(Utf8JsonWriter w, SetRecord set)
+    {
+        w.WriteStartObject();
+        w.WriteString("id", set.Id);
+        w.WriteNumber("online_id", set.OnlineId);
+        w.WriteBoolean("protected", set.Protected);
+        w.WriteBoolean("delete_pending", set.DeletePending);
+        w.WriteString("artist", set.Artist);
+        w.WriteString("title", set.Title);
+        w.WriteString("creator", set.Creator);
+        w.WriteStartArray("beatmaps");
+        foreach (var b in set.Beatmaps)
+        {
             w.WriteStartObject();
-            w.WriteString("id", set.Id);
-            w.WriteNumber("online_id", set.OnlineId);
-            w.WriteBoolean("protected", set.Protected);
-            w.WriteBoolean("delete_pending", set.DeletePending);
-            w.WriteString("artist", set.Artist);
-            w.WriteString("title", set.Title);
-            w.WriteString("creator", set.Creator);
-            w.WriteStartArray("beatmaps");
-            foreach (var b in set.Beatmaps)
-            {
-                w.WriteStartObject();
-                w.WriteString("id", b.Id);
-                w.WriteNumber("online_id", b.OnlineId);
-                w.WriteString("hash", b.Hash);
-                w.WriteString("md5_hash", b.Md5Hash);
-                w.WriteString("difficulty_name", b.DifficultyName);
-                w.WriteNumber("ruleset", b.Ruleset);
-                w.WriteNumber("length_ms", b.LengthMs);
-                w.WriteNumber("bpm", b.Bpm);
-                w.WriteNumber("star_rating", b.StarRating);
-                w.WriteNumber("status", b.Status);
-                w.WriteBoolean("hidden", b.Hidden);
-                w.WriteString("title", b.Title);
-                w.WriteString("title_unicode", b.TitleUnicode);
-                w.WriteString("artist", b.Artist);
-                w.WriteString("artist_unicode", b.ArtistUnicode);
-                w.WriteString("author", b.Author);
-                w.WriteString("source", b.Source);
-                w.WriteString("tags", b.Tags);
-                w.WriteNumber("drain_rate", b.DrainRate);
-                w.WriteNumber("circle_size", b.CircleSize);
-                w.WriteNumber("overall_difficulty", b.OverallDifficulty);
-                w.WriteNumber("approach_rate", b.ApproachRate);
-                w.WriteNumber("slider_multiplier", b.SliderMultiplier);
-                w.WriteNumber("slider_tick_rate", b.SliderTickRate);
-                w.WriteEndObject();
-            }
-            w.WriteEndArray();
-            w.WriteStartArray("files");
-            foreach (var f in set.Files)
-            {
-                w.WriteStartObject();
-                w.WriteString("filename", f.Filename);
-                w.WriteString("hash", f.Hash);
-                w.WriteEndObject();
-            }
-            w.WriteEndArray();
+            w.WriteString("id", b.Id);
+            w.WriteNumber("online_id", b.OnlineId);
+            w.WriteString("hash", b.Hash);
+            w.WriteString("md5_hash", b.Md5Hash);
+            w.WriteString("difficulty_name", b.DifficultyName);
+            w.WriteNumber("ruleset", b.Ruleset);
+            WriteNumberOrNull(w, "length_ms", b.LengthMs);
+            WriteNumberOrNull(w, "bpm", b.Bpm);
+            WriteNumberOrNull(w, "star_rating", b.StarRating);
+            w.WriteNumber("status", b.Status);
+            w.WriteBoolean("hidden", b.Hidden);
+            w.WriteString("title", b.Title);
+            w.WriteString("title_unicode", b.TitleUnicode);
+            w.WriteString("artist", b.Artist);
+            w.WriteString("artist_unicode", b.ArtistUnicode);
+            w.WriteString("author", b.Author);
+            w.WriteString("source", b.Source);
+            w.WriteString("tags", b.Tags);
+            WriteNumberOrNull(w, "drain_rate", b.DrainRate);
+            WriteNumberOrNull(w, "circle_size", b.CircleSize);
+            WriteNumberOrNull(w, "overall_difficulty", b.OverallDifficulty);
+            WriteNumberOrNull(w, "approach_rate", b.ApproachRate);
+            WriteNumberOrNull(w, "slider_multiplier", b.SliderMultiplier);
+            WriteNumberOrNull(w, "slider_tick_rate", b.SliderTickRate);
             w.WriteEndObject();
         }
         w.WriteEndArray();
+        w.WriteStartArray("files");
+        foreach (var f in set.Files)
+        {
+            w.WriteStartObject();
+            w.WriteString("filename", f.Filename);
+            w.WriteString("hash", f.Hash);
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
+}
+
+sealed class Skipped
+{
+    public int Count { get; private set; }
+    public string First { get; private set; }
+
+    public void Add(Exception e)
+    {
+        Count++;
+        First ??= $"{e.GetType().Name}: {e.Message}";
     }
 }
 

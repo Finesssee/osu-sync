@@ -16,8 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Environment variable naming the `realm-export` helper when it is not next to osu-sync
+/// Environment variable naming the `realm-export` helper; it wins over a helper next to osu-sync
 pub const REALM_EXPORT_ENV: &str = "OSU_SYNC_REALM_EXPORT";
+
+/// Environment variable naming the osu!lazer install folder that holds `Realm.dll`
+pub const LAZER_DIR_ENV: &str = "OSU_SYNC_LAZER_DIR";
+
+const FRAMEWORK_MISSING: [u32; 2] = [0x8000_8083, 0x8000_8096];
 
 const DOTNET_DOWNLOAD: &str = "https://dotnet.microsoft.com/download/dotnet/8.0";
 
@@ -118,9 +123,9 @@ struct ExportedBeatmap {
     md5_hash: Option<String>,
     difficulty_name: Option<String>,
     ruleset: i32,
-    length_ms: f64,
-    bpm: f64,
-    star_rating: f64,
+    length_ms: Option<f64>,
+    bpm: Option<f64>,
+    star_rating: Option<f64>,
     status: i32,
     hidden: bool,
     title: Option<String>,
@@ -130,12 +135,12 @@ struct ExportedBeatmap {
     author: Option<String>,
     source: Option<String>,
     tags: Option<String>,
-    drain_rate: f32,
-    circle_size: f32,
-    overall_difficulty: f32,
-    approach_rate: f32,
-    slider_multiplier: f64,
-    slider_tick_rate: f64,
+    drain_rate: Option<f32>,
+    circle_size: Option<f32>,
+    overall_difficulty: Option<f32>,
+    approach_rate: Option<f32>,
+    slider_multiplier: Option<f64>,
+    slider_tick_rate: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -159,9 +164,10 @@ impl LazerDatabase {
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
         let helper = find_realm_export(exe_dir.as_deref(), std::env::var_os(REALM_EXPORT_ENV))?;
+        let lazer_dir = std::env::var_os(LAZER_DIR_ENV).filter(|value| !value.is_empty());
 
         let start = Instant::now();
-        let json = run_realm_export(&helper, &realm_path)?;
+        let json = run_realm_export(&helper, &realm_path, lazer_dir.as_deref())?;
         let sets = parse_realm_export(&json)?;
         let export_time = start.elapsed();
         tracing::info!(
@@ -312,15 +318,6 @@ impl LazerDatabase {
 }
 
 fn find_realm_export(exe_dir: Option<&Path>, env_value: Option<OsString>) -> Result<PathBuf> {
-    if let Some(dir) = exe_dir {
-        for name in ["realm-export.exe", "realm-export.dll"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
     if let Some(value) = env_value.filter(|value| !value.is_empty()) {
         let path = PathBuf::from(value);
         if path.is_file() {
@@ -331,6 +328,15 @@ fn find_realm_export(exe_dir: Option<&Path>, env_value: Option<OsString>) -> Res
             REALM_EXPORT_ENV,
             path.display()
         )));
+    }
+
+    if let Some(dir) = exe_dir {
+        for name in ["realm-export.exe", "realm-export.dll"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
     }
 
     let searched = exe_dir.map_or_else(
@@ -344,7 +350,11 @@ fn find_realm_export(exe_dir: Option<&Path>, env_value: Option<OsString>) -> Res
     )))
 }
 
-fn run_realm_export(helper: &Path, realm_path: &Path) -> Result<Vec<u8>> {
+fn run_realm_export(
+    helper: &Path,
+    realm_path: &Path,
+    lazer_dir: Option<&std::ffi::OsStr>,
+) -> Result<Vec<u8>> {
     let is_dll = helper
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"));
@@ -356,32 +366,41 @@ fn run_realm_export(helper: &Path, realm_path: &Path) -> Result<Vec<u8>> {
         Command::new(helper)
     };
 
-    let output = command
-        .arg("export")
-        .arg(realm_path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| {
-            if is_dll && e.kind() == std::io::ErrorKind::NotFound {
-                Error::Realm(missing_runtime_message("`dotnet` is not on PATH."))
-            } else {
-                Error::Realm(format!("could not start {}: {}", helper.display(), e))
-            }
-        })?;
+    command.arg("export").arg(realm_path);
+    if let Some(dir) = lazer_dir {
+        command.arg("--lazer-dir").arg(dir);
+    }
+    let output = command.stdin(Stdio::null()).output().map_err(|e| {
+        if is_dll && e.kind() == std::io::ErrorKind::NotFound {
+            Error::Realm(missing_runtime_message("`dotnet` is not on PATH."))
+        } else {
+            Error::Realm(format!("could not start {}: {}", helper.display(), e))
+        }
+    })?;
 
     if output.status.success() {
         return Ok(output.stdout);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(Error::Realm(match output.status.code() {
-        Some(code) if is_dotnet_host_failure(code) => missing_runtime_message(&stderr),
-        _ => format!("realm-export failed ({}): {}", output.status, stderr),
-    }))
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Error::Realm(export_failure_message(
+        output.status.code(),
+        stderr.trim(),
+    )))
 }
 
-/// The .NET host reports a missing or unusable runtime with HRESULTs 0x800080xx
-fn is_dotnet_host_failure(code: i32) -> bool {
-    (code as u32) & 0xFFFF_FF00 == 0x8000_8000
+/// Map a failed realm-export run to the message shown to the user
+///
+/// The .NET host exits with 0x80008083 when no .NET install is found and 0x80008096 when
+/// no compatible framework is installed (dotnet/runtime docs/design/features/host-error-codes.md).
+fn export_failure_message(code: Option<i32>, stderr: &str) -> String {
+    match code {
+        Some(code) if FRAMEWORK_MISSING.contains(&(code as u32)) => missing_runtime_message(stderr),
+        Some(3) => format!(
+            "osu!lazer's Realm.dll could not be loaded. Set {LAZER_DIR_ENV} to the osu!lazer install folder that holds Realm.dll. {stderr}"
+        ),
+        Some(code) => format!("realm-export failed with exit code {code}: {stderr}"),
+        None => format!("realm-export was terminated: {stderr}"),
+    }
 }
 
 fn missing_runtime_message(detail: &str) -> String {
@@ -460,12 +479,12 @@ fn convert_exported_beatmap(
             beatmap_set_id: set_online_id,
         },
         difficulty: BeatmapDifficulty {
-            hp_drain: beatmap.drain_rate,
-            circle_size: beatmap.circle_size,
-            overall_difficulty: beatmap.overall_difficulty,
-            approach_rate: beatmap.approach_rate,
-            slider_multiplier: beatmap.slider_multiplier,
-            slider_tick_rate: beatmap.slider_tick_rate,
+            hp_drain: beatmap.drain_rate.unwrap_or_default(),
+            circle_size: beatmap.circle_size.unwrap_or_default(),
+            overall_difficulty: beatmap.overall_difficulty.unwrap_or_default(),
+            approach_rate: beatmap.approach_rate.unwrap_or_default(),
+            slider_multiplier: beatmap.slider_multiplier.unwrap_or_default(),
+            slider_tick_rate: beatmap.slider_tick_rate.unwrap_or_default(),
         },
         version: beatmap.difficulty_name.unwrap_or_default(),
         mode: match beatmap.ruleset {
@@ -474,9 +493,12 @@ fn convert_exported_beatmap(
             3 => GameMode::Mania,
             _ => GameMode::Osu,
         },
-        length_ms: beatmap.length_ms as u64,
-        bpm: beatmap.bpm,
-        star_rating: (beatmap.star_rating >= 0.0).then_some(beatmap.star_rating as f32),
+        length_ms: beatmap.length_ms.unwrap_or_default() as u64,
+        bpm: beatmap.bpm.unwrap_or_default(),
+        star_rating: beatmap
+            .star_rating
+            .filter(|rating| *rating >= 0.0)
+            .map(|rating| rating as f32),
         ranked_status: LazerDatabase::convert_lazer_status(beatmap.status),
     }
 }
@@ -504,6 +526,9 @@ mod tests {
         assert_eq!(triangles.online_id, None);
         assert_eq!(triangles.beatmaps.len(), 1);
         assert_eq!(triangles.beatmaps[0].version, "peppy");
+        assert_eq!(triangles.beatmaps[0].online_id, None);
+        assert_eq!(triangles.beatmaps[0].metadata.beatmap_id, None);
+        assert_eq!(triangles.beatmaps[0].bpm, 160.0);
         assert_eq!(triangles.beatmaps[0].ranked_status, None);
         assert_eq!(triangles.files.len(), 2);
         assert_eq!(triangles.files[0].filename, "audio.mp3");
@@ -516,7 +541,7 @@ mod tests {
         assert_eq!(marisa.online_id, Some(243));
         assert_eq!(marisa.files.len(), 5);
         let versions: Vec<&str> = marisa.beatmaps.iter().map(|b| b.version.as_str()).collect();
-        assert_eq!(versions, ["Easy", "Normal"]);
+        assert_eq!(versions, ["Easy", "Normal", "Hard"]);
 
         let easy = &marisa.beatmaps[0];
         assert_eq!(easy.id, "3e8bafd7-0772-40db-86d3-3673752153dd");
@@ -532,6 +557,28 @@ mod tests {
         assert_eq!(easy.metadata.beatmap_set_id, Some(243));
         assert_eq!(easy.difficulty.circle_size, 5.0);
         assert_eq!(easy.difficulty.slider_multiplier, 0.5);
+    }
+
+    #[test]
+    fn parses_null_numbers_and_skips_hidden_beatmaps() {
+        let json = br#"[{"id":"s1","online_id":0,"protected":false,"delete_pending":false,"artist":null,"title":null,"creator":null,"beatmaps":[{"id":"b1","online_id":0,"hash":null,"md5_hash":"m1","difficulty_name":"Inf","ruleset":3,"length_ms":null,"bpm":null,"star_rating":null,"status":1,"hidden":false,"title":null,"title_unicode":null,"artist":null,"artist_unicode":null,"author":null,"source":null,"tags":null,"drain_rate":null,"circle_size":4,"overall_difficulty":null,"approach_rate":null,"slider_multiplier":null,"slider_tick_rate":null},{"id":"b2","online_id":7,"hash":"h","md5_hash":"m2","difficulty_name":"Hidden","ruleset":0,"length_ms":1000,"bpm":120,"star_rating":2,"status":1,"hidden":true,"title":"t","title_unicode":"","artist":"a","artist_unicode":"","author":"c","source":"","tags":"","drain_rate":5,"circle_size":4,"overall_difficulty":5,"approach_rate":5,"slider_multiplier":1,"slider_tick_rate":1}],"files":[{"filename":"a.osu","hash":null}]}]"#;
+        let sets = parse_realm_export(json).unwrap();
+
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].online_id, None);
+        assert_eq!(sets[0].files.len(), 0);
+        assert_eq!(sets[0].beatmaps.len(), 1);
+        let beatmap = &sets[0].beatmaps[0];
+        assert_eq!(beatmap.version, "Inf");
+        assert_eq!(beatmap.online_id, None);
+        assert_eq!(beatmap.mode, GameMode::Mania);
+        assert_eq!(beatmap.hash, "");
+        assert_eq!(beatmap.length_ms, 0);
+        assert_eq!(beatmap.bpm, 0.0);
+        assert_eq!(beatmap.star_rating, None);
+        assert_eq!(beatmap.difficulty.circle_size, 4.0);
+        assert_eq!(beatmap.difficulty.hp_drain, 0.0);
+        assert_eq!(beatmap.difficulty.slider_multiplier, 0.0);
     }
 
     #[test]
@@ -551,19 +598,52 @@ mod tests {
         assert!(err.contains(&missing.display().to_string()), "{err}");
 
         std::fs::write(dir.path().join("realm-export.dll"), b"").unwrap();
+        let err = find_realm_export(Some(dir.path()), Some(missing.into_os_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(REALM_EXPORT_ENV), "{err}");
         assert_eq!(
-            find_realm_export(Some(dir.path()), Some(missing.into_os_string())).unwrap(),
+            find_realm_export(Some(dir.path()), None).unwrap(),
             dir.path().join("realm-export.dll")
+        );
+
+        let elsewhere = dir.path().join("elsewhere.exe");
+        std::fs::write(&elsewhere, b"").unwrap();
+        assert_eq!(
+            find_realm_export(Some(dir.path()), Some(elsewhere.clone().into_os_string())).unwrap(),
+            elsewhere
         );
     }
 
     #[test]
-    fn missing_runtime_names_dotnet_8() {
-        assert!(is_dotnet_host_failure(0x8000_8096_u32 as i32));
-        assert!(!is_dotnet_host_failure(1));
-        let message = missing_runtime_message("");
-        assert!(message.contains(".NET 8"), "{message}");
-        assert!(message.contains(DOTNET_DOWNLOAD), "{message}");
+    fn export_failure_messages() {
+        assert_eq!(
+            export_failure_message(Some(0x8000_8083_u32 as i32), "hostfxr.dll [not found]"),
+            "realm-export needs the .NET 8 runtime, which was not found. Install it from https://dotnet.microsoft.com/download/dotnet/8.0. hostfxr.dll [not found]"
+        );
+        assert_eq!(
+            export_failure_message(Some(0x8000_8096_u32 as i32), "framework 8.0 missing"),
+            "realm-export needs the .NET 8 runtime, which was not found. Install it from https://dotnet.microsoft.com/download/dotnet/8.0. framework 8.0 missing"
+        );
+        assert_eq!(
+            export_failure_message(Some(0x8000_809a_u32 as i32), "app path missing"),
+            format!(
+                "realm-export failed with exit code {}: app path missing",
+                0x8000_809a_u32 as i32
+            )
+        );
+        assert_eq!(
+            export_failure_message(Some(3), "Realm.dll not found in X."),
+            "osu!lazer's Realm.dll could not be loaded. Set OSU_SYNC_LAZER_DIR to the osu!lazer install folder that holds Realm.dll. Realm.dll not found in X."
+        );
+        assert_eq!(
+            export_failure_message(Some(1), "boom"),
+            "realm-export failed with exit code 1: boom"
+        );
+        assert_eq!(
+            export_failure_message(None, "killed"),
+            "realm-export was terminated: killed"
+        );
     }
 }
 

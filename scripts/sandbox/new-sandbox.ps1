@@ -14,7 +14,8 @@ is kept, so a second run copies nothing.
 Root must be under D:\osu-sync-sandbox, because realm-export trims nothing
 outside it. Root must not be inside the live installs or %APPDATA%\osu, must not
 contain either source folder, may not be on a network or subst drive, and no
-existing folder on its path may be a junction or symbolic link.
+existing folder on its path may be a junction or symbolic link. Nothing already
+under Root may be a junction, a symbolic link or a hard-linked file.
 -RealmExport defaults to OSU_SYNC_REALM_EXPORT, then to
 target\release\realm-export.exe in this repository.
 
@@ -90,6 +91,19 @@ for ($p = $Root; $p; $p = [IO.Path]::GetDirectoryName($p)) {
         Stop-Refused "Refusing to build a sandbox at $Root because $p is a junction or symbolic link"
     }
 }
+
+function Assert-NoLinksUnder([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    foreach ($item in Get-ChildItem -LiteralPath $Path -Recurse -Force) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Stop-Refused "Refusing to build a sandbox at $Root because $($item.FullName) is a junction or symbolic link"
+        }
+        if ($item.LinkType -eq 'HardLink') {
+            Stop-Refused "Refusing to build a sandbox at $Root because $($item.FullName) is a hard link to another file"
+        }
+    }
+}
+Assert-NoLinksUnder $Root
 
 $stats = [ordered]@{ copied = 0; skipped = 0 }
 
