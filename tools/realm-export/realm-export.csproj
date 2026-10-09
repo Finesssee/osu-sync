@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>LatestPatch</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>realm-export</AssemblyName>
+    <RootNamespace>RealmExport</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Realm" Version="20.1.0" ExcludeAssets="runtime;native;build;buildTransitive" />
+    <PackageReference Include="MongoDB.Bson" Version="2.21.0" ExcludeAssets="runtime" />
+    <PackageReference Include="Remotion.Linq" Version="2.2.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+</Project>
