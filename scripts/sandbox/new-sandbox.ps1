@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 <#
 .SYNOPSIS
 Builds a writable osu-sync test sandbox from copies of the live installs.
@@ -172,7 +174,7 @@ if (-not (Test-Path -LiteralPath $RealmExport -PathType Leaf)) {
 
 $started = Get-Date
 $export = [Text.Json.JsonDocument]::Parse((Invoke-RealmExport @('export', $RealmSource)))
-$chosen = @($export.RootElement.EnumerateArray() |
+$chosen = @($export.RootElement.GetProperty('sets').EnumerateArray() |
     Where-Object { -not $_.GetProperty('delete_pending').GetBoolean() } |
     Select-Object -First $Sets)
 if ($chosen.Count -lt $Sets) {

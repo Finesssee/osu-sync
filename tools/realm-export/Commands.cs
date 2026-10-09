@@ -196,7 +196,8 @@ static class Commands
     {
         int written = 0;
         using var w = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false });
-        w.WriteStartArray();
+        w.WriteStartObject();
+        w.WriteStartArray("sets");
         foreach (var set in sets)
         {
             var buffer = new ArrayBufferWriter<byte>();
@@ -214,6 +215,8 @@ static class Commands
             written++;
         }
         w.WriteEndArray();
+        skipped.WriteTo(w);
+        w.WriteEndObject();
         return written;
     }
 

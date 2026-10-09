@@ -34,16 +34,38 @@ pub struct LazerScanTiming {
     pub sets: usize,
     pub beatmaps: usize,
     pub named_files: usize,
+    pub skipped: Option<SkippedSets>,
 }
 
 impl LazerScanTiming {
     pub fn report(&self) -> String {
-        format!(
+        let mut report = format!(
             "Lazer realm export completed in {:.2}s\n - {} sets, {} beatmaps, {} named files",
             self.total.as_secs_f64(),
             self.sets,
             self.beatmaps,
             self.named_files,
+        );
+        if let Some(skipped) = &self.skipped {
+            report.push_str(&format!("\n - warning: {skipped}"));
+        }
+        report
+    }
+}
+
+/// Sets the helper could not export; the rest of the library was read
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SkippedSets {
+    pub count: usize,
+    pub first_error: String,
+}
+
+impl std::fmt::Display for SkippedSets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} osu!lazer sets could not be read and are left out; first error: {}",
+            self.count, self.first_error
         )
     }
 }
@@ -52,6 +74,7 @@ impl LazerScanTiming {
 pub struct LazerDatabase {
     file_store: LazerFileStore,
     sets: Vec<LazerBeatmapSet>,
+    skipped: Option<SkippedSets>,
     export_time: Duration,
 }
 
@@ -104,6 +127,12 @@ pub struct LazerNamedFile {
     pub filename: String,
     /// SHA-256 hash (content address)
     pub hash: String,
+}
+
+#[derive(Deserialize)]
+struct ExportedLibrary {
+    sets: Vec<ExportedSet>,
+    skipped: Option<SkippedSets>,
 }
 
 #[derive(Deserialize)]
@@ -168,7 +197,7 @@ impl LazerDatabase {
 
         let start = Instant::now();
         let json = run_realm_export(&helper, &realm_path, lazer_dir.as_deref())?;
-        let sets = parse_realm_export(&json)?;
+        let (sets, skipped) = parse_realm_export(&json)?;
         let export_time = start.elapsed();
         tracing::info!(
             "Read {} lazer sets from {:?} in {:.2}s",
@@ -176,12 +205,21 @@ impl LazerDatabase {
             realm_path,
             export_time.as_secs_f64()
         );
+        if let Some(skipped) = &skipped {
+            tracing::warn!("{skipped}");
+        }
 
         Ok(Self {
             file_store: LazerFileStore::new(data_path),
             sets,
+            skipped,
             export_time,
         })
+    }
+
+    /// Sets that could not be read and are missing from the set list
+    pub fn skipped(&self) -> Option<&SkippedSets> {
+        self.skipped.as_ref()
     }
 
     /// Always true, because `open` fails when the realm cannot be read
@@ -206,6 +244,7 @@ impl LazerDatabase {
             sets: self.sets.len(),
             beatmaps: self.sets.iter().map(|s| s.beatmaps.len()).sum(),
             named_files: self.sets.iter().map(|s| s.files.len()).sum(),
+            skipped: self.skipped.clone(),
         };
         Ok((self.sets.clone(), timing))
     }
@@ -382,7 +421,7 @@ fn run_realm_export(
     let stderr = stderr.trim();
     if output.status.success() {
         if !stderr.is_empty() {
-            tracing::warn!("realm-export: {stderr}");
+            tracing::debug!("realm-export: {stderr}");
         }
         return Ok(output.stdout);
     }
@@ -414,14 +453,16 @@ fn missing_runtime_message(detail: &str) -> String {
     )
 }
 
-fn parse_realm_export(json: &[u8]) -> Result<Vec<LazerBeatmapSet>> {
-    let exported: Vec<ExportedSet> = serde_json::from_slice(json)
+fn parse_realm_export(json: &[u8]) -> Result<(Vec<LazerBeatmapSet>, Option<SkippedSets>)> {
+    let exported: ExportedLibrary = serde_json::from_slice(json)
         .map_err(|e| Error::Realm(format!("could not parse realm-export output: {}", e)))?;
-    Ok(exported
+    let sets = exported
+        .sets
         .into_iter()
         .filter(|set| !set.delete_pending)
         .map(convert_exported_set)
-        .collect())
+        .collect();
+    Ok((sets, exported.skipped))
 }
 
 fn positive(id: i32) -> Option<i32> {
@@ -515,8 +556,10 @@ mod tests {
 
     #[test]
     fn parses_realm_export_json() {
-        let sets = parse_realm_export(include_bytes!("fixtures/realm-export.json")).unwrap();
+        let (sets, skipped) =
+            parse_realm_export(include_bytes!("fixtures/realm-export.json")).unwrap();
 
+        assert_eq!(skipped, None);
         let ids: Vec<&str> = sets.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -565,8 +608,8 @@ mod tests {
 
     #[test]
     fn parses_null_numbers_and_skips_hidden_beatmaps() {
-        let json = br#"[{"id":"s1","online_id":0,"protected":false,"delete_pending":false,"artist":null,"title":null,"creator":null,"beatmaps":[{"id":"b1","online_id":0,"hash":null,"md5_hash":"m1","difficulty_name":"Inf","ruleset":3,"length_ms":null,"bpm":null,"star_rating":null,"status":1,"hidden":false,"title":null,"title_unicode":null,"artist":null,"artist_unicode":null,"author":null,"source":null,"tags":null,"drain_rate":null,"circle_size":4,"overall_difficulty":null,"approach_rate":null,"slider_multiplier":null,"slider_tick_rate":null},{"id":"b2","online_id":7,"hash":"h","md5_hash":"m2","difficulty_name":"Hidden","ruleset":0,"length_ms":1000,"bpm":120,"star_rating":2,"status":1,"hidden":true,"title":"t","title_unicode":"","artist":"a","artist_unicode":"","author":"c","source":"","tags":"","drain_rate":5,"circle_size":4,"overall_difficulty":5,"approach_rate":5,"slider_multiplier":1,"slider_tick_rate":1}],"files":[{"filename":"a.osu","hash":null}]}]"#;
-        let sets = parse_realm_export(json).unwrap();
+        let json = br#"{"sets":[{"id":"s1","online_id":0,"protected":false,"delete_pending":false,"artist":null,"title":null,"creator":null,"beatmaps":[{"id":"b1","online_id":0,"hash":null,"md5_hash":"m1","difficulty_name":"Inf","ruleset":3,"length_ms":null,"bpm":null,"star_rating":null,"status":1,"hidden":false,"title":null,"title_unicode":null,"artist":null,"artist_unicode":null,"author":null,"source":null,"tags":null,"drain_rate":null,"circle_size":4,"overall_difficulty":null,"approach_rate":null,"slider_multiplier":null,"slider_tick_rate":null},{"id":"b2","online_id":7,"hash":"h","md5_hash":"m2","difficulty_name":"Hidden","ruleset":0,"length_ms":1000,"bpm":120,"star_rating":2,"status":1,"hidden":true,"title":"t","title_unicode":"","artist":"a","artist_unicode":"","author":"c","source":"","tags":"","drain_rate":5,"circle_size":4,"overall_difficulty":5,"approach_rate":5,"slider_multiplier":1,"slider_tick_rate":1}],"files":[{"filename":"a.osu","hash":null}]}],"skipped":null}"#;
+        let (sets, _) = parse_realm_export(json).unwrap();
 
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].online_id, None);
@@ -583,6 +626,25 @@ mod tests {
         assert_eq!(beatmap.difficulty.circle_size, 4.0);
         assert_eq!(beatmap.difficulty.hp_drain, 0.0);
         assert_eq!(beatmap.difficulty.slider_multiplier, 0.0);
+    }
+
+    #[test]
+    fn parses_skipped_sets_as_a_warning() {
+        let json = br#"{"sets":[{"id":"s1","online_id":5,"protected":false,"delete_pending":false,"artist":"a","title":"t","creator":"c","beatmaps":[],"files":[]}],"skipped":{"count":7026,"first_error":"InvalidCastException: Unable to cast"}}"#;
+        let (sets, skipped) = parse_realm_export(json).unwrap();
+
+        assert_eq!(sets.len(), 1);
+        assert_eq!(
+            skipped,
+            Some(SkippedSets {
+                count: 7026,
+                first_error: "InvalidCastException: Unable to cast".to_string(),
+            })
+        );
+        assert_eq!(
+            skipped.unwrap().to_string(),
+            "7026 osu!lazer sets could not be read and are left out; first error: InvalidCastException: Unable to cast"
+        );
     }
 
     #[test]

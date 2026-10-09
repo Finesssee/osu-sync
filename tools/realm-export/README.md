@@ -48,9 +48,12 @@ realm-export mark-delete-pending <client.realm> --id <set-id> [--lazer-dir <dir>
   prints a warning to stderr and keeps the original result or error.
   `--out` refuses a path that ends in `.realm`, that is the input realm itself, or that names an alternate
   data stream (`file:stream`).
-  A set that cannot be read or written is skipped, and one stderr warning gives the count and the first
-  error. osu-sync logs that warning. If every set is skipped, `export` writes nothing and exits 1 with the
-  count and the first error, so a systemic failure is not read as an empty library.
+  The JSON is `{"sets": [...], "skipped": null}`. A set that cannot be read or written is left out, and
+  `skipped` becomes `{"count": <n>, "first_error": "<type>: <message>"}`; stderr repeats it as a warning.
+  osu-sync reads `skipped` and shows it in `--cli scan` (a `Warning:` line, or `lazer.warning` with
+  `--json`), on the TUI scan screen and as the Statistics status, and logs it to `osu-sync.log` in plain
+  TUI mode. Sync and dry run do not show it. If every set is skipped, `export` writes nothing and exits 1
+  with the count and the first error, so a systemic failure is not read as an empty library.
   Numbers that are infinite or NaN are written as `null`.
   Sets are sorted by online ID then set ID, beatmaps the same way, and files by filename, so two exports of
   one realm are byte-identical.
@@ -68,8 +71,8 @@ link, or has a `client.realm.lock`, `.management` or `.note` beside it that is a
   library that is slightly out of date. Close osu!lazer for an exact read.
 - The helper loads whatever `Realm.dll` the lazer install has. If its version does not match the one the
   helper was built against (Realm 20.1.0), `export` exits nonzero without writing anything: either the realm
-  fails to open, or every set fails to read. If only some sets fail, `export` writes the rest and warns
-  on stderr. `trim` can stop halfway and leave a sandbox realm partly trimmed. Rebuild the sandbox in that
+  fails to open, or every set fails to read. If only some sets fail, `export` writes the rest and reports
+  them in `skipped`. `trim` can stop halfway and leave a sandbox realm partly trimmed. Rebuild the sandbox in that
   case.
 
 Exit codes: 0 success, 1 failure, 2 usage (including an `--id` or `<ids-file>` line that is not a GUID),

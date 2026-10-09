@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace RealmExport;
 
 static class ExportOutcome
@@ -19,5 +21,18 @@ sealed class Skipped
     {
         Count++;
         First ??= $"{e.GetType().Name}: {e.Message}";
+    }
+
+    public void WriteTo(Utf8JsonWriter w)
+    {
+        if (Count == 0)
+        {
+            w.WriteNull("skipped");
+            return;
+        }
+        w.WriteStartObject("skipped");
+        w.WriteNumber("count", Count);
+        w.WriteString("first_error", First);
+        w.WriteEndObject();
     }
 }
