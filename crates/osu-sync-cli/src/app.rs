@@ -13,6 +13,7 @@ use osu_sync_core::backup::{
 };
 use osu_sync_core::beatmap::GameMode;
 use osu_sync_core::collection::{Collection, CollectionSyncResult, CollectionSyncStrategy};
+use osu_sync_core::config::SaveOutcome;
 use osu_sync_core::dedup::DuplicateInfo;
 use osu_sync_core::filter::FilterCriteria;
 use osu_sync_core::media::{ExtractionProgress, ExtractionResult, MediaType, OutputOrganization};
@@ -942,10 +943,12 @@ impl App {
                         selected,
                         stable_path: new_stable,
                         lazer_path: new_lazer,
-                        status_message: if save_result.is_ok() {
-                            "Path saved!".to_string()
-                        } else {
-                            "Path updated (failed to save)".to_string()
+                        status_message: match save_result {
+                            Ok(SaveOutcome::Saved) => "Path saved!".to_string(),
+                            Ok(SaveOutcome::SkippedForPathOverrides) => {
+                                "Path not saved because path overrides are active".to_string()
+                            }
+                            Err(_) => "Path updated (failed to save)".to_string(),
                         },
                         editing: None,
                     };
@@ -1060,10 +1063,15 @@ impl App {
                 selected: *selected,
                 stable_path: stable_path.clone(),
                 lazer_path: lazer_path.clone(),
-                status_message: if save_result.is_ok() {
-                    format!("Theme '{}' applied and saved!", new_theme.display_name())
-                } else {
-                    format!("Theme '{}' applied (save failed)", new_theme.display_name())
+                status_message: match save_result {
+                    Ok(SaveOutcome::Saved) => {
+                        format!("Theme '{}' applied and saved!", new_theme.display_name())
+                    }
+                    Ok(SaveOutcome::SkippedForPathOverrides) => format!(
+                        "Theme '{}' applied, not saved because path overrides are active",
+                        new_theme.display_name()
+                    ),
+                    Err(_) => format!("Theme '{}' applied (save failed)", new_theme.display_name()),
                 },
                 editing: None,
             };
