@@ -777,7 +777,7 @@ impl Materializer {
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let (mut limited, mut link_failed) = (false, false);
+            let (mut limited, mut link_failed) = (false, None);
             if p.how == How::Link && !*cross_volume {
                 if let Some(dir) = blob.parent() {
                     if !checked_dirs.contains(dir) {
@@ -793,10 +793,7 @@ impl Materializer {
                     Err(e) => match classify_hard_link_error(&e) {
                         HardLinkFailure::LinkLimit => limited = true,
                         HardLinkFailure::CrossVolume => *cross_volume = true,
-                        HardLinkFailure::Other => {
-                            link_failed = true;
-                            link_error.get_or_insert_with(|| e.to_string());
-                        }
+                        HardLinkFailure::Other => link_failed = Some(e.to_string()),
                     },
                 }
             }
@@ -805,7 +802,11 @@ impl Materializer {
             copy_via_temp(&blob, &p.blob, &dest, &folder, expected_md5, mtime)?;
             counts.copied += 1;
             counts.link_limit_copies += usize::from(limited);
-            *link_error_copies += usize::from(link_failed);
+            // The note quotes a link error only from a file whose fallback copy landed.
+            if let Some(e) = link_failed {
+                *link_error_copies += 1;
+                link_error.get_or_insert(e);
+            }
         }
         Ok(counts)
     }
@@ -1308,6 +1309,51 @@ mod tests {
         assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
         assert_eq!(report.link_error_copies, 0);
         assert_eq!(report.notes(&fx.songs), Vec::<String>::new());
+    }
+
+    #[test]
+    fn link_error_note_quotes_a_file_whose_copy_landed() {
+        let fx = Fixture::new();
+        let first = fx.basic_set();
+        let other: &[u8] = b"osu file format v14\n\n[General]\nAudioFilename: other.mp3\n";
+        let hash = fx.blob(other);
+        let audio = fx.blob(b"ID3 other audio");
+        let second = set(
+            "99999999-0000-0000-0000-000000000000",
+            Some(2002),
+            "Other",
+            "Song",
+            vec![
+                ("Other - Song (Mapper) [Easy].osu", hash.clone()),
+                ("other.mp3", audio),
+            ],
+            vec![(hash, format!("{:x}", Md5::digest(other)))],
+        );
+        let mut m = fx.materializer();
+        // In the first set a folder takes the name, so its fallback copy fails too;
+        // the second set's link fails with another error and its copy lands.
+        m.link = |_, dst| {
+            if dst.to_string_lossy().contains("1001 Artist - Title") {
+                fs::create_dir(dst)?;
+                return Err(io::Error::from_raw_os_error(1));
+            }
+            Err(io::Error::from_raw_os_error(5))
+        };
+        let report = fx.run(&m, &[first, second]);
+
+        assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
+        assert!(matches!(
+            report.sets[1].outcome,
+            SetOutcome::Materialized(_)
+        ));
+        assert_eq!(report.link_error_copies, 1);
+        assert_eq!(
+            report.notes(&fx.songs),
+            [format!(
+                "1 files were copied because hard-linking them failed, first error: {}",
+                io::Error::from_raw_os_error(5)
+            )]
+        );
     }
 
     #[test]
