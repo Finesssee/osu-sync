@@ -422,8 +422,22 @@ impl UnifiedMigration {
         }
     }
 
+    /// Every step writes into the stable, lazer or shared folder, and `plan` does
+    /// too through the prerequisite write test.
+    fn check_live_writes(&self) -> Result<()> {
+        [
+            Some(&self.stable_path),
+            Some(&self.lazer_path),
+            self.config.shared_path.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .try_for_each(|path| crate::config::live_guard::check_write(path))
+    }
+
     /// Plans the migration and returns a detailed plan.
     pub fn plan(&self) -> Result<MigrationPlan> {
+        self.check_live_writes()?;
         let mut plan = MigrationPlan::new(self.config.mode);
 
         // Validate configuration
@@ -526,6 +540,7 @@ impl UnifiedMigration {
     where
         F: Fn(MigrationProgress) + Send + Sync,
     {
+        self.check_live_writes()?;
         // Create the plan
         let plan = self.plan()?;
         let total_steps = plan.steps.len();
@@ -618,6 +633,7 @@ impl UnifiedMigration {
 
     /// Rolls back a failed or incomplete migration.
     pub fn rollback(&self) -> Result<()> {
+        self.check_live_writes()?;
         let manifest = self.manifest.as_ref().ok_or_else(|| {
             Error::Other("No migration manifest available for rollback".to_string())
         })?;
@@ -1438,6 +1454,51 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::live_guard::{set_test_roots, InstallPaths, LiveRoots};
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn migration_refuses_live_roots_before_writing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let stable = dir.path().join("osu!");
+        let lazer = dir.path().join("osu!lazer");
+        fs::create_dir_all(stable.join("Songs")).unwrap();
+        fs::create_dir_all(lazer.join("files")).unwrap();
+        fs::write(lazer.join("client.realm"), b"realm").unwrap();
+        set_test_roots(LiveRoots::new(
+            InstallPaths {
+                stable: Some(stable.clone()),
+                lazer: Some(lazer.clone()),
+            },
+            InstallPaths::default(),
+        ));
+
+        let shared = dir.path().join("shared");
+        let mut migration = UnifiedMigration::new(
+            UnifiedStorageConfig::true_unified(shared.clone()),
+            stable.clone(),
+            lazer.clone(),
+        );
+
+        let refused_root = |result: Result<()>| match result {
+            Err(Error::LiveWriteRefused { root, .. }) => root,
+            other => panic!("expected a live-write refusal, got {other:?}"),
+        };
+        assert_eq!(refused_root(migration.plan().map(|_| ())), stable);
+        assert_eq!(refused_root(migration.execute(|_| {}).map(|_| ())), stable);
+
+        assert_eq!(names(&stable), vec!["Songs"]);
+        assert_eq!(names(&lazer), vec!["client.realm", "files"]);
+        assert!(!shared.exists());
+    }
 
     #[test]
     fn test_migration_step_description() {

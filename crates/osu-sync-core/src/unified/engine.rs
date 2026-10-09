@@ -265,6 +265,11 @@ impl UnifiedStorageEngine {
         &self.manifest
     }
 
+    fn check_live_writes(&self) -> Result<()> {
+        crate::config::live_guard::check_write(&self.stable_path)?;
+        crate::config::live_guard::check_write(&self.lazer_path)
+    }
+
     /// Performs initial setup of unified storage.
     ///
     /// This operation:
@@ -279,11 +284,6 @@ impl UnifiedStorageEngine {
     /// - Unified storage is not enabled in the configuration
     /// - Failed to create required links
     /// - Insufficient permissions for link creation
-    fn check_live_writes(&self) -> Result<()> {
-        crate::config::live_guard::check_write(&self.stable_path)?;
-        crate::config::live_guard::check_write(&self.lazer_path)
-    }
-
     pub fn setup(&mut self) -> Result<SetupResult> {
         if !self.config.is_enabled() {
             return Err(Error::Config(

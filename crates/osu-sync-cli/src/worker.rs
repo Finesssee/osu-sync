@@ -1235,17 +1235,24 @@ fn handle_unified_disable(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<
         .as_ref()
         .map(|p| p.join(".osu-sync-unified.json"));
 
-    if let Some(path) = manifest_path {
-        if path.exists() {
-            // In a full implementation, we would:
-            // 1. Load manifest
-            // 2. Remove all junctions/symlinks
-            // 3. Restore original folder structure
-            // 4. Delete manifest
-
-            // For now, just delete the manifest
-            let _ = std::fs::remove_file(&path);
+    if let Some(path) = manifest_path.filter(|p| p.exists()) {
+        if let Err(e) = osu_sync_core::config::live_guard::check_write(&path) {
+            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
+                success: false,
+                message: e.to_string(),
+                links_created: 0,
+                space_saved: 0,
+            });
+            return;
         }
+        // In a full implementation, we would:
+        // 1. Load manifest
+        // 2. Remove all junctions/symlinks
+        // 3. Restore original folder structure
+        // 4. Delete manifest
+
+        // For now, just delete the manifest
+        let _ = std::fs::remove_file(&path);
     }
 
     // Update config to disable unified storage
