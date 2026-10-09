@@ -205,7 +205,8 @@ impl MaterializeReport {
 /// Keys are NFC and lowercase, the way stable and Windows compare names.
 #[derive(Debug, Default)]
 pub struct StableClaims {
-    folders: HashMap<String, HashSet<String>>,
+    /// Folder key to its `.osu` keys, each with its MD5 when known.
+    folders: HashMap<String, HashMap<String, Option<String>>>,
     osu_names: HashMap<String, String>,
     md5s: HashMap<String, String>,
     temps: Vec<PathBuf>,
@@ -246,17 +247,19 @@ impl StableClaims {
     /// Records that `folder` holds a beatmap, as listed in Songs or in osu!.db.
     pub fn claim(&mut self, folder: &str, osu_filename: Option<&str>, md5: Option<&str>) {
         let keys = self.folders.entry(name_key(folder)).or_default();
+        let md5 = md5.filter(|m| !m.is_empty()).map(str::to_ascii_lowercase);
         if let Some(name) = osu_filename.filter(|n| !n.is_empty()) {
             let key = name_key(name);
-            keys.insert(key.clone());
+            let known = keys.entry(key.clone()).or_default();
+            if known.is_none() {
+                known.clone_from(&md5);
+            }
             self.osu_names
                 .entry(key)
                 .or_insert_with(|| folder.to_string());
         }
-        if let Some(md5) = md5.filter(|m| !m.is_empty()) {
-            self.md5s
-                .entry(md5.to_ascii_lowercase())
-                .or_insert_with(|| folder.to_string());
+        if let Some(md5) = md5 {
+            self.md5s.entry(md5).or_insert_with(|| folder.to_string());
         }
     }
 
@@ -275,7 +278,7 @@ impl StableClaims {
     fn foreign(&self, folder: &str, ours: &HashSet<String>) -> bool {
         self.folders
             .get(&name_key(folder))
-            .is_some_and(|keys| !keys.is_subset(ours))
+            .is_some_and(|keys| !keys.keys().all(|k| ours.contains(k)))
     }
 
     /// Plans one set against what stable holds. Reads nothing from disk.
@@ -327,7 +330,7 @@ impl StableClaims {
             longest = longest.max(len16(&rel));
             let dest: PathBuf = parts.iter().collect();
             if is_top_level_osu(&dest) {
-                osu_keys.insert(key, file.filename.clone());
+                osu_keys.insert(key, (file.filename.clone(), blob.clone()));
             }
             placements.push(Placement {
                 how: how(&rel, true, false),
@@ -381,13 +384,21 @@ impl StableClaims {
                 }
             }
         }
-        for (key, filename) in &osu_keys {
+        let held = self.folders.get(&folder_key);
+        for (key, (filename, blob)) in &osu_keys {
+            let duplicate = |folder: &str| SkipReason::DuplicateOsuFilename {
+                filename: filename.clone(),
+                folder: folder.to_string(),
+            };
             if let Some(owner) = self.osu_names.get(key) {
                 if name_key(owner) != folder_key {
-                    return Err(SkipReason::DuplicateOsuFilename {
-                        filename: filename.clone(),
-                        folder: owner.clone(),
-                    });
+                    return Err(duplicate(owner));
+                }
+            }
+            let theirs = held.and_then(|keys| keys.get(key)).and_then(Option::as_ref);
+            if let (Some(theirs), Some(ours)) = (theirs, osu_md5.get(blob)) {
+                if theirs != ours {
+                    return Err(duplicate(&folder));
                 }
             }
         }
@@ -1144,6 +1155,34 @@ mod tests {
             })
         );
         assert!(!fx.songs.join("2002 Artist - Title").exists());
+    }
+
+    #[test]
+    fn updated_copy_of_a_set_in_one_run_is_skipped_by_preview_and_run() {
+        let fx = Fixture::new();
+        let first = fx.basic_set();
+        let updated =
+            b"osu file format v14\n\n[General]\nAudioFilename: audio.mp3\nPreviewTime: 1\n";
+        let osu = fx.blob(updated);
+        let mut second = fx.basic_set();
+        second.id = "99999999-0000-0000-0000-000000000000".to_string();
+        second.files[0].hash = osu.clone();
+        second.beatmaps[0].hash = osu;
+        second.beatmaps[0].md5_hash = "fd58ec3d315fc63e16fc809aea6972f3".to_string();
+        let reason = SkipReason::DuplicateOsuFilename {
+            filename: OSU_NAME.to_string(),
+            folder: "1001 Artist - Title".to_string(),
+        };
+
+        let mut claims = StableClaims::default();
+        let plans = fx.materializer().preview(&[&first, &second], &mut claims);
+        assert_eq!(plans[1].result.as_ref().err(), Some(&reason));
+        let report = fx.run(&fx.materializer(), &[first, second]);
+        assert_eq!(report.sets[1].outcome, SetOutcome::Skipped(reason));
+        assert_eq!(
+            fs::read(fx.songs.join("1001 Artist - Title").join(OSU_NAME)).unwrap(),
+            OSU
+        );
     }
 
     #[test]
