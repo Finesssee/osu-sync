@@ -288,9 +288,11 @@ impl Relinker {
                         report.skip(reason);
                         report.notes.extend(note);
                     }
-                    Settled::Relinked(after) => {
+                    Settled::Relinked { after, reclaimed } => {
                         report.relinked += 1;
-                        report.bytes_reclaimed += c.size;
+                        if reclaimed {
+                            report.bytes_reclaimed += c.size;
+                        }
                         stat = after.unwrap_or(stat);
                     }
                 }
@@ -458,36 +460,39 @@ impl Relinker {
                     decision: decide(&c.rel, true, *already_linked, limit_hit),
                 };
                 match self.apply(&plan, c, limited) {
-                    Ok(None) => Settled::Relinked(
-                        fs::metadata(&c.stable)
+                    Ok(Ok(reclaimed)) => Settled::Relinked {
+                        after: fs::metadata(&c.stable)
                             .ok()
                             .map(|meta| (meta.len(), mtime_key(&meta))),
-                    ),
-                    Ok(Some((reason, note))) => Settled::Skip(reason, note),
+                        reclaimed,
+                    },
+                    Ok(Err((reason, note))) => Settled::Skip(reason, note),
                     Err(e) => Settled::Error(format!("{}: {e}", c.stable.display())),
                 }
             }
         }
     }
 
-    /// Replaces the stable file with a link to its blob when the plan says so.
-    /// Returns the skip reason and note when it leaves the file as it is.
+    /// Replaces the stable file with a link to its blob when the plan says so. Returns
+    /// whether the replaced file was its data's only link, so its space was freed, or the
+    /// skip reason and note when it leaves the file as it is.
     fn apply(
         &self,
         plan: &Relink,
         c: &Candidate,
         limited: &Mutex<HashSet<PathBuf>>,
-    ) -> io::Result<Option<(RelinkSkip, Option<String>)>> {
+    ) -> io::Result<std::result::Result<bool, Left>> {
         if let Decision::Skip(reason) = plan.decision {
-            return Ok(Some((reason, None)));
+            return Ok(Err((reason, None)));
         }
         let meta = fs::metadata(&plan.stable)?;
         if meta.len() != c.size || mtime_key(&meta) != c.mtime {
-            return Ok(Some((RelinkSkip::Changed, None)));
+            return Ok(Err((RelinkSkip::Changed, None)));
         }
-        if let Some(left) = verify(plan, c)? {
-            return Ok(Some(left));
-        }
+        let links = match verify(plan, c)? {
+            Ok(links) => links,
+            Err(left) => return Ok(Err(left)),
+        };
         let folder = plan
             .stable
             .parent()
@@ -500,19 +505,19 @@ impl Relinker {
                         if let Ok(mut set) = limited.lock() {
                             set.insert(plan.blob.clone());
                         }
-                        Ok(Some((RelinkSkip::LinkLimit, None)))
+                        Ok(Err((RelinkSkip::LinkLimit, None)))
                     }
-                    HardLinkFailure::CrossVolume => Ok(Some((RelinkSkip::CrossVolume, None))),
+                    HardLinkFailure::CrossVolume => Ok(Err((RelinkSkip::CrossVolume, None))),
                     HardLinkFailure::Other => Err(e),
                 }
             }
         };
         match fs::rename(&temp, &plan.stable) {
-            Ok(()) => Ok(None),
+            Ok(()) => Ok(Ok(links == 1)),
             Err(e) => {
                 let _ = fs::remove_file(&temp);
                 if is_locked(&e) {
-                    Ok(Some(locked(&plan.stable, &e)))
+                    Ok(Err(locked(&plan.stable, &e)))
                 } else {
                     Err(e)
                 }
@@ -538,9 +543,16 @@ impl Relinker {
 enum Settled {
     Error(String),
     Skip(RelinkSkip, Option<String>),
-    /// Replaced; holds the size and mtime of the link now in its place.
-    Relinked(Option<(u64, (u64, u32))>),
+    /// Replaced. `after` is the size and mtime of the link now in its place; `reclaimed`
+    /// says the replaced file was its data's only link.
+    Relinked {
+        after: Option<(u64, (u64, u32))>,
+        reclaimed: bool,
+    },
 }
+
+/// Why a file stays as it is, with a note for the report.
+type Left = (RelinkSkip, Option<String>);
 
 /// Folders per parallel batch; progress is reported after each batch.
 const FOLDERS_PER_BATCH: usize = 256;
@@ -575,24 +587,26 @@ fn locked(path: &Path, e: &io::Error) -> (RelinkSkip, Option<String>) {
 
 /// Reads the stable file and its blob side by side right before the replace, so neither a
 /// blob with wrong bytes nor a stale cached hash can put other bytes in the stable file.
-/// Returns why the file stays as it is, or `None` when both hold the same bytes.
-fn verify(plan: &Relink, c: &Candidate) -> io::Result<Option<(RelinkSkip, Option<String>)>> {
-    let same = {
+/// Returns the stable file's hard-link count when both hold the same bytes, or why the
+/// file stays as it is.
+fn verify(plan: &Relink, c: &Candidate) -> io::Result<std::result::Result<u32, Left>> {
+    let (same, links) = {
         let mut stable = match File::open(&plan.stable) {
             Ok(file) => file,
-            Err(e) if is_locked(&e) => return Ok(Some(locked(&plan.stable, &e))),
+            Err(e) if is_locked(&e) => return Ok(Err(locked(&plan.stable, &e))),
             Err(e) => return Err(e),
         };
         let mut blob = File::open(&plan.blob)?;
-        same_bytes(&mut stable, &mut blob, c.size)?
+        let same = same_bytes(&mut stable, &mut blob, c.size)?;
+        (same, link_count(&stable)?)
     };
     if same {
-        return Ok(None);
+        return Ok(Ok(links));
     }
     if sha256(&plan.stable)? != c.sha {
-        return Ok(Some((RelinkSkip::Changed, None)));
+        return Ok(Err((RelinkSkip::Changed, None)));
     }
-    Ok(Some((
+    Ok(Err((
         RelinkSkip::BlobMismatch,
         Some(format!(
             "{} has the content hash that names {}, but their bytes differ",
@@ -600,6 +614,33 @@ fn verify(plan: &Relink, c: &Candidate) -> io::Result<Option<(RelinkSkip, Option
             plan.blob.display()
         )),
     )))
+}
+
+/// Hard links to the data of an open file.
+fn link_count(file: &File) -> io::Result<u32> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` keeps the handle open for the call and `info` is a valid out pointer.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle() as isize), &mut info) }
+            .map_err(io::Error::other)?;
+        Ok(info.nNumberOfLinks)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(u32::try_from(file.metadata()?.nlink()).unwrap_or(u32::MAX))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = file;
+        Ok(1)
+    }
 }
 
 /// True when both readers hold the same bytes to the end. Stops at the first difference.
@@ -1233,25 +1274,7 @@ mod tests {
 
     /// Hard links of the file at `path`.
     fn links(path: &Path) -> u32 {
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
-            use windows::Win32::Foundation::HANDLE;
-            use windows::Win32::Storage::FileSystem::{
-                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-            };
-            let file = File::open(path).unwrap();
-            let mut info = BY_HANDLE_FILE_INFORMATION::default();
-            // SAFETY: the handle stays open for the call and `info` is a valid out pointer.
-            unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle() as isize), &mut info) }
-                .unwrap();
-            info.nNumberOfLinks
-        }
-        #[cfg(not(windows))]
-        {
-            use std::os::unix::fs::MetadataExt;
-            fs::metadata(path).unwrap().nlink() as u32
-        }
+        link_count(&File::open(path).unwrap()).unwrap()
     }
 
     #[test]
@@ -1410,5 +1433,24 @@ mod tests {
         assert_eq!(second.errors, Vec::<String>::new());
         assert_eq!((second.hashed_files, second.relinked), (0, 0));
         assert_eq!(second.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
+    }
+
+    #[test]
+    fn bytes_reclaimed_counts_only_files_with_one_link() {
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let shared = fx.stable("1 A - B/audio.mp3", AUDIO);
+        let outside = fx.dir.path().join("backup-audio.mp3");
+        fs::hard_link(&shared, &outside).unwrap();
+        let sole = fx.stable("2 C - D/audio.mp3", AUDIO);
+
+        let report = run(&fx.relinker());
+
+        assert_eq!(report.errors, Vec::<String>::new());
+        assert_eq!(report.relinked, 2);
+        assert_eq!(report.bytes_reclaimed, 20);
+        assert!(same(&shared, &blob) && same(&sole, &blob));
+        assert_eq!(links(&outside), 1);
+        assert_eq!(fs::read(&outside).unwrap(), AUDIO);
     }
 }
