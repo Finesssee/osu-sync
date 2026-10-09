@@ -61,5 +61,7 @@ pub use engine::{RepairResult, SetupResult, SyncResult, UnifiedStorageEngine, Ve
 pub use manifest::{LinkStatus, LinkedResource, ManifestSummary, UnifiedManifest};
 
 pub use link::{
-    copy_dir_recursive, LinkCapability, LinkCheckInfo, LinkInfo, LinkManager, LinkType,
+    classify_hard_link_error, copy_dir_recursive, rename_no_replace, same_volume, HardLinkFailure,
+    LinkCapability, LinkCheckInfo, LinkInfo, LinkManager, LinkType, CROSS_VOLUME_OS_ERROR,
+    LINK_LIMIT_OS_ERROR,
 };

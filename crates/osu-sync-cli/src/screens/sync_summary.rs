@@ -4,7 +4,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::app::{ERROR, PINK, SUBTLE, SUCCESS, TEXT};
-use osu_sync_core::sync::SyncResult;
+use osu_sync_core::sync::{SyncError, SyncResult};
 
 pub fn render(frame: &mut Frame, area: Rect, result: &SyncResult) {
     let chunks = Layout::default()
@@ -12,7 +12,7 @@ pub fn render(frame: &mut Frame, area: Rect, result: &SyncResult) {
         .constraints([
             Constraint::Length(5),  // Title + status
             Constraint::Length(10), // Results
-            Constraint::Min(0),     // Errors
+            Constraint::Min(0),     // Errors, notes, skips
         ])
         .split(area);
 
@@ -77,29 +77,39 @@ pub fn render(frame: &mut Frame, area: Rect, result: &SyncResult) {
     ]);
     frame.render_widget(results, results_inner);
 
-    // Errors (if any)
-    if !result.errors.is_empty() {
-        let error_items: Vec<ListItem> = result
-            .errors
-            .iter()
-            .take(10)
-            .map(|e| {
-                let text = match &e.beatmap_set {
-                    Some(name) => format!("{}: {}", name, e.message),
-                    None => e.message.clone(),
-                };
-                ListItem::new(Span::styled(text, Style::default().fg(ERROR)))
-            })
-            .collect();
+    // Errors, notes and skip reasons, most urgent first
+    let line = |e: &SyncError| match &e.beatmap_set {
+        Some(name) => format!("{}: {}", name, e.message),
+        None => e.message.clone(),
+    };
+    let items: Vec<ListItem> = result
+        .errors
+        .iter()
+        .map(|e| (line(e), ERROR))
+        .chain(result.notes.iter().map(|n| (n.clone(), TEXT)))
+        .chain(result.skips.iter().map(|e| (line(e), SUBTLE)))
+        .take(chunks[2].height.saturating_sub(2) as usize)
+        .map(|(text, color)| ListItem::new(Span::styled(text, Style::default().fg(color))))
+        .collect();
 
-        let errors = List::new(error_items).block(
+    if !items.is_empty() {
+        let border = if result.errors.is_empty() {
+            SUBTLE
+        } else {
+            ERROR
+        };
+        let details = List::new(items).block(
             Block::default()
-                .title(format!(" Errors ({}) ", result.errors.len()))
+                .title(format!(
+                    " Errors ({}) / Skipped sets ({}) ",
+                    result.errors.len(),
+                    result.skips.len()
+                ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(ERROR)),
+                .border_style(Style::default().fg(border)),
         );
 
-        frame.render_widget(errors, chunks[2]);
+        frame.render_widget(details, chunks[2]);
     }
 }
 

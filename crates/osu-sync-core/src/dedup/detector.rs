@@ -82,7 +82,7 @@ impl DuplicateDetector {
 
     /// Find duplicates by MD5 hash
     fn find_by_hash(&self, source: &BeatmapSet, existing: &[BeatmapSet]) -> Option<DuplicateInfo> {
-        for source_beatmap in &source.beatmaps {
+        for source_beatmap in source.beatmaps.iter().filter(|b| !b.md5_hash.is_empty()) {
             for existing_set in existing {
                 for existing_beatmap in &existing_set.beatmaps {
                     if source_beatmap.md5_hash == existing_beatmap.md5_hash {
@@ -305,6 +305,19 @@ mod tests {
         let dup = detector.find_duplicate(&source, &existing);
         assert!(dup.is_some());
         assert_eq!(dup.unwrap().match_type, MatchType::SameSetId);
+    }
+
+    #[test]
+    fn empty_md5_is_not_a_duplicate() {
+        let detector = DuplicateDetector::new(DuplicateStrategy::ByHash);
+        let mut source = make_set(Some(1), "Source", "A", "M");
+        source.beatmaps[0].md5_hash = String::new();
+        let mut other = make_set(Some(2), "Other", "B", "N");
+        other.beatmaps[0].md5_hash = String::new();
+
+        let found = detector.find_duplicate(&source, &[other.clone()]);
+        assert_eq!(found.map(|d| d.match_type), None);
+        assert!(!DuplicateIndex::build(&[other]).has_any_hash(&source));
     }
 
     #[test]

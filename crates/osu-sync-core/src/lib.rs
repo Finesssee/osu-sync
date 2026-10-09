@@ -46,6 +46,7 @@ pub mod dedup;
 pub mod error;
 pub mod filter;
 pub mod lazer;
+pub mod linkstore;
 pub mod media;
 pub mod parser;
 pub mod replay;
@@ -77,9 +78,7 @@ pub use config::{
 pub use parser::{create_osz, create_osz_from_set, extract_osz, parse_osu_file};
 
 // osu!stable integration
-pub use stable::{
-    BeatmapIndex, ImportResult, ScanProgress, StableExporter, StableImporter, StableScanner,
-};
+pub use stable::{BeatmapIndex, ScanProgress, StableExporter, StableScanner};
 
 // osu!lazer integration
 pub use lazer::{

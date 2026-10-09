@@ -22,7 +22,7 @@ use osu_sync_core::config::{
 use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
-    DryRunResult, SyncDirection, SyncEngineBuilder, SyncProgress, SyncResult,
+    DryRunResult, SyncDirection, SyncEngineBuilder, SyncError, SyncProgress, SyncResult,
 };
 
 /// CLI command to execute
@@ -148,8 +148,17 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
                     set_ids: None,
                 });
             }
+            // Flags main reads itself; the path flags are normally taken out already.
+            "--cli" | "--gui" | "--allow-live" | "--help" | "-h" => {}
+            "--stable-path" | "--lazer-path" => i += 1,
+            _ if arg.starts_with("--stable-path=") || arg.starts_with("--lazer-path=") => {}
+            "--dry-run" => return Err(
+                "Unknown flag: --dry-run. For a dry run use the subcommand: dry-run <direction>"
+                    .to_string(),
+            ),
+            _ if arg.starts_with('-') => return Err(format!("Unknown flag: {}", arg)),
             _ => {
-                if !arg.starts_with('-') && command.is_none() {
+                if command.is_none() {
                     return Err(format!("Unknown command: {}", arg));
                 }
             }
@@ -397,6 +406,14 @@ fn run_sync(
         );
     }
 
+    failures(&result)
+}
+
+/// A sync with failed sets exits nonzero, after its result is printed.
+fn failures(result: &SyncResult) -> anyhow::Result<()> {
+    if result.failed > 0 {
+        anyhow::bail!("{} beatmap sets failed", result.failed);
+    }
     Ok(())
 }
 
@@ -498,16 +515,16 @@ fn print_dry_run_result(result: &DryRunResult, options: CliOptions) {
 
 fn print_sync_result(result: &SyncResult, options: CliOptions) {
     if options.json {
-        let errors: Vec<_> = result
-            .errors
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "beatmap_set": e.beatmap_set,
-                    "message": e.message,
+        let entries = |list: &[SyncError]| -> Vec<serde_json::Value> {
+            list.iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "beatmap_set": e.beatmap_set,
+                        "message": e.message,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
 
         println!(
             "{}",
@@ -516,7 +533,9 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
                 "staged": result.staged,
                 "failed": result.failed,
                 "skipped": result.skipped,
-                "errors": errors,
+                "errors": entries(&result.errors),
+                "skips": entries(&result.skips),
+                "notes": result.notes,
             })
         );
     } else {
@@ -526,16 +545,26 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
         println!("  Failed:   {}", result.failed);
         println!("  Skipped:  {}", result.skipped);
 
-        if !result.errors.is_empty() {
+        for (title, list) in [
+            ("Errors:", &result.errors),
+            ("Skipped sets:", &result.skips),
+        ] {
+            if list.is_empty() {
+                continue;
+            }
             println!();
-            println!("Errors:");
-            for error in &result.errors {
-                if let Some(ref set) = error.beatmap_set {
-                    println!("  - [{}] {}", set, error.message);
+            println!("{title}");
+            for entry in list {
+                if let Some(ref set) = entry.beatmap_set {
+                    println!("  - [{}] {}", set, entry.message);
                 } else {
-                    println!("  - {}", error.message);
+                    println!("  - {}", entry.message);
                 }
             }
+        }
+        for note in &result.notes {
+            println!();
+            println!("Note: {note}");
         }
     }
 }
@@ -578,6 +607,72 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn failed_sets_exit_nonzero() {
+        let failed = SyncResult {
+            failed: 500,
+            ..Default::default()
+        };
+        assert_eq!(
+            failures(&failed).unwrap_err().to_string(),
+            "500 beatmap sets failed"
+        );
+        let clean = SyncResult {
+            imported: 3,
+            skipped: 2,
+            ..Default::default()
+        };
+        assert!(failures(&clean).is_ok());
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        assert_eq!(
+            parse_args(&strings(&["sync", "l2s", "--dry-run"])).unwrap_err(),
+            "Unknown flag: --dry-run. For a dry run use the subcommand: dry-run <direction>"
+        );
+        assert_eq!(
+            parse_args(&strings(&["sync", "l2s", "--jsno"])).unwrap_err(),
+            "Unknown flag: --jsno"
+        );
+        assert_eq!(
+            parse_args(&strings(&["-x", "scan"])).unwrap_err(),
+            "Unknown flag: -x"
+        );
+    }
+
+    #[test]
+    fn known_flags_are_accepted_after_global_flags_are_taken() {
+        let (_, rest) = GlobalFlags::take(strings(&[
+            "osu-sync",
+            "--stable-path",
+            "D:/stable",
+            "--allow-live",
+            "--cli",
+            "--lazer-path=D:/lazer",
+            "sync",
+            "l2s",
+            "--json",
+            "--set-ids",
+            "1,2",
+            "--gui",
+            "--allow-live",
+            "--stable-path=D:/other",
+        ]))
+        .unwrap();
+        let cli = rest.iter().position(|a| a == "--cli").unwrap();
+        let (command, options) = parse_args(&rest[cli + 1..]).unwrap();
+        assert!(options.json);
+        assert!(matches!(
+            command,
+            CliCommand::Sync {
+                direction: SyncDirection::LazerToStable,
+                set_ids: Some(ref ids),
+            } if ids.len() == 2
+        ));
+        assert!(parse_args(&strings(&["--cli", "--stable-path", "D:/s", "scan"])).is_ok());
     }
 
     #[test]

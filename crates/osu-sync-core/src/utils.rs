@@ -5,7 +5,7 @@
 /// This function replaces the following characters with underscores:
 /// `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`
 ///
-/// It also trims leading and trailing whitespace for safety.
+/// It removes control characters and trims leading and trailing whitespace for safety.
 ///
 /// # Examples
 ///
@@ -16,9 +16,11 @@
 /// assert_eq!(sanitize_filename("path/with/slashes"), "path_with_slashes");
 /// assert_eq!(sanitize_filename("file:name"), "file_name");
 /// assert_eq!(sanitize_filename("  spaced  "), "spaced");
+/// assert_eq!(sanitize_filename("tab\there"), "tabhere");
 /// ```
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()
+        .filter(|c| !c.is_control())
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             _ => c,

@@ -27,6 +27,7 @@ walkdir.workspace = true
 same-file.workspace = true
 sha2.workspace = true
 md-5.workspace = true
+unicode-normalization.workspace = true
 directories.workspace = true
 dirs.workspace = true
 

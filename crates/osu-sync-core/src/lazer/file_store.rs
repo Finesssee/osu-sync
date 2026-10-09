@@ -22,6 +22,11 @@ impl LazerFileStore {
         }
     }
 
+    /// The `files` folder holding every blob.
+    pub fn files_path(&self) -> &Path {
+        &self.files_path
+    }
+
     /// Get the storage path for a given hash
     ///
     /// Path format: `files/{hash[0]}/{hash[0..2]}/{hash}`
