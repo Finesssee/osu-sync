@@ -85,3 +85,27 @@ fn sync_with_a_failed_set_exits_nonzero() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!stable.join("Songs").join("1001 Artist - Title").exists());
 }
+
+#[test]
+fn help_lists_relink() {
+    let output = Command::new(env!("CARGO_BIN_EXE_osu-sync"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(
+            &"    relink                  Hard-link stable copies of lazer files to them"
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(
+        lines.contains(
+            &"    --relink                After sync s2l or bi, relink stable copies to lazer's files"
+        ),
+        "stdout: {stdout}"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
