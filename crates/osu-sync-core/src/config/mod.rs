@@ -2,6 +2,7 @@
 
 pub mod live_guard;
 mod paths;
+pub mod scan_cache;
 
 pub use paths::*;
 

@@ -1,6 +1,7 @@
 //! Scan osu!stable Songs folder for beatmaps
 
 use crate::beatmap::{BeatmapInfo, BeatmapSet};
+use crate::config::scan_cache;
 use crate::error::{Error, Result};
 use crate::parser::parse_osu_file;
 use rayon::prelude::*;
@@ -219,6 +220,8 @@ pub struct StableScanner {
     songs_path: PathBuf,
     /// Skip file hashing for faster scans (hashes won't be available)
     skip_hashing: bool,
+    /// Where the scan cache lives; `None` disables caching
+    cache_root: Option<PathBuf>,
 }
 
 /// Progress callback for scanning (must be Sync for parallel scanning)
@@ -230,7 +233,14 @@ impl StableScanner {
         Self {
             songs_path,
             skip_hashing: false,
+            cache_root: scan_cache::default_root(),
         }
+    }
+
+    /// Keep the scan cache under `root` instead of the per-user cache dir
+    pub fn with_cache_root(mut self, root: PathBuf) -> Self {
+        self.cache_root = Some(root);
+        self
     }
 
     /// Skip file hashing for faster scans (~3x speedup)
@@ -241,32 +251,20 @@ impl StableScanner {
     }
 
     /// Get the cache file path (bincode format for 5-10x faster load)
-    fn cache_path(&self) -> PathBuf {
-        self.songs_path
-            .parent()
-            .unwrap_or(&self.songs_path)
-            .join(".osu-sync-stable-cache.bin")
+    fn cache_path(&self) -> Option<PathBuf> {
+        let root = self.cache_root.as_deref()?;
+        Some(scan_cache::file_for(
+            root,
+            "stable",
+            &self.songs_path,
+            "bin",
+        ))
     }
 
     /// Try to load from cache if valid
     /// Returns: (sets, beatmaps_parsed, file_hashes, osu_cache)
     fn load_from_cache(&self, current_dir_count: usize) -> Option<StableCacheLoad> {
-        let cache_path = self.cache_path();
-        if !cache_path.exists() {
-            // Also try legacy JSON cache for migration
-            let legacy_path = self
-                .songs_path
-                .parent()
-                .unwrap_or(&self.songs_path)
-                .join(".osu-sync-stable-cache.json");
-            if legacy_path.exists() {
-                // Delete legacy cache, will be recreated in new format
-                let _ = fs::remove_file(&legacy_path);
-            }
-            return None;
-        }
-
-        let content = fs::read(&cache_path).ok()?;
+        let content = fs::read(self.cache_path()?).ok()?;
         let cache: StableScanCache = bincode::deserialize(&content).ok()?;
 
         // Check cache version (3 = with osu_cache)
@@ -305,14 +303,8 @@ impl StableScanner {
 
     /// Try to load just the osu_cache for incremental parsing
     fn load_osu_cache(&self) -> HashMap<String, CachedOsuFile> {
-        let cache_path = self.cache_path();
-        if !cache_path.exists() {
+        let Some(content) = self.cache_path().and_then(|path| fs::read(path).ok()) else {
             return HashMap::new();
-        }
-
-        let content = match fs::read(&cache_path) {
-            Ok(c) => c,
-            Err(_) => return HashMap::new(),
         };
 
         let cache: StableScanCache = match bincode::deserialize(&content) {
@@ -341,10 +333,12 @@ impl StableScanner {
             osu_cache,
         };
 
-        let cache_path = self.cache_path();
+        let Some(cache_path) = self.cache_path() else {
+            return;
+        };
         match bincode::serialize(&cache) {
             Ok(bytes) => {
-                if let Err(e) = fs::write(&cache_path, bytes) {
+                if let Err(e) = scan_cache::write(&cache_path, &bytes) {
                     tracing::warn!("Failed to write stable cache: {}", e);
                 } else {
                     tracing::info!(
@@ -1001,8 +995,9 @@ mod tests {
         let songs_path = temp_dir.path().join("Songs");
         fs::create_dir(&songs_path).unwrap();
 
-        let scanner = StableScanner::new(songs_path.clone());
-        let cache_path = scanner.cache_path();
+        let scanner =
+            StableScanner::new(songs_path.clone()).with_cache_root(temp_dir.path().join("cache"));
+        let cache_path = scanner.cache_path().unwrap();
 
         // Verify cache path uses .bin extension
         assert!(cache_path.to_string_lossy().ends_with(".bin"));
@@ -1038,7 +1033,7 @@ mod tests {
         let songs_path = temp_dir.path().join("Songs");
         fs::create_dir(&songs_path).unwrap();
 
-        let scanner = StableScanner::new(songs_path);
+        let scanner = StableScanner::new(songs_path).with_cache_root(temp_dir.path().join("cache"));
 
         // Save with dir_count = 5
         scanner.save_to_cache(&[], 5, 10, HashMap::new(), HashMap::new());
@@ -1049,6 +1044,59 @@ mod tests {
         // But sets should be empty (needs rescan)
         let (sets, _, _, _) = loaded.unwrap();
         assert!(sets.is_empty());
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = WalkDir::new(dir)
+            .into_iter()
+            .map(|e| {
+                e.unwrap()
+                    .path()
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn scan_writes_cache_outside_install() {
+        let temp_dir = TempDir::new().unwrap();
+        let install = temp_dir.path().join("osu!");
+        let set_dir = install.join("Songs").join("1 Artist - Title");
+        fs::create_dir_all(&set_dir).unwrap();
+        fs::write(set_dir.join("audio.mp3"), b"audio").unwrap();
+        let cache_root = temp_dir.path().join("cache");
+        let before = listing(&install);
+
+        let scanner = StableScanner::new(install.join("Songs")).with_cache_root(cache_root.clone());
+        scanner.scan_parallel().unwrap();
+
+        assert_eq!(
+            before,
+            vec![
+                "",
+                "Songs",
+                "Songs/1 Artist - Title",
+                "Songs/1 Artist - Title/audio.mp3"
+            ]
+        );
+        assert_eq!(listing(&install), before);
+        let cached = listing(&cache_root);
+        assert_eq!(cached.len(), 2);
+        assert_eq!(
+            cached[1],
+            scanner
+                .cache_path()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert!(cached[1].starts_with("stable-") && cached[1].ends_with(".bin"));
     }
 
     // ==================== Scanner Integration Tests ====================
