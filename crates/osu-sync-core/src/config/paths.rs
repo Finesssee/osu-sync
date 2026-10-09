@@ -48,14 +48,19 @@ fn is_lazer_installation(path: &Path) -> bool {
 
 /// Read the custom data location lazer records in `storage.ini` (`FullPath = ...`)
 /// when the user moves their data via Settings > Maintenance > Change location.
+/// Parsed like osu-framework's ini reader: BOM tolerated, case-sensitive key,
+/// last line wins. A relative value is ignored rather than resolved against
+/// the process working directory.
 fn read_storage_ini(dir: &Path) -> Option<PathBuf> {
     let content = std::fs::read_to_string(dir.join("storage.ini")).ok()?;
-    content.lines().find_map(|line| {
-        let (key, value) = line.split_once('=')?;
-        let value = value.trim();
-        (key.trim().eq_ignore_ascii_case("FullPath") && !value.is_empty())
-            .then(|| PathBuf::from(value))
-    })
+    let (_, value) = content
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| key.trim() == "FullPath")
+        .last()?;
+    let path = PathBuf::from(value.trim());
+    path.is_absolute().then_some(path)
 }
 
 /// Resolve lazer's data directory from its default location, following `storage.ini`.
@@ -281,6 +286,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolve_lazer_dir(&default), Some(custom));
+    }
+
+    fn write_storage_ini(dir: &Path, content: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("storage.ini"), content).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_lazer_dir_follows_redirect_without_default_realm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("osu");
+        let custom = tmp.path().join("osu!lazer");
+        make_lazer_dir(&custom);
+        write_storage_ini(&default, &format!("FullPath = {}\r\n", custom.display()));
+
+        assert_eq!(resolve_lazer_dir(&default), Some(custom));
+    }
+
+    #[test]
+    fn test_read_storage_ini_matches_lazer_parsing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("osu");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+
+        write_storage_ini(&dir, &format!("\u{feff}FullPath = {}\r\n", a.display()));
+        assert_eq!(read_storage_ini(&dir), Some(a.clone()));
+
+        write_storage_ini(
+            &dir,
+            &format!("FullPath = {}\nFullPath = {}\n", a.display(), b.display()),
+        );
+        assert_eq!(read_storage_ini(&dir), Some(b));
+
+        write_storage_ini(&dir, &format!("FullPath = {}\nFullPath =\n", a.display()));
+        assert_eq!(read_storage_ini(&dir), None);
+
+        write_storage_ini(&dir, &format!("fullpath = {}\n", a.display()));
+        assert_eq!(read_storage_ini(&dir), None);
+
+        write_storage_ini(&dir, "FullPath = relative\\dir\n");
+        assert_eq!(read_storage_ini(&dir), None);
     }
 
     #[test]
