@@ -11,7 +11,7 @@
 //! Options:
 //!   --set-ids <ids>    Comma-separated beatmap set IDs to sync
 //!   --json             Output in JSON format
-//!   --relink           After sync s2l, relink stable copies onto lazer's files
+//!   --relink           After sync s2l or bi, relink stable copies onto lazer's files
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -185,6 +185,16 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
             )
         }
     };
+    let relinks = matches!(
+        command,
+        CliCommand::Sync {
+            direction: SyncDirection::StableToLazer | SyncDirection::Bidirectional,
+            ..
+        }
+    );
+    if options.relink && !relinks {
+        return Err("--relink works only with sync s2l or sync bi".to_string());
+    }
 
     Ok((command, options))
 }
@@ -663,7 +673,7 @@ pub fn print_help() {
     println!("    --set-ids <ids>             Comma-separated beatmap set IDs");
     println!("    --json                      Output in JSON format");
     println!(
-        "    --relink                    After sync s2l, relink stable copies to lazer's files"
+        "    --relink                    After sync s2l or bi, relink stable copies to lazer's files"
     );
     println!("    --stable-path <dir>         Use this osu!stable folder");
     println!("    --lazer-path <dir>          Use this osu!lazer data folder");
@@ -940,6 +950,31 @@ mod tests {
             parse_args(&strings(&["relink", "--relnik"])).unwrap_err(),
             "Unknown flag: --relnik"
         );
+    }
+
+    #[test]
+    fn relink_flag_is_rejected_outside_s2l_and_bi_sync() {
+        for args in [
+            &["sync", "l2s", "--relink"][..],
+            &["--relink", "dry-run", "s2l"],
+            &["dry-run", "bi", "--relink"],
+            &["scan", "--relink"],
+            &["relink", "--relink"],
+        ] {
+            assert_eq!(
+                parse_args(&strings(args)).unwrap_err(),
+                "--relink works only with sync s2l or sync bi",
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["sync", "s2l", "--relink"][..],
+            &["--relink", "sync", "stable-to-lazer"],
+            &["sync", "bi", "--relink", "--json"],
+        ] {
+            let (_, options) = parse_args(&strings(args)).unwrap();
+            assert!(options.relink, "{args:?}");
+        }
     }
 
     #[test]
