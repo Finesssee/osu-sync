@@ -397,6 +397,14 @@ fn run_sync(
         );
     }
 
+    failures(&result)
+}
+
+/// A sync with failed sets exits nonzero, after its result is printed.
+fn failures(result: &SyncResult) -> anyhow::Result<()> {
+    if result.failed > 0 {
+        anyhow::bail!("{} beatmap sets failed", result.failed);
+    }
     Ok(())
 }
 
@@ -590,6 +598,24 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn failed_sets_exit_nonzero() {
+        let failed = SyncResult {
+            failed: 500,
+            ..Default::default()
+        };
+        assert_eq!(
+            failures(&failed).unwrap_err().to_string(),
+            "500 beatmap sets failed"
+        );
+        let clean = SyncResult {
+            imported: 3,
+            skipped: 2,
+            ..Default::default()
+        };
+        assert!(failures(&clean).is_ok());
     }
 
     #[test]

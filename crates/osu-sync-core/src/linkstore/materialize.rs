@@ -112,7 +112,8 @@ pub enum SkipReason {
     PathBudget { needed: usize, limit: usize },
     #[error("folder {folder} belongs to another set")]
     FolderTaken { folder: String },
-    #[error("{filename} is missing from the lazer store")]
+    /// Counted as a failure, not a skip: the lazer store is damaged or unreadable.
+    #[error("{filename} is missing from the lazer store or cannot be read")]
     MissingBlob { filename: String },
     #[error("{filename} has md5 {actual}, realm expects {expected}")]
     Md5Mismatch {
@@ -145,6 +146,17 @@ pub enum SetOutcome {
     Materialized(SetCounts),
     Skipped(SkipReason),
     Failed(String),
+}
+
+impl From<SkipReason> for SetOutcome {
+    /// A set that cannot be read from the lazer store failed; every other reason
+    /// is a decision to leave the set out.
+    fn from(reason: SkipReason) -> Self {
+        match reason {
+            SkipReason::MissingBlob { .. } => Self::Failed(reason.to_string()),
+            reason => Self::Skipped(reason),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -491,7 +503,7 @@ impl Materializer {
         for (i, set) in sets.iter().enumerate() {
             let (plan, present) = self.check(set, claims, &md5s);
             let outcome = match plan.result {
-                Err(reason) => SetOutcome::Skipped(reason),
+                Err(reason) => reason.into(),
                 Ok(planned) => {
                     claims.record(&plan.id, &planned);
                     match self.execute(
@@ -521,7 +533,7 @@ impl Materializer {
 
     /// Reads the MD5 of every `.osu` blob the sets plan to place, in parallel. The
     /// first read of a file waits for the antivirus scan, which made one-at-a-time
-    /// reads most of a run. `check` reads any blob missing here itself.
+    /// reads most of a run. `check` reads any blob missing or unread here itself.
     fn osu_md5s(&self, sets: &[&LazerBeatmapSet], claims: &StableClaims) -> OsuMd5s {
         let blobs: HashSet<BlobHash> = sets
             .iter()
@@ -585,11 +597,13 @@ impl Materializer {
                     return Err(missing());
                 }
                 if let Some(expected) = set.osu_md5.get(&p.blob) {
-                    let actual = match md5s.get(&p.blob) {
-                        Some(md5) => md5.clone(),
-                        None => digests(&blob).ok().map(|(_, md5)| md5),
-                    }
-                    .ok_or_else(missing)?;
+                    // A failed prefetch read is tried once more here.
+                    let actual = md5s
+                        .get(&p.blob)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| digests(&blob).ok().map(|(_, md5)| md5))
+                        .ok_or_else(missing)?;
                     if &actual != expected {
                         return Err(SkipReason::Md5Mismatch {
                             filename,
@@ -1585,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_blob_skips_set() {
+    fn missing_blob_fails_set() {
         let fx = Fixture::new();
         let mut s = fx.basic_set();
         s.files.push(LazerNamedFile {
@@ -1595,12 +1609,55 @@ mod tests {
         let report = fx.run(&fx.materializer(), &[s]);
 
         assert_eq!(
-            only_skip(&report),
-            SkipReason::MissingBlob {
-                filename: "gone.png".to_string(),
-            }
+            report.sets[0].outcome,
+            SetOutcome::Failed(
+                "gone.png is missing from the lazer store or cannot be read".to_string()
+            )
         );
         assert!(!fx.songs.join("1001 Artist - Title").exists());
+    }
+
+    #[test]
+    fn lazer_store_without_files_fails_every_set() {
+        let fx = Fixture::new();
+        let sets: Vec<LazerBeatmapSet> = (0..500)
+            .map(|i| {
+                let mut s = set(
+                    &format!("{i:08x}-0000-0000-0000-000000000000"),
+                    Some(i),
+                    "Artist",
+                    "Title",
+                    vec![(OSU_NAME, "ab".repeat(32)), ("audio.mp3", "cd".repeat(32))],
+                    vec![("ab".repeat(32), OSU_MD5.to_string())],
+                );
+                s.files[0].filename = format!("Artist - Title (Mapper) [{i}].osu");
+                s.beatmaps[0].md5_hash = format!("{i:032x}");
+                s
+            })
+            .collect();
+        let m = Materializer::new(&fx.songs, fx.files.join("no-such-store"));
+        let report = fx.run(&m, &sets);
+
+        assert_eq!(report.failed().count(), 500);
+        assert_eq!(report.skipped().count(), 0);
+        assert_eq!(fs::read_dir(&fx.songs).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failed_prefetch_read_is_retried() {
+        let fx = Fixture::new();
+        let s = fx.basic_set();
+        let m = fx.materializer();
+        let claims = StableClaims::default();
+        let osu = BlobHash::parse(&s.files[0].hash).unwrap();
+        let md5s: OsuMd5s = HashMap::from([(osu, None)]);
+        let (plan, present) = m.check(&s, &claims, &md5s);
+
+        assert_eq!(
+            plan.result.map(|p| p.folder),
+            Ok("1001 Artist - Title".to_string())
+        );
+        assert_eq!(present, [false, false]);
     }
 
     #[test]
