@@ -213,6 +213,8 @@ pub struct StableClaims {
     folders: HashMap<String, HashMap<String, Option<String>>>,
     osu_names: HashMap<String, String>,
     md5s: HashMap<String, String>,
+    /// Folder key to the realm set id placed there in this run.
+    placed: HashMap<String, String>,
     temps: Vec<PathBuf>,
 }
 
@@ -267,8 +269,11 @@ impl StableClaims {
         }
     }
 
-    fn record(&mut self, set: &PlannedSet) {
+    fn record(&mut self, id: &str, set: &PlannedSet) {
         self.folders.entry(name_key(&set.folder)).or_default();
+        self.placed
+            .entry(name_key(&set.folder))
+            .or_insert_with(|| id.to_string());
         for p in &set.placements {
             if is_top_level_osu(&p.dest) {
                 let name = p.dest.to_string_lossy();
@@ -278,11 +283,16 @@ impl StableClaims {
         }
     }
 
-    /// True when the folder exists and holds a `.osu` file this set does not have.
-    fn foreign(&self, folder: &str, ours: &HashSet<String>) -> bool {
-        self.folders
-            .get(&name_key(folder))
-            .is_some_and(|keys| !keys.keys().all(|k| ours.contains(k)))
+    /// True when another set was placed in the folder in this run, or the folder
+    /// holds a `.osu` file this set does not have. A folder holding only our own
+    /// names is our partial folder from an interrupted run.
+    fn taken(&self, folder: &str, id: &str, ours: &HashSet<String>) -> bool {
+        let key = name_key(folder);
+        self.placed.get(&key).is_some_and(|owner| owner != id)
+            || self
+                .folders
+                .get(&key)
+                .is_some_and(|keys| !keys.keys().all(|k| ours.contains(k)))
     }
 
     /// Plans one set against what stable holds. Reads nothing from disk.
@@ -363,13 +373,13 @@ impl StableClaims {
             .ok_or_else(|| budget_error(1))?;
         let mut folder = fit(base, budget).ok_or_else(|| budget_error(1))?;
         let ours: HashSet<String> = osu_keys.keys().cloned().collect();
-        if self.foreign(&folder, &ours) {
+        if self.taken(&folder, &set.id, &ours) {
             let short = budget
                 .checked_sub(SUFFIX_LEN)
                 .and_then(|b| fit(base, b))
                 .ok_or_else(|| budget_error(SUFFIX_LEN + 1))?;
             folder = format!("{short} {}", id_suffix(&set.id));
-            if self.foreign(&folder, &ours) {
+            if self.taken(&folder, &set.id, &ours) {
                 return Err(SkipReason::FolderTaken { folder });
             }
         }
@@ -451,7 +461,7 @@ impl Materializer {
             .map(|set| {
                 let (plan, _) = self.check(set, claims, &md5s);
                 if let Ok(planned) = &plan.result {
-                    claims.record(planned);
+                    claims.record(&plan.id, planned);
                 }
                 plan
             })
@@ -483,7 +493,7 @@ impl Materializer {
             let outcome = match plan.result {
                 Err(reason) => SetOutcome::Skipped(reason),
                 Ok(planned) => {
-                    claims.record(&planned);
+                    claims.record(&plan.id, &planned);
                     match self.execute(
                         &planned,
                         &present,
@@ -1437,6 +1447,111 @@ mod tests {
             DateTime::<Utc>::from(modified).to_rfc3339(),
             "2024-03-05T07:07:09+00:00"
         );
+    }
+
+    fn mtime(path: &Path) -> String {
+        let modified = fs::metadata(path).unwrap().modified().unwrap();
+        DateTime::<Utc>::from(modified).to_rfc3339()
+    }
+
+    /// Two realm rows for one online set, the first holding a subset of the
+    /// second's `.osu` files (online 1537742 in the sandbox). The second row
+    /// used to adopt the first row's folder as if resuming its own crash.
+    fn subset_pair(fx: &Fixture) -> (LazerBeatmapSet, LazerBeatmapSet) {
+        let mut first = fx.basic_set();
+        first.id = "a2591f4a-0000-0000-0000-000000000000".to_string();
+        first.date_added = Utc.with_ymd_and_hms(2025, 1, 29, 1, 2, 3).unwrap();
+        let hard: &[u8] = b"osu file format v14\n\n[General]\nAudioFilename: audio.mp3\n\n[Hard]\n";
+        let hard_hash = fx.blob(hard);
+        let mut second = fx.basic_set();
+        second.id = "ee35504e-aac0-4d48-8fee-382fcace9846".to_string();
+        second.date_added = Utc.with_ymd_and_hms(2024, 6, 29, 4, 5, 6).unwrap();
+        second.files.push(LazerNamedFile {
+            filename: "Artist - Title (Mapper) [Hard].osu".to_string(),
+            hash: hard_hash.clone(),
+        });
+        let mut hard_map = second.beatmaps[0].clone();
+        hard_map.hash = hard_hash;
+        hard_map.md5_hash = format!("{:x}", Md5::digest(hard));
+        second.beatmaps.push(hard_map);
+        (first, second)
+    }
+
+    #[test]
+    fn second_row_of_one_online_set_does_not_merge_into_the_first() {
+        let fx = Fixture::new();
+        let (first, second) = subset_pair(&fx);
+        let report = fx.run(&fx.materializer(), &[first, second]);
+
+        assert_eq!(report.sets[0].folder, "1001 Artist - Title");
+        assert_eq!(
+            report.sets[1].outcome,
+            SetOutcome::Skipped(SkipReason::AlreadyInStable {
+                md5: OSU_MD5.to_string(),
+                folder: "1001 Artist - Title".to_string(),
+            })
+        );
+        let folders: Vec<String> = fs::read_dir(&fx.songs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(folders, ["1001 Artist - Title"]);
+        let folder = fx.songs.join("1001 Artist - Title");
+        assert!(!folder.join("Artist - Title (Mapper) [Hard].osu").exists());
+        assert_eq!(mtime(&folder.join(OSU_NAME)), "2025-01-29T01:02:03+00:00");
+    }
+
+    #[test]
+    fn rerun_of_two_rows_of_one_online_set_creates_nothing() {
+        let fx = Fixture::new();
+        let (first, second) = subset_pair(&fx);
+        let sets = [first, second];
+        fx.run(&fx.materializer(), &sets);
+        let report = fx.run(&fx.materializer(), &sets);
+
+        assert_eq!(
+            report.sets[0].outcome,
+            SetOutcome::Materialized(SetCounts {
+                present: 2,
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            report.sets[1].outcome,
+            SetOutcome::Skipped(SkipReason::AlreadyInStable {
+                md5: OSU_MD5.to_string(),
+                folder: "1001 Artist - Title".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn two_rows_with_distinct_osu_names_get_two_folders_and_own_mtimes() {
+        let fx = Fixture::new();
+        let (first, mut second) = subset_pair(&fx);
+        second.files.remove(0);
+        second.beatmaps.remove(0);
+        let report = fx.run(&fx.materializer(), &[first, second]);
+
+        assert_eq!(report.sets[0].folder, "1001 Artist - Title");
+        assert_eq!(report.sets[1].folder, "1001 Artist - Title ee35504e");
+        assert_eq!(
+            mtime(&fx.songs.join("1001 Artist - Title").join(OSU_NAME)),
+            "2025-01-29T01:02:03+00:00"
+        );
+        assert_eq!(
+            mtime(
+                &fx.songs
+                    .join("1001 Artist - Title ee35504e")
+                    .join("Artist - Title (Mapper) [Hard].osu")
+            ),
+            "2024-06-29T04:05:06+00:00"
+        );
+        assert!(!fx
+            .songs
+            .join("1001 Artist - Title ee35504e")
+            .join(OSU_NAME)
+            .exists());
     }
 
     #[test]
