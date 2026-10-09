@@ -386,7 +386,11 @@ impl Relinker {
         };
         c.size = meta.len();
         c.mtime = mtime_key(&meta);
-        if let Some(sha) = cache.get(&c.stable, c.size, c.mtime) {
+        // An entry that is not a valid hash is a miss, so it is rehashed and replaced.
+        let cached = cache
+            .get(&c.stable, c.size, c.mtime)
+            .filter(|sha| BlobHash::parse(sha).is_some());
+        if let Some(sha) = cached {
             c.sha = sha.to_string();
         } else {
             match sha256(&c.stable) {
@@ -1373,5 +1377,38 @@ mod tests {
         assert_eq!(names(stable.parent().unwrap()), ["audio.mp3"]);
         assert_eq!(sha256(&stable).unwrap(), AUDIO_SHA256);
         assert!(!fx.cache().exists());
+    }
+
+    #[test]
+    fn unparseable_cached_hash_is_dropped_and_rehashed() {
+        let fx = Fixture::new();
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+        let meta = fs::metadata(&stable).unwrap();
+        let key = stable.to_str().unwrap().to_string();
+        let mut seeded = HashCache {
+            version: CACHE_VERSION,
+            entries: HashMap::new(),
+        };
+        seeded.entries.insert(
+            key.clone(),
+            CachedHash {
+                size: meta.len(),
+                mtime: mtime_key(&meta),
+                sha: "zz".to_string(),
+            },
+        );
+        fs::create_dir_all(fx.cache().parent().unwrap()).unwrap();
+        seeded.save(&fx.cache()).unwrap();
+
+        let first = run(&fx.relinker());
+        assert_eq!(first.errors, Vec::<String>::new());
+        assert_eq!((first.hashed_files, first.relinked), (1, 0));
+        assert_eq!(first.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
+        assert_eq!(HashCache::load(&fx.cache()).entries[&key].sha, AUDIO_SHA256);
+
+        let second = run(&fx.relinker());
+        assert_eq!(second.errors, Vec::<String>::new());
+        assert_eq!((second.hashed_files, second.relinked), (0, 0));
+        assert_eq!(second.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
     }
 }
