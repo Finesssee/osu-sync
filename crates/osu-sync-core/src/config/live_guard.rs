@@ -5,8 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use super::{detect_lazer_path, detect_stable_path};
+use super::{detect_lazer_path, detect_stable_path, Config};
 use crate::error::{Error, Result};
+use crate::sync::SyncDirection;
 
 /// The live install folders a write must stay out of.
 #[derive(Debug, Clone, Default)]
@@ -57,6 +58,21 @@ pub fn check_write(dest: &Path) -> Result<()> {
         return Ok(());
     }
     DETECTED.get_or_init(LiveRoots::detect).check(dest)
+}
+
+/// Checks the folders a sync in `direction` writes to.
+pub fn check_sync(direction: SyncDirection, config: &Config) -> Result<()> {
+    if direction.syncs_from_lazer() {
+        if let Some(songs) = config.stable_songs_path() {
+            check_write(&songs)?;
+        }
+    }
+    if direction.syncs_from_stable() {
+        if let Some(lazer) = &config.lazer_path {
+            check_write(lazer)?;
+        }
+    }
+    Ok(())
 }
 
 /// True when `path` equals `root` or lies inside it, compared component by component.

@@ -33,7 +33,19 @@ use app::App;
 use worker::Worker;
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
+    let (flags, args) = match cli::GlobalFlags::take(std::env::args().collect()) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = flags.validate() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+    osu_sync_core::config::set_path_overrides(flags.overrides);
+    osu_sync_core::config::live_guard::set_allow_live(flags.allow_live);
 
     // Check for --help
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -125,6 +137,13 @@ fn print_help() {
     println!("    --tui-snapshot [--json] Capture TUI state (for AI vision)");
     println!("    --capture-game [target] Capture osu! game window (Windows only)");
     println!("    --help                  Show this help message");
+    println!();
+    println!("PATH OPTIONS (any mode; the config file is not saved while set):");
+    println!("    --stable-path <dir>     Use this osu!stable folder instead of the detected one");
+    println!(
+        "    --lazer-path <dir>      Use this osu!lazer data folder instead of the detected one"
+    );
+    println!("    --allow-live            Allow writes into the detected live installs");
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
     println!();

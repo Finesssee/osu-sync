@@ -626,6 +626,7 @@ impl SyncEngine {
         direction: SyncDirection,
         resolver: &dyn ConflictResolver,
     ) -> Result<SyncResult> {
+        crate::config::live_guard::check_sync(direction, &self.config)?;
         tracing::info!("Starting sync: {}", direction);
 
         let mut result = SyncResult::new(direction);
