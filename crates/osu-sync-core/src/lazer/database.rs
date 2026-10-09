@@ -733,6 +733,9 @@ impl LazerIndex {
                 by_online_id.insert(id, set_idx);
             }
             for (beatmap_idx, beatmap) in set.beatmaps.iter().enumerate() {
+                if beatmap.md5_hash.is_empty() {
+                    continue;
+                }
                 by_md5.insert(beatmap.md5_hash.clone(), (set_idx, beatmap_idx));
             }
         }
