@@ -232,36 +232,44 @@ impl Relinker {
             .as_deref()
             .map(HashCache::load)
             .unwrap_or_default();
-        let inspected: Vec<Candidate> = candidates
-            .into_par_iter()
-            .filter_map(|(stable, rel)| self.inspect(stable, rel, &cache))
-            .collect();
-        // A shard folder under `files` can be a junction into a live store, so each
-        // blob folder is guarded on its own before any temp is linked from it.
-        let mut checked_dirs = HashSet::new();
-        for c in &inspected {
-            if let Found::Blob {
-                blob,
-                already_linked: false,
-            } = &c.found
-            {
-                if let Some(dir) = blob.parent() {
-                    if !checked_dirs.contains(dir) {
-                        live_guard::check_write(dir)?;
-                        checked_dirs.insert(dir.to_path_buf());
-                    }
-                }
-            }
-        }
-
         let mut next = HashCache {
             version: CACHE_VERSION,
             entries: HashMap::new(),
         };
         let limited = Mutex::new(HashSet::new());
-        let total = inspected.len();
+        let mut checked_dirs = HashSet::new();
+        let total = candidates.len();
         let mut done = 0;
-        for batch in folder_batches(inspected) {
+        // Each batch is hashed right before it is replaced, so the byte compare in `verify`
+        // reads stable files that are still in the page cache.
+        for batch in folder_batches(candidates, |(stable, _)| stable.parent()) {
+            let walked: usize = batch.iter().map(Vec::len).sum();
+            let batch: Vec<Vec<Candidate>> = batch
+                .into_par_iter()
+                .map(|folder| {
+                    folder
+                        .into_par_iter()
+                        .filter_map(|(stable, rel)| self.inspect(stable, rel, &cache))
+                        .collect()
+                })
+                .collect();
+            // A shard folder under `files` can be a junction into a live store, so each
+            // blob folder is guarded on its own before any temp is linked from it.
+            for c in batch.iter().flatten() {
+                if let Found::Blob {
+                    blob,
+                    already_linked: false,
+                } = &c.found
+                {
+                    if let Some(dir) = blob.parent() {
+                        if !checked_dirs.contains(dir) {
+                            live_guard::check_write(dir)?;
+                            checked_dirs.insert(dir.to_path_buf());
+                        }
+                    }
+                }
+            }
+
             let settled: Vec<Vec<(Candidate, Settled)>> = batch
                 .into_par_iter()
                 .map(|folder| {
@@ -306,8 +314,8 @@ impl Relinker {
                         },
                     );
                 }
-                done += 1;
             }
+            done += walked;
             progress(done, total);
         }
 
@@ -557,14 +565,14 @@ type Left = (RelinkSkip, Option<String>);
 /// Folders per parallel batch; progress is reported after each batch.
 const FOLDERS_PER_BATCH: usize = 256;
 
-/// Splits candidates in walk order into runs of one folder, then into batches. A run stays
+/// Splits items in walk order into runs of one folder, then into batches. A run stays
 /// on one thread; `link_temp` claims temp names atomically, so two runs of a folder may share it.
-fn folder_batches(candidates: Vec<Candidate>) -> Vec<Vec<Vec<Candidate>>> {
-    let mut folders: Vec<Vec<Candidate>> = Vec::new();
-    for c in candidates {
+fn folder_batches<T>(items: Vec<T>, folder_of: impl Fn(&T) -> Option<&Path>) -> Vec<Vec<Vec<T>>> {
+    let mut folders: Vec<Vec<T>> = Vec::new();
+    for item in items {
         match folders.last_mut() {
-            Some(folder) if folder[0].stable.parent() == c.stable.parent() => folder.push(c),
-            _ => folders.push(vec![c]),
+            Some(folder) if folder_of(&folder[0]) == folder_of(&item) => folder.push(item),
+            _ => folders.push(vec![item]),
         }
     }
     let mut batches = Vec::new();
@@ -1197,6 +1205,38 @@ mod tests {
                 vec!["audio.mp3", "hit.wav"]
             );
         }
+    }
+
+    #[test]
+    fn each_batch_is_hashed_right_before_it_is_replaced() {
+        use std::sync::{Once, OnceLock};
+        static LATE: OnceLock<PathBuf> = OnceLock::new();
+        static REWRITE: Once = Once::new();
+        const NEW: &[u8] = b"rewritten while the first batch was replaced";
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let folders = FOLDERS_PER_BATCH + 1;
+        for i in 0..folders {
+            fx.stable(&format!("{i:04} A - B/audio.mp3"), AUDIO);
+        }
+        let late = fx.songs.join(format!("{FOLDERS_PER_BATCH:04} A - B"));
+        LATE.set(late.join("audio.mp3")).unwrap();
+        let mut r = fx.relinker();
+        r.link = |src, dst| {
+            REWRITE.call_once(|| fs::write(LATE.get().unwrap(), NEW).unwrap());
+            fs::hard_link(src, dst)
+        };
+
+        let report = run(&r);
+
+        // Hashed in its own batch, the rewritten file has no blob. Hashed with the first
+        // batch, it would have been found changed at the replace.
+        assert_eq!(report.relinked, FOLDERS_PER_BATCH);
+        assert_eq!(report.skipped, skipped(&[(RelinkSkip::NoBlob, 1)]));
+        assert_eq!(report.errors, Vec::<String>::new());
+        assert_eq!(report.hashed_files, folders);
+        assert_eq!(fs::read(late.join("audio.mp3")).unwrap(), NEW);
+        assert!(!same(&late.join("audio.mp3"), &blob));
     }
 
     #[test]
