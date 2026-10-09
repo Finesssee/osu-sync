@@ -184,6 +184,7 @@ impl LazerImporter {
 
     /// Ensure the import directory exists
     pub fn ensure_import_dir(&self) -> Result<()> {
+        crate::config::live_guard::check_write(&self.import_path)?;
         if !self.import_path.exists() {
             fs::create_dir_all(&self.import_path)?;
         }

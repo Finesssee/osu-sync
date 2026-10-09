@@ -255,6 +255,7 @@ impl LinkManager {
     /// - The link path already exists
     /// - Link creation fails and copy fallback is disabled
     pub fn link_directory(&self, source: &Path, link: &Path) -> Result<LinkInfo> {
+        crate::config::live_guard::check_write(link)?;
         // Validate source exists and is a directory
         if !source.exists() {
             return Err(Error::Other(format!(
@@ -319,6 +320,7 @@ impl LinkManager {
     /// - The link path already exists
     /// - Link creation fails and copy fallback is disabled
     pub fn link_file(&self, source: &Path, link: &Path) -> Result<LinkInfo> {
+        crate::config::live_guard::check_write(link)?;
         // Validate source exists and is a file
         if !source.exists() {
             return Err(Error::Other(format!(
@@ -444,6 +446,7 @@ impl LinkManager {
     ///
     /// Returns an error if the path doesn't exist or cannot be removed.
     pub fn remove_link(path: &Path) -> Result<()> {
+        crate::config::live_guard::check_write(path)?;
         if !path.exists() && path.symlink_metadata().is_err() {
             return Err(Error::Other(format!(
                 "Path does not exist: {}",

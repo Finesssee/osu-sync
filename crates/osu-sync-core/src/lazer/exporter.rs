@@ -53,6 +53,7 @@ impl LazerExporter {
         lazer_set: &LazerBeatmapSet,
         songs_path: &Path,
     ) -> Result<PathBuf> {
+        crate::config::live_guard::check_write(songs_path)?;
         let files = self.read_set_files(lazer_set)?;
         let beatmap_set = self.database.to_beatmap_set(lazer_set);
 

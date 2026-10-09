@@ -279,6 +279,11 @@ impl UnifiedStorageEngine {
     /// - Unified storage is not enabled in the configuration
     /// - Failed to create required links
     /// - Insufficient permissions for link creation
+    fn check_live_writes(&self) -> Result<()> {
+        crate::config::live_guard::check_write(&self.stable_path)?;
+        crate::config::live_guard::check_write(&self.lazer_path)
+    }
+
     pub fn setup(&mut self) -> Result<SetupResult> {
         if !self.config.is_enabled() {
             return Err(Error::Config(
@@ -286,6 +291,7 @@ impl UnifiedStorageEngine {
             ));
         }
 
+        self.check_live_writes()?;
         tracing::info!("Setting up unified storage in {:?} mode", self.config.mode);
 
         let mut result = SetupResult::new();
@@ -341,6 +347,7 @@ impl UnifiedStorageEngine {
             ));
         }
 
+        self.check_live_writes()?;
         tracing::info!("Starting unified storage sync");
 
         let result = match self.config.mode {
@@ -429,6 +436,7 @@ impl UnifiedStorageEngine {
     ///
     /// Returns an error if repair cannot be performed.
     pub fn repair(&mut self) -> Result<RepairResult> {
+        self.check_live_writes()?;
         tracing::info!("Repairing unified storage links");
 
         let mut result = RepairResult::new();
@@ -549,6 +557,7 @@ impl UnifiedStorageEngine {
     ///
     /// Returns an error if teardown cannot be completed.
     pub fn teardown(&mut self) -> Result<()> {
+        self.check_live_writes()?;
         tracing::info!("Tearing down unified storage");
 
         // Collect all link paths to avoid borrow issues
