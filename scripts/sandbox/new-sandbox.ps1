@@ -9,7 +9,8 @@ Copies the lazer blobs of the first -Sets sets listed in -SetsJson into
 copy of osu!.db. The live folders are only read. Files that already exist with
 the same size and modified time are skipped, so a second run copies nothing.
 Root must be a local drive path outside the live installs and %APPDATA%\osu, and
-must not contain either source folder.
+must not contain either source folder. Root may not be on a network or subst
+drive, and no existing folder on its path may be a junction or symbolic link.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/sandbox/new-sandbox.ps1 -Root D:\osu-sync-sandbox\lane-1 -Sets 40
@@ -59,6 +60,25 @@ foreach ($live in $liveFolders) {
 foreach ($source in $LazerSource, $StableSource) {
     if (Test-Under $source $Root) {
         Stop-Refused "Refusing to build a sandbox at $Root because it contains the source folder $source"
+    }
+}
+
+# The checks above compare text, so a network drive, a subst drive or a junction
+# could still lead into a live folder. Refuse all three rather than resolve them.
+$drive = [IO.Path]::GetPathRoot("$Root\")
+if ([IO.DriveInfo]::new($drive).DriveType -eq [IO.DriveType]::Network) {
+    Stop-Refused "Refusing to build a sandbox at $Root because $drive is a network drive"
+}
+$letter = $drive.Substring(0, 1).ToUpperInvariant()
+foreach ($line in @(subst.exe)) {
+    if ($line -match '^([A-Za-z]):\\: =>' -and $Matches[1].ToUpperInvariant() -eq $letter) {
+        Stop-Refused "Refusing to build a sandbox at $Root because ${letter}: is a subst drive ($line)"
+    }
+}
+for ($p = $Root; $p; $p = [IO.Path]::GetDirectoryName($p)) {
+    $item = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Stop-Refused "Refusing to build a sandbox at $Root because $p is a junction or symbolic link"
     }
 }
 
