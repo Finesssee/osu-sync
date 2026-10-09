@@ -1,5 +1,6 @@
 //! Configuration and path detection
 
+pub mod live_guard;
 mod paths;
 
 pub use paths::*;

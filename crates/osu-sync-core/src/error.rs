@@ -67,6 +67,9 @@ pub enum Error {
     #[error("Migration failed at step '{step}': {message}")]
     MigrationFailed { step: String, message: String },
 
+    #[error("Refusing to write {dest}: it is inside the live install {root}. Pass --stable-path and --lazer-path to a sandbox, or --allow-live to write to the live install.")]
+    LiveWriteRefused { dest: PathBuf, root: PathBuf },
+
     #[error("File watcher error: {0}")]
     WatcherError(String),
 
