@@ -3,14 +3,20 @@
 Builds a writable osu-sync test sandbox from copies of the live installs.
 
 .DESCRIPTION
-Copies the lazer blobs of the first -Sets sets listed in -SetsJson into
-<Root>\lazer\files, copies the realm to <Root>\lazer\client.realm, writes
-<Root>\lazer\sets.json with those sets, and creates <Root>\stable\Songs plus a
-copy of osu!.db. The live folders are only read. Files that already exist with
-the same size and modified time are skipped, so a second run copies nothing.
-Root must be a local drive path outside the live installs and %APPDATA%\osu, and
-must not contain either source folder. Root may not be on a network or subst
-drive, and no existing folder on its path may be a junction or symbolic link.
+Exports -RealmSource with realm-export, takes the first -Sets sets that are not
+pending deletion, and copies their lazer blobs into <Root>\lazer\files. It copies
+the realm to <Root>\lazer\client.realm and trims it to those sets with
+`realm-export trim`, writes <Root>\lazer\sets.json with the exported records of
+those sets, and creates <Root>\stable\Songs plus a copy of osu!.db. The live
+folders are only read. Files that already exist with the same size and modified
+time are skipped, and a trimmed realm that still matches <Root>\lazer\trim.stamp
+is kept, so a second run copies nothing.
+Root must be under D:\osu-sync-sandbox, because realm-export trims nothing
+outside it. Root must not be inside the live installs or %APPDATA%\osu, must not
+contain either source folder, may not be on a network or subst drive, and no
+existing folder on its path may be a junction or symbolic link.
+-RealmExport defaults to OSU_SYNC_REALM_EXPORT, then to
+target\release\realm-export.exe in this repository.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/sandbox/new-sandbox.ps1 -Root D:\osu-sync-sandbox\lane-1 -Sets 40
@@ -18,10 +24,10 @@ pwsh -NoProfile -File scripts/sandbox/new-sandbox.ps1 -Root D:\osu-sync-sandbox\
 param(
     [Parameter(Mandatory)][string]$Root,
     [Parameter(Mandatory)][ValidateRange(0, [int]::MaxValue)][int]$Sets,
-    [string]$SetsJson = 'W:\swarm\fixtures\sets.json',
     [string]$LazerSource = 'D:\osu!lazer',
     [string]$StableSource = 'D:\osu!',
-    [string]$RealmSource = 'W:\swarm\fixtures\client-copy.realm'
+    [string]$RealmSource = 'W:\swarm\fixtures\client-copy.realm',
+    [string]$RealmExport = $(if ($env:OSU_SYNC_REALM_EXPORT) { $env:OSU_SYNC_REALM_EXPORT } else { Join-Path $PSScriptRoot '..\..\target\release\realm-export.exe' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +55,9 @@ if ($Root -match '^[\\/]') {
     Stop-Refused "Refusing to build a sandbox at $Root because it does not start with a drive letter"
 }
 $Root = Get-FullPath $Root
+if (-not (Test-Under $Root 'D:\osu-sync-sandbox')) {
+    Stop-Refused "Refusing to build a sandbox at $Root because it is outside D:\osu-sync-sandbox"
+}
 
 $liveFolders = @('D:\osu!', 'D:\osu!lazer', $LazerSource, $StableSource)
 if ($env:APPDATA) { $liveFolders += Join-Path $env:APPDATA 'osu' }
@@ -96,11 +105,40 @@ function Copy-IfChanged([string]$Source, [string]$Dest) {
     $stats.copied++
 }
 
+function Invoke-RealmExport([string[]]$Arguments) {
+    $info = [Diagnostics.ProcessStartInfo]::new($RealmExport)
+    foreach ($arg in $Arguments) { $info.ArgumentList.Add($arg) }
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $process = [Diagnostics.Process]::Start($info)
+    $errTask = $process.StandardError.ReadToEndAsync()
+    $out = $process.StandardOutput.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        [Console]::Error.WriteLine("realm-export $($Arguments[0]) failed with exit code $($process.ExitCode): $($errTask.Result.Trim())")
+        exit 1
+    }
+    $out
+}
+
+function Get-Stamp([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($item) { "$($item.Length) $($item.LastWriteTimeUtc.Ticks)" }
+}
+
+if (-not (Test-Path -LiteralPath $RealmExport -PathType Leaf)) {
+    [Console]::Error.WriteLine("realm-export not found at $RealmExport. Build it with dotnet publish tools/realm-export -c Release -o target/release, or pass -RealmExport")
+    exit 1
+}
+
 $started = Get-Date
-$allSets = Get-Content -LiteralPath $SetsJson -Raw | ConvertFrom-Json
-$chosen = @($allSets | Select-Object -First $Sets)
+$export = [Text.Json.JsonDocument]::Parse((Invoke-RealmExport @('export', $RealmSource)))
+$chosen = @($export.RootElement.EnumerateArray() |
+    Where-Object { -not $_.GetProperty('delete_pending').GetBoolean() } |
+    Select-Object -First $Sets)
 if ($chosen.Count -lt $Sets) {
-    [Console]::Error.WriteLine("$SetsJson lists only $($chosen.Count) sets, fewer than -Sets $Sets")
+    [Console]::Error.WriteLine("$RealmSource holds only $($chosen.Count) sets, fewer than -Sets $Sets")
     exit 1
 }
 
@@ -109,17 +147,33 @@ $stableRoot = Join-Path $Root 'stable'
 [void][IO.Directory]::CreateDirectory((Join-Path $lazerRoot 'files'))
 [void][IO.Directory]::CreateDirectory((Join-Path $stableRoot 'Songs'))
 
-$hashes = $chosen | ForEach-Object { $_.files } | ForEach-Object { $_.hash } | Sort-Object -Unique
+$hashes = $chosen | ForEach-Object { $_.GetProperty('files').EnumerateArray() } |
+    ForEach-Object { $_.GetProperty('hash').GetString() } | Sort-Object -Unique
 foreach ($hash in $hashes) {
     $rel = Join-Path $hash.Substring(0, 1) (Join-Path $hash.Substring(0, 2) $hash)
     Copy-IfChanged (Join-Path $LazerSource "files\$rel") (Join-Path $lazerRoot "files\$rel")
 }
 
-Copy-IfChanged $RealmSource (Join-Path $lazerRoot 'client.realm')
+$ids = @($chosen | ForEach-Object { $_.GetProperty('id').GetString() })
+$realmOut = Join-Path $lazerRoot 'client.realm'
+$stampOut = Join-Path $lazerRoot 'trim.stamp'
+$wanted = "$(Get-Stamp $RealmSource) $($ids -join ',')"
+$stamp = if (Test-Path -LiteralPath $stampOut) { [IO.File]::ReadAllLines($stampOut) }
+if ($stamp -and $stamp[0] -ceq $wanted -and $stamp[1] -ceq (Get-Stamp $realmOut)) {
+    $stats.skipped++
+} else {
+    $keepOut = Join-Path $lazerRoot 'trim-keep.txt'
+    [IO.File]::WriteAllLines($keepOut, [string[]]$ids)
+    [IO.File]::Copy($RealmSource, $realmOut, $true)
+    [void](Invoke-RealmExport @('trim', $realmOut, '--keep', $keepOut))
+    [IO.File]::WriteAllLines($stampOut, [string[]]@($wanted, (Get-Stamp $realmOut)))
+    $stats.copied++
+}
+
 Copy-IfChanged (Join-Path $StableSource 'osu!.db') (Join-Path $stableRoot 'osu!.db')
 
 $setsOut = Join-Path $lazerRoot 'sets.json'
-$json = ConvertTo-Json -InputObject $chosen -Depth 5 -Compress
+$json = '[' + (($chosen | ForEach-Object { $_.GetRawText() }) -join ',') + ']'
 $existing = if (Test-Path -LiteralPath $setsOut) { [IO.File]::ReadAllText($setsOut) }
 if ($existing -ceq $json) {
     $stats.skipped++
