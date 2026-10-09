@@ -46,6 +46,29 @@ fn is_lazer_installation(path: &Path) -> bool {
     path.join("client.realm").exists()
 }
 
+/// Read the custom data location lazer records in `storage.ini` (`FullPath = ...`)
+/// when the user moves their data via Settings > Maintenance > Change location.
+fn read_storage_ini(dir: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dir.join("storage.ini")).ok()?;
+    content.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        let value = value.trim();
+        (key.trim().eq_ignore_ascii_case("FullPath") && !value.is_empty())
+            .then(|| PathBuf::from(value))
+    })
+}
+
+/// Resolve lazer's data directory from its default location, following `storage.ini`.
+/// A relocated install leaves a stale `client.realm` behind, so the redirect wins.
+fn resolve_lazer_dir(default: &Path) -> Option<PathBuf> {
+    if let Some(custom) = read_storage_ini(default) {
+        if is_lazer_installation(&custom) {
+            return Some(custom);
+        }
+    }
+    is_lazer_installation(default).then(|| default.to_path_buf())
+}
+
 /// Scan a directory for osu! installations (non-recursive, checks immediate children)
 #[cfg(target_os = "windows")]
 fn scan_directory_for_stable(dir: &Path) -> Option<PathBuf> {
@@ -102,14 +125,12 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
     {
         // Priority 1: Standard locations with known names
         if let Some(appdata) = dirs::data_dir() {
-            let path = appdata.join("osu");
-            if is_lazer_installation(&path) {
+            if let Some(path) = resolve_lazer_dir(&appdata.join("osu")) {
                 return Some(path);
             }
         }
         if let Some(local) = dirs::data_local_dir() {
-            let path = local.join("osu");
-            if is_lazer_installation(&path) {
+            if let Some(path) = resolve_lazer_dir(&local.join("osu")) {
                 return Some(path);
             }
         }
@@ -135,8 +156,7 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if let Some(data) = dirs::data_local_dir() {
-            let path = data.join("osu");
-            if is_lazer_installation(&path) {
+            if let Some(path) = resolve_lazer_dir(&data.join("osu")) {
                 return Some(path);
             }
         }
@@ -145,8 +165,7 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         if let Some(data) = dirs::data_dir() {
-            let path = data.join("osu");
-            if is_lazer_installation(&path) {
+            if let Some(path) = resolve_lazer_dir(&data.join("osu")) {
                 return Some(path);
             }
         }
@@ -241,5 +260,46 @@ mod tests {
         // These tests just verify the functions run without panicking
         let _ = detect_lazer_path();
         let _ = detect_stable_path();
+    }
+
+    fn make_lazer_dir(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("client.realm"), b"").unwrap();
+    }
+
+    #[test]
+    fn test_resolve_lazer_dir_follows_storage_ini() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("osu");
+        let custom = tmp.path().join("osu!lazer");
+        make_lazer_dir(&default); // stale realm left behind after relocation
+        make_lazer_dir(&custom);
+        std::fs::write(
+            default.join("storage.ini"),
+            format!("FullPath = {}\r\n", custom.display()),
+        )
+        .unwrap();
+
+        assert_eq!(resolve_lazer_dir(&default), Some(custom));
+    }
+
+    #[test]
+    fn test_resolve_lazer_dir_ignores_invalid_redirect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("osu");
+        make_lazer_dir(&default);
+        std::fs::write(default.join("storage.ini"), "FullPath = Z:\\missing\n").unwrap();
+
+        assert_eq!(resolve_lazer_dir(&default), Some(default.clone()));
+    }
+
+    #[test]
+    fn test_resolve_lazer_dir_without_storage_ini() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("osu");
+        assert_eq!(resolve_lazer_dir(&default), None);
+
+        make_lazer_dir(&default);
+        assert_eq!(resolve_lazer_dir(&default), Some(default.clone()));
     }
 }
