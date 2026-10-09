@@ -1,0 +1,8 @@
+//! Builds osu!stable Songs folders out of osu!lazer's content-addressed file store.
+//!
+//! Assets become hard links to lazer's blobs, so a set costs no extra disk space.
+//! `.osu` and `.osb` files are copied, because stable rewrites them in place.
+
+mod materialize;
+
+pub use materialize::*;

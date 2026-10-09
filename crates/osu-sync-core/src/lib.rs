@@ -46,6 +46,7 @@ pub mod dedup;
 pub mod error;
 pub mod filter;
 pub mod lazer;
+pub mod linkstore;
 pub mod media;
 pub mod parser;
 pub mod replay;

@@ -110,19 +110,32 @@ impl BeatmapSet {
 
     /// Generate a folder name in osu!stable format: "{SetID} {Artist} - {Title}"
     pub fn generate_folder_name(&self) -> String {
-        if let Some(meta) = self.metadata() {
-            let id_prefix = self.id.map(|id| format!("{} ", id)).unwrap_or_default();
-            let artist = meta
-                .artist
-                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-            let title = meta
-                .title
-                .replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-            format!("{}{} - {}", id_prefix, artist, title)
-        } else {
-            "Unknown Beatmap".to_string()
-        }
+        folder_name(self.id, self.metadata())
     }
+}
+
+/// Folder name in osu!stable format, "{SetID} {Artist} - {Title}", with characters
+/// Windows rejects replaced by `_` and control characters removed.
+pub fn folder_name(set_id: Option<i32>, metadata: Option<&BeatmapMetadata>) -> String {
+    let Some(meta) = metadata else {
+        return "Unknown Beatmap".to_string();
+    };
+    let clean = |s: &str| -> String {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                _ => c,
+            })
+            .collect()
+    };
+    let id_prefix = set_id.map(|id| format!("{} ", id)).unwrap_or_default();
+    format!(
+        "{}{} - {}",
+        id_prefix,
+        clean(&meta.artist),
+        clean(&meta.title)
+    )
 }
 
 impl Default for BeatmapSet {
