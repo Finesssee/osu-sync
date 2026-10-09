@@ -146,8 +146,6 @@ pub struct SetCounts {
     pub copied: usize,
     pub present: usize,
     pub link_limit_copies: usize,
-    /// Files copied because hard-linking them failed for any other reason.
-    pub link_error_copies: usize,
     pub skipped: usize,
 }
 
@@ -205,6 +203,9 @@ pub struct MaterializeReport {
     pub temps_removed: usize,
     /// The first hard-link error that made a file fall back to a copy.
     pub link_error: Option<String>,
+    /// Files copied because hard-linking them failed for any reason other than
+    /// the link limit, counted in every set, including sets that failed later.
+    pub link_error_copies: usize,
 }
 
 impl MaterializeReport {
@@ -216,7 +217,6 @@ impl MaterializeReport {
                 total.copied += c.copied;
                 total.present += c.present;
                 total.link_limit_copies += c.link_limit_copies;
-                total.link_error_copies += c.link_error_copies;
                 total.skipped += c.skipped;
             }
         }
@@ -239,7 +239,7 @@ impl MaterializeReport {
                 totals.link_limit_copies
             ));
         }
-        if let (n @ 1.., Some(error)) = (totals.link_error_copies, &self.link_error) {
+        if let (n @ 1.., Some(error)) = (self.link_error_copies, &self.link_error) {
             notes.push(format!(
                 "{n} files were copied because hard-linking them failed, first error: {error}"
             ));
@@ -585,6 +585,7 @@ impl Materializer {
                         &present,
                         &mut report.cross_volume,
                         &mut report.link_error,
+                        &mut report.link_error_copies,
                         &mut checked_dirs,
                     ) {
                         Ok(counts) => SetOutcome::Materialized(counts),
@@ -737,6 +738,7 @@ impl Materializer {
         present: &[bool],
         cross_volume: &mut bool,
         link_error: &mut Option<String>,
+        link_error_copies: &mut usize,
         checked_dirs: &mut HashSet<PathBuf>,
     ) -> Result<SetCounts> {
         let folder = self.songs.join(&set.folder);
@@ -773,7 +775,7 @@ impl Materializer {
                         HardLinkFailure::LinkLimit => counts.link_limit_copies += 1,
                         HardLinkFailure::CrossVolume => *cross_volume = true,
                         HardLinkFailure::Other => {
-                            counts.link_error_copies += 1;
+                            *link_error_copies += 1;
                             link_error.get_or_insert_with(|| e.to_string());
                         }
                     },
@@ -1232,14 +1234,38 @@ mod tests {
             only_counts(&report),
             SetCounts {
                 copied: 3,
-                link_error_copies: 2,
                 ..Default::default()
             }
         );
+        assert_eq!(report.link_error_copies, 2);
         assert_eq!(
             report.notes(&fx.songs),
             [format!(
                 "2 files were copied because hard-linking them failed, first error: {}",
+                io::Error::from_raw_os_error(1)
+            )]
+        );
+    }
+
+    #[test]
+    fn link_error_copies_of_a_set_that_fails_later_are_noted() {
+        let fx = Fixture::new();
+        let s = fx.basic_set();
+        let mut m = fx.materializer();
+        // The link fails, and a folder in the .osu file's place makes the set fail
+        // after audio.mp3 was copied instead.
+        m.link = |_, dst| {
+            fs::create_dir(dst.with_file_name(OSU_NAME))?;
+            Err(io::Error::from_raw_os_error(1))
+        };
+        let report = fx.run(&m, &[s]);
+
+        assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
+        assert_eq!(report.link_error_copies, 1);
+        assert_eq!(
+            report.notes(&fx.songs),
+            [format!(
+                "1 files were copied because hard-linking them failed, first error: {}",
                 io::Error::from_raw_os_error(1)
             )]
         );
