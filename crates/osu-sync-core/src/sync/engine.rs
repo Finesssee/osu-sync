@@ -15,7 +15,10 @@ use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateIndex, Duplicate
 use crate::error::{Error, Result};
 use crate::filter::{FilterCriteria, FilterEngine};
 use crate::lazer::{LazerBeatmapSet, LazerDatabase, LazerImporter, StableDatabase};
-use crate::linkstore::{ensure_stable_closed, Materializer, SetOutcome, SkipReason, StableClaims};
+use crate::linkstore::{
+    ensure_stable_closed, Materializer, RelinkReport, Relinker, SetOutcome, SkipReason,
+    StableClaims,
+};
 use crate::stable::StableScanner;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::direction::SyncDirection;
@@ -157,6 +160,8 @@ pub struct SyncEngine {
     /// Session-level cache for lazer beatmap sets to avoid repeated database queries
     /// Each query can take 1-3 minutes, so caching provides significant speedup
     lazer_sets_cache: OnceLock<Vec<LazerBeatmapSet>>,
+    /// Relink stable copies onto lazer's files after a stable-to-lazer sync
+    relink: bool,
 }
 
 impl SyncEngine {
@@ -181,6 +186,7 @@ impl SyncEngine {
             selected_folders: None,
             cancellation: None,
             lazer_sets_cache: OnceLock::new(),
+            relink: false,
         }
     }
 
@@ -245,6 +251,12 @@ impl SyncEngine {
     /// Set a cancellation token for aborting sync operations
     pub fn with_cancellation(mut self, token: Arc<AtomicBool>) -> Self {
         self.cancellation = Some(token);
+        self
+    }
+
+    /// Relink stable files that are copies of lazer's files after a stable-to-lazer sync
+    pub fn with_relink(mut self, relink: bool) -> Self {
+        self.relink = relink;
         self
     }
 
@@ -643,12 +655,14 @@ impl SyncEngine {
         match direction {
             SyncDirection::StableToLazer => {
                 result.merge(self.sync_stable_to_lazer(resolver)?);
+                result.notes.extend(self.relink_after_import());
             }
             SyncDirection::LazerToStable => {
                 result.merge(self.sync_lazer_to_stable()?);
             }
             SyncDirection::Bidirectional => {
                 result.merge(self.sync_stable_to_lazer(resolver)?);
+                result.notes.extend(self.relink_after_import());
                 result.merge(self.sync_lazer_to_stable()?);
             }
         }
@@ -909,6 +923,25 @@ impl SyncEngine {
         Ok(result)
     }
 
+    /// Relinks stable copies of the files lazer already holds, when enabled. Imports
+    /// finish in lazer later, so this reclaims only sets lazer had before. A refusal or
+    /// failure becomes a note, since the import it follows already succeeded.
+    fn relink_after_import(&self) -> Vec<String> {
+        if !self.relink {
+            return Vec::new();
+        }
+        let run = || -> Result<RelinkReport> {
+            ensure_stable_closed()?;
+            let songs = self.stable_songs()?;
+            let files = self.lazer_database.file_store().files_path();
+            Relinker::new(&songs, files, Relinker::default_cache(&songs)).run(&mut |_, _| {})
+        };
+        match run() {
+            Ok(report) => relink_notes(report),
+            Err(e) => vec![format!("relink skipped: {e}")],
+        }
+    }
+
     fn stable_songs(&self) -> Result<std::path::PathBuf> {
         self.config.stable_songs_path().ok_or(Error::MissingPath {
             path_type: "Stable",
@@ -960,6 +993,24 @@ impl SyncEngine {
     }
 }
 
+/// One summary note for a relink after import, then its own notes and errors.
+fn relink_notes(report: RelinkReport) -> Vec<String> {
+    let mut notes = vec![format!(
+        "relinked {} stable files onto lazer's files, reclaiming {} bytes; {} failed",
+        report.relinked,
+        report.bytes_reclaimed,
+        report.errors.len()
+    )];
+    notes.extend(report.notes);
+    notes.extend(
+        report
+            .errors
+            .into_iter()
+            .map(|e| format!("relink failed: {e}")),
+    );
+    notes
+}
+
 /// Builder for creating a SyncEngine with options
 pub struct SyncEngineBuilder {
     config: Option<Config>,
@@ -970,6 +1021,7 @@ pub struct SyncEngineBuilder {
     selected_set_ids: Option<HashSet<i32>>,
     selected_folders: Option<HashSet<String>>,
     cancellation: Option<Arc<AtomicBool>>,
+    relink: bool,
 }
 
 impl SyncEngineBuilder {
@@ -984,6 +1036,7 @@ impl SyncEngineBuilder {
             selected_set_ids: None,
             selected_folders: None,
             cancellation: None,
+            relink: false,
         }
     }
 
@@ -1043,6 +1096,12 @@ impl SyncEngineBuilder {
         self
     }
 
+    /// Relink stable copies onto lazer's files after a stable-to-lazer sync
+    pub fn relink(mut self, relink: bool) -> Self {
+        self.relink = relink;
+        self
+    }
+
     /// Build the sync engine
     pub fn build(self) -> Result<SyncEngine> {
         let config = self.config.ok_or(Error::MissingComponent {
@@ -1076,7 +1135,7 @@ impl SyncEngineBuilder {
             engine = engine.with_cancellation(token);
         }
 
-        Ok(engine)
+        Ok(engine.with_relink(self.relink))
     }
 }
 
@@ -1118,6 +1177,28 @@ fn claim_from_osu_db(claims: &mut StableClaims, root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relink_after_import_reports_counts_notes_and_errors() {
+        let report = RelinkReport {
+            relinked: 12,
+            bytes_reclaimed: 34_567,
+            errors: vec![r"D:\osu-sync-sandbox\x\a.mp3: denied".to_string()],
+            notes: vec![
+                "3 files stayed copies because their lazer file reached the hard-link limit"
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            relink_notes(report),
+            vec![
+                "relinked 12 stable files onto lazer's files, reclaiming 34567 bytes; 1 failed",
+                "3 files stayed copies because their lazer file reached the hard-link limit",
+                r"relink failed: D:\osu-sync-sandbox\x\a.mp3: denied",
+            ]
+        );
+    }
 
     #[test]
     fn unreadable_osu_db_becomes_a_note() {
