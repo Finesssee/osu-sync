@@ -2,6 +2,8 @@
 
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::ops::ControlFlow;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -12,8 +14,9 @@ use crate::config::Config;
 use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateIndex, DuplicateStrategy};
 use crate::error::{Error, Result};
 use crate::filter::{FilterCriteria, FilterEngine};
-use crate::lazer::{LazerBeatmapSet, LazerDatabase, LazerImporter};
-use crate::stable::{StableImporter, StableScanner};
+use crate::lazer::{LazerBeatmapSet, LazerDatabase, LazerImporter, StableDatabase};
+use crate::linkstore::{ensure_stable_closed, Materializer, SetOutcome, SkipReason, StableClaims};
+use crate::stable::StableScanner;
 use crate::sync::conflict::ConflictResolver;
 use crate::sync::direction::SyncDirection;
 use crate::sync::dry_run::{DryRunAction, DryRunItem, DryRunResult};
@@ -31,6 +34,10 @@ pub struct SyncResult {
     pub failed: usize,
     /// Errors encountered during sync
     pub errors: Vec<SyncError>,
+    /// Why each skipped set was skipped, when the sync knows
+    pub skips: Vec<SyncError>,
+    /// Facts about the whole run, such as files copied because the volumes differ
+    pub notes: Vec<String>,
     /// Direction of the sync
     pub direction: SyncDirection,
 }
@@ -61,6 +68,8 @@ impl SyncResult {
         self.skipped += other.skipped;
         self.failed += other.failed;
         self.errors.extend(other.errors);
+        self.skips.extend(other.skips);
+        self.notes.extend(other.notes);
     }
 }
 
@@ -540,13 +549,17 @@ impl SyncEngine {
         let filtered_indices = self.filter_lazer_sets(lazer_sets);
         let total = filtered_indices.len();
 
-        // Scan stable for duplicate detection (uses parallel scanning with caching)
-        let stable_sets = self.stable_scanner.scan_parallel()?;
-        let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
+        let songs = self.stable_songs()?;
+        let mut claims = self.stable_claims(&songs)?;
+        let sets: Vec<&LazerBeatmapSet> =
+            filtered_indices.iter().map(|i| &lazer_sets[*i]).collect();
+        let materializer = Materializer::new(&songs, self.lazer_database.file_store().files_path());
 
-        // Analyze each lazer set
-        for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
-            // Check for cancellation
+        for (progress_idx, (set, plan)) in sets
+            .iter()
+            .zip(materializer.preview(&sets, &mut claims))
+            .enumerate()
+        {
             if self.is_cancelled() {
                 tracing::info!(
                     "Dry run cancelled by user at item {}/{}",
@@ -555,38 +568,27 @@ impl SyncEngine {
                 );
                 break;
             }
-
-            let lazer_set = &lazer_sets[*set_idx];
-            let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
-
             self.report_progress(SyncProgress {
                 current: progress_idx + 1,
                 total,
-                current_name: beatmap_set.generate_folder_name(),
+                current_name: plan.folder.clone(),
                 phase: SyncPhase::Deduplicating,
                 ..Default::default()
             });
 
-            // Check for duplicates
-            let action = if let Some(_duplicate) = self
-                .duplicate_detector
-                .find_duplicate(&beatmap_set, &stable_index.sets)
-            {
-                DryRunAction::Duplicate
-            } else {
-                // Check if it already exists in stable by ID
-                let exists = beatmap_set
-                    .id
-                    .is_some_and(|id| stable_index.sets.iter().any(|s| s.id == Some(id)));
-
-                if exists {
+            let action = match &plan.result {
+                Err(
+                    SkipReason::AlreadyInStable { .. } | SkipReason::DuplicateOsuFilename { .. },
+                ) => DryRunAction::Duplicate,
+                Err(reason) => {
+                    tracing::info!("Would skip {}: {}", plan.folder, reason);
                     DryRunAction::Skip
-                } else {
-                    DryRunAction::Import
                 }
+                Ok(_) if plan.to_create == 0 => DryRunAction::Skip,
+                Ok(_) => DryRunAction::Import,
             };
-
-            let item = DryRunItem::from_lazer_set(lazer_set, action);
+            let mut item = DryRunItem::from_lazer_set(set, action);
+            item.folder_name = Some(plan.folder);
             result.add_item(item);
         }
 
@@ -640,11 +642,11 @@ impl SyncEngine {
                 result.merge(self.sync_stable_to_lazer(resolver)?);
             }
             SyncDirection::LazerToStable => {
-                result.merge(self.sync_lazer_to_stable(resolver)?);
+                result.merge(self.sync_lazer_to_stable()?);
             }
             SyncDirection::Bidirectional => {
                 result.merge(self.sync_stable_to_lazer(resolver)?);
-                result.merge(self.sync_lazer_to_stable(resolver)?);
+                result.merge(self.sync_lazer_to_stable()?);
             }
         }
 
@@ -809,7 +811,7 @@ impl SyncEngine {
     }
 
     /// Sync beatmaps from osu!lazer to osu!stable
-    fn sync_lazer_to_stable(&self, resolver: &dyn ConflictResolver) -> Result<SyncResult> {
+    fn sync_lazer_to_stable(&self) -> Result<SyncResult> {
         let mut result = SyncResult::new(SyncDirection::LazerToStable);
 
         // Phase 1: Get lazer beatmaps (cached)
@@ -844,92 +846,107 @@ impl SyncEngine {
             tracing::info!("Found {} beatmap sets in osu!lazer", total);
         }
 
-        // Phase 2: Scan stable for duplicate detection
-        self.report_progress(SyncProgress {
-            current: 0,
-            total,
-            current_name: "Scanning osu!stable...".to_string(),
-            phase: SyncPhase::Deduplicating,
-            ..Default::default()
-        });
+        ensure_stable_closed()?;
+        let songs = self.stable_songs()?;
+        let mut claims = self.stable_claims(&songs)?;
+        let sets: Vec<&LazerBeatmapSet> =
+            filtered_indices.iter().map(|i| &lazer_sets[*i]).collect();
+        let materializer = Materializer::new(&songs, self.lazer_database.file_store().files_path());
 
-        let stable_sets = self.stable_scanner.scan_parallel()?;
-        let stable_index = crate::stable::BeatmapIndex::new(stable_sets);
-
-        // Phase 3: Import to stable
-        let stable_importer =
-            StableImporter::new(self.config.stable_songs_path().ok_or(Error::MissingPath {
-                path_type: "Stable",
-            })?);
-
-        for (progress_idx, set_idx) in filtered_indices.iter().enumerate() {
-            // Check for cancellation
+        let report = materializer.run(&sets, &mut claims, &mut |current, total, folder| {
             if self.is_cancelled() {
-                tracing::info!("Sync cancelled by user at item {}/{}", progress_idx, total);
-                break;
+                tracing::info!("Sync cancelled by user at item {}/{}", current, total);
+                return ControlFlow::Break(());
             }
-
-            let lazer_set = &lazer_sets[*set_idx];
-            let beatmap_set = self.lazer_database.to_beatmap_set(lazer_set);
-            let set_name = beatmap_set.generate_folder_name();
-
             self.report_progress(SyncProgress {
-                current: progress_idx + 1,
+                current,
                 total,
-                current_name: set_name.clone(),
+                current_name: folder.to_string(),
                 phase: SyncPhase::Importing,
                 ..Default::default()
             });
+            ControlFlow::Continue(())
+        })?;
 
-            // Check for duplicates
-            if let Some(duplicate) = self
-                .duplicate_detector
-                .find_duplicate(&beatmap_set, &stable_index.sets)
-            {
-                let resolution = resolver.resolve(&duplicate);
-
-                match resolution.action {
-                    DuplicateAction::Skip => {
-                        tracing::debug!("Skipping duplicate: {}", set_name);
-                        result.skipped += 1;
-                        continue;
-                    }
-                    DuplicateAction::Replace => {
-                        tracing::debug!("Replacing duplicate: {}", set_name);
-                        // Would need to delete existing folder first
-                    }
-                    DuplicateAction::KeepBoth => {
-                        tracing::debug!("Keeping both versions: {}", set_name);
-                    }
+        for set in &report.sets {
+            match &set.outcome {
+                SetOutcome::Materialized(counts) if counts.created() > 0 => result.imported += 1,
+                SetOutcome::Materialized(_) => result.skipped += 1,
+                SetOutcome::Skipped(reason) => {
+                    result.skipped += 1;
+                    result
+                        .skips
+                        .push(SyncError::new(Some(set.folder.clone()), reason.to_string()));
                 }
-            }
-
-            // Collect files from lazer file store
-            let files = self.collect_lazer_files(lazer_set)?;
-
-            // Import to stable
-            match stable_importer.import_files(&files, &beatmap_set) {
-                Ok(import_result) => {
-                    if import_result.success {
-                        result.imported += 1;
-                    } else {
-                        result.skipped += 1;
-                        if let Some(error) = import_result.error {
-                            tracing::debug!("Skipped {}: {}", set_name, error);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to import {}: {}", set_name, e);
+                SetOutcome::Failed(message) => {
+                    tracing::error!("Failed to materialize {}: {}", set.folder, message);
                     result.failed += 1;
                     result
                         .errors
-                        .push(SyncError::new(Some(set_name), e.to_string()));
+                        .push(SyncError::new(Some(set.folder.clone()), message.clone()));
                 }
             }
         }
+        let totals = report.totals();
+        tracing::info!(
+            "Materialized into {}: {} linked, {} copied, {} already present",
+            songs.display(),
+            totals.linked,
+            totals.copied,
+            totals.present
+        );
+        if report.cross_volume {
+            result.notes.push(format!(
+                "osu!lazer's files and {} are on different volumes, so every file was copied instead of linked",
+                songs.display()
+            ));
+        }
+        if totals.link_limit_copies > 0 {
+            result.notes.push(format!(
+                "{} files were copied because their lazer file already has the most hard links NTFS allows",
+                totals.link_limit_copies
+            ));
+        }
+        if report.temps_removed > 0 {
+            result.notes.push(format!(
+                "Removed {} temporary files left by an interrupted run",
+                report.temps_removed
+            ));
+        }
 
         Ok(result)
+    }
+
+    fn stable_songs(&self) -> Result<std::path::PathBuf> {
+        self.config.stable_songs_path().ok_or(Error::MissingPath {
+            path_type: "Stable",
+        })
+    }
+
+    /// What stable already holds: the Songs listing plus osu!.db when it can be read.
+    fn stable_claims(&self, songs: &Path) -> Result<StableClaims> {
+        let mut claims = StableClaims::from_songs(songs)?;
+        let Some(root) = self.config.stable_path.as_deref() else {
+            return Ok(claims);
+        };
+        if !root.join("osu!.db").is_file() {
+            return Ok(claims);
+        }
+        match StableDatabase::open(root) {
+            Ok(db) => {
+                for beatmap in db.raw_beatmaps() {
+                    if let Some(folder) = beatmap.folder_name.as_deref() {
+                        claims.claim(
+                            folder,
+                            beatmap.file_name.as_deref(),
+                            beatmap.hash.as_deref(),
+                        );
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("Could not read osu!.db, using the Songs listing only: {e}"),
+        }
+        Ok(claims)
     }
 
     /// Collect files from a stable beatmap folder (parallel I/O for 2-3x speedup)
@@ -959,34 +976,6 @@ impl SyncEngine {
                 let filename = path.file_name()?.to_string_lossy().to_string();
                 let content = std::fs::read(&path).ok()?;
                 Some((filename, content))
-            })
-            .collect();
-
-        Ok(files)
-    }
-
-    /// Collect files from the lazer file store (parallel I/O)
-    fn collect_lazer_files(
-        &self,
-        lazer_set: &crate::lazer::LazerBeatmapSet,
-    ) -> Result<Vec<(String, Vec<u8>)>> {
-        let file_store = self.lazer_database.file_store();
-
-        // Read files in parallel using rayon
-        let files: Vec<_> = lazer_set
-            .files
-            .par_iter()
-            .filter_map(|named_file| match file_store.read(&named_file.hash) {
-                Ok(content) => Some((named_file.filename.clone(), content)),
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read file {} ({}): {}",
-                        named_file.filename,
-                        named_file.hash,
-                        e
-                    );
-                    None
-                }
             })
             .collect();
 

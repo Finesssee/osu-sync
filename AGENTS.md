@@ -47,10 +47,11 @@ osu-sync/
 | `dedup` | Duplicate detection (hash, metadata, audio) |
 | `filter` | FilterCriteria for beatmap filtering |
 | `lazer` | LazerDatabase, LazerFileStore, StableDatabase |
+| `linkstore` | Materializer: lazer sets as stable Songs folders, assets hard-linked to the lazer store |
 | `media` | MediaExtractor for audio/backgrounds |
 | `parser` | .osu file + .osz archive parsing |
 | `replay` | ReplayReader, ReplayExporter |
-| `stable` | StableScanner, StableImporter/Exporter |
+| `stable` | StableScanner, StableExporter |
 | `stats` | StatsAnalyzer, comparison, export (JSON/CSV/HTML) |
 | `sync` | SyncEngine, DryRun, ConflictResolver |
 | `unified` | UnifiedStorageEngine, file watcher, game detection |

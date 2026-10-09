@@ -22,7 +22,7 @@ use osu_sync_core::config::{
 use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
-    DryRunResult, SyncDirection, SyncEngineBuilder, SyncProgress, SyncResult,
+    DryRunResult, SyncDirection, SyncEngineBuilder, SyncError, SyncProgress, SyncResult,
 };
 
 /// CLI command to execute
@@ -498,16 +498,16 @@ fn print_dry_run_result(result: &DryRunResult, options: CliOptions) {
 
 fn print_sync_result(result: &SyncResult, options: CliOptions) {
     if options.json {
-        let errors: Vec<_> = result
-            .errors
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "beatmap_set": e.beatmap_set,
-                    "message": e.message,
+        let entries = |list: &[SyncError]| -> Vec<serde_json::Value> {
+            list.iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "beatmap_set": e.beatmap_set,
+                        "message": e.message,
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        };
 
         println!(
             "{}",
@@ -516,7 +516,9 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
                 "staged": result.staged,
                 "failed": result.failed,
                 "skipped": result.skipped,
-                "errors": errors,
+                "errors": entries(&result.errors),
+                "skips": entries(&result.skips),
+                "notes": result.notes,
             })
         );
     } else {
@@ -526,16 +528,26 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
         println!("  Failed:   {}", result.failed);
         println!("  Skipped:  {}", result.skipped);
 
-        if !result.errors.is_empty() {
+        for (title, list) in [
+            ("Errors:", &result.errors),
+            ("Skipped sets:", &result.skips),
+        ] {
+            if list.is_empty() {
+                continue;
+            }
             println!();
-            println!("Errors:");
-            for error in &result.errors {
-                if let Some(ref set) = error.beatmap_set {
-                    println!("  - [{}] {}", set, error.message);
+            println!("{title}");
+            for entry in list {
+                if let Some(ref set) = entry.beatmap_set {
+                    println!("  - [{}] {}", set, entry.message);
                 } else {
-                    println!("  - {}", error.message);
+                    println!("  - {}", entry.message);
                 }
             }
+        }
+        for note in &result.notes {
+            println!();
+            println!("Note: {note}");
         }
     }
 }

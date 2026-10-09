@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -13,7 +14,9 @@ use crate::beatmap::folder_name;
 use crate::config::live_guard;
 use crate::error::{Error, Result};
 use crate::lazer::LazerBeatmapSet;
-use crate::unified::{classify_hard_link_error, rename_no_replace, same_volume, HardLinkFailure};
+use crate::unified::{
+    classify_hard_link_error, rename_no_replace, same_volume, GameLaunchDetector, HardLinkFailure,
+};
 
 /// Longest full path osu!stable opens: `MAX_PATH` (260) minus the 12 characters
 /// Windows keeps free for an 8.3 file name.
@@ -155,6 +158,8 @@ pub struct SetPlan {
     pub online_id: Option<i32>,
     pub folder: String,
     pub result: std::result::Result<PlannedSet, SkipReason>,
+    /// Files a run would create; 0 when the folder is already complete.
+    pub to_create: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -283,6 +288,7 @@ impl StableClaims {
             online_id: set.online_id,
             folder: result.as_ref().map(|p| p.folder.clone()).unwrap_or(base),
             result,
+            to_create: 0,
         }
     }
 
@@ -396,6 +402,16 @@ impl StableClaims {
     }
 }
 
+/// osu!stable reads Songs and rewrites osu!.db while it runs, so writes wait until it is closed.
+pub fn ensure_stable_closed() -> Result<()> {
+    if GameLaunchDetector::new().is_stable_running() {
+        return Err(Error::GameRunning {
+            game: "osu!stable".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Writes lazer sets into a stable Songs folder.
 pub struct Materializer {
     songs: PathBuf,
@@ -414,7 +430,7 @@ impl Materializer {
     }
 
     /// Plans and checks every set without writing anything.
-    pub fn preview(&self, sets: &[LazerBeatmapSet], claims: &mut StableClaims) -> Vec<SetPlan> {
+    pub fn preview(&self, sets: &[&LazerBeatmapSet], claims: &mut StableClaims) -> Vec<SetPlan> {
         sets.iter()
             .map(|set| {
                 let (plan, _) = self.check(set, claims);
@@ -429,9 +445,9 @@ impl Materializer {
     /// Materializes every set. A set is checked in full before anything is written for it.
     pub fn run(
         &self,
-        sets: &[LazerBeatmapSet],
+        sets: &[&LazerBeatmapSet],
         claims: &mut StableClaims,
-        progress: &mut dyn FnMut(usize, usize),
+        progress: &mut dyn FnMut(usize, usize, &str) -> ControlFlow<()>,
     ) -> Result<MaterializeReport> {
         live_guard::check_write(&self.songs)?;
         fs::create_dir_all(&self.songs)?;
@@ -469,7 +485,9 @@ impl Materializer {
                 folder: plan.folder,
                 outcome,
             });
-            progress(i + 1, sets.len());
+            if progress(i + 1, sets.len(), &report.sets[i].folder).is_break() {
+                break;
+            }
         }
         Ok(report)
     }
@@ -479,7 +497,15 @@ impl Materializer {
         let mut present = Vec::new();
         if let Ok(planned) = &plan.result {
             match self.preflight(planned) {
-                Ok(p) => present = p,
+                Ok(p) => {
+                    plan.to_create = planned
+                        .placements
+                        .iter()
+                        .zip(&p)
+                        .filter(|(pl, here)| pl.how != How::Skip && !**here)
+                        .count();
+                    present = p;
+                }
                 Err(reason) => plan.result = Err(reason),
             }
         }
@@ -814,7 +840,9 @@ mod tests {
 
         fn run(&self, m: &Materializer, sets: &[LazerBeatmapSet]) -> MaterializeReport {
             let mut claims = StableClaims::from_songs(&self.songs).unwrap();
-            m.run(sets, &mut claims, &mut |_, _| {}).unwrap()
+            let sets: Vec<&LazerBeatmapSet> = sets.iter().collect();
+            m.run(&sets, &mut claims, &mut |_, _, _| ControlFlow::Continue(()))
+                .unwrap()
         }
 
         /// A set with one `.osu` and an audio file, both stored as blobs.
@@ -1084,7 +1112,7 @@ mod tests {
         );
         let report = fx
             .materializer()
-            .run(&[s], &mut claims, &mut |_, _| {})
+            .run(&[&s], &mut claims, &mut |_, _, _| ControlFlow::Continue(()))
             .unwrap();
 
         assert_eq!(
