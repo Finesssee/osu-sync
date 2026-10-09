@@ -41,6 +41,14 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Test realm-export
+        run: dotnet test tools/realm-export.Tests
+
       - name: Check formatting
         run: cargo fmt -- --check
 
@@ -83,15 +91,33 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish realm-export
+        run: dotnet publish tools/realm-export -c Release -o target/release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: osu-sync-windows
-          path: target/release/osu-sync.exe
+          path: |
+            target/release/osu-sync.exe
+            target/release/realm-export.exe
+            target/release/realm-export.dll
+            target/release/realm-export.runtimeconfig.json
+            target/release/realm-export.deps.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: target/release/osu-sync.exe
+          files: |
+            target/release/osu-sync.exe
+            target/release/realm-export.exe
+            target/release/realm-export.dll
+            target/release/realm-export.runtimeconfig.json
+            target/release/realm-export.deps.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

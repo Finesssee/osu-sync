@@ -2,7 +2,7 @@
 //!
 //! This module provides integration with both osu!lazer and osu!stable:
 //!
-//! - [`LazerDatabase`] - Reader for osu!lazer's Realm database (placeholder)
+//! - [`LazerDatabase`] - Reader for osu!lazer's Realm database through the `realm-export` helper
 //! - [`StableDatabase`] - Reader for osu!stable's osu!.db file (fully implemented)
 //! - [`LazerFileStore`] - Access to lazer's content-addressed file store
 //!
