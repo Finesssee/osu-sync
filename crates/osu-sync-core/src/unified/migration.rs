@@ -1478,7 +1478,8 @@ mod tests {
                 stable: Some(stable.clone()),
                 lazer: Some(lazer.clone()),
             },
-            InstallPaths::default(),
+            Vec::new(),
+            None,
         ));
 
         let shared = dir.path().join("shared");

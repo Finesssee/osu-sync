@@ -123,23 +123,44 @@ fn scan_directory_for_lazer(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The folders lazer uses for its data when no other location is set. Each one
+/// may hold a `storage.ini` that redirects to the real data folder.
+pub(crate) fn lazer_default_dirs() -> Vec<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let bases = [dirs::data_dir(), dirs::data_local_dir()];
+    #[cfg(target_os = "linux")]
+    let bases = [dirs::data_local_dir()];
+    #[cfg(target_os = "macos")]
+    let bases = [dirs::data_dir()];
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let bases: [Option<PathBuf>; 0] = [];
+
+    bases.into_iter().flatten().map(|b| b.join("osu")).collect()
+}
+
+/// The lazer data folders a default location leads to: the folder `storage.ini`
+/// redirects to, plus the default itself when it holds that redirect, since lazer
+/// still reads it at startup and it keeps the data from before the move.
+pub(crate) fn lazer_live_dirs(default: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = resolve_lazer_dir(default).into_iter().collect();
+    if read_storage_ini(default).is_some() && !dirs.iter().any(|d| d == default) {
+        dirs.push(default.to_path_buf());
+    }
+    dirs
+}
+
 /// Detect osu!lazer data directory
 pub fn detect_lazer_path() -> Option<PathBuf> {
+    if let Some(path) = lazer_default_dirs()
+        .iter()
+        .find_map(|default| resolve_lazer_dir(default))
+    {
+        return Some(path);
+    }
+
     #[cfg(target_os = "windows")]
     {
-        // Priority 1: Standard locations with known names
-        if let Some(appdata) = dirs::data_dir() {
-            if let Some(path) = resolve_lazer_dir(&appdata.join("osu")) {
-                return Some(path);
-            }
-        }
-        if let Some(local) = dirs::data_local_dir() {
-            if let Some(path) = resolve_lazer_dir(&local.join("osu")) {
-                return Some(path);
-            }
-        }
-
-        // Priority 2: Scan common directories on all drives
+        // Scan common directories on all drives
         for drive in get_available_drives() {
             // Check common game directories (scans children too)
             let scan_dirs = [
@@ -153,24 +174,6 @@ pub fn detect_lazer_path() -> Option<PathBuf> {
                 if let Some(path) = scan_directory_for_lazer(dir) {
                     return Some(path);
                 }
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(data) = dirs::data_local_dir() {
-            if let Some(path) = resolve_lazer_dir(&data.join("osu")) {
-                return Some(path);
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(data) = dirs::data_dir() {
-            if let Some(path) = resolve_lazer_dir(&data.join("osu")) {
-                return Some(path);
             }
         }
     }
