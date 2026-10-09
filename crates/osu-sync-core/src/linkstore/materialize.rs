@@ -36,8 +36,8 @@ struct Probes {
     readable: HashSet<BlobHash>,
 }
 
-const TEMP_PREFIX: &str = "osu-sync_tmp_";
-const TEMP_SUFFIX: &str = ".part";
+pub(super) const TEMP_PREFIX: &str = "osu-sync_tmp_";
+pub(super) const TEMP_SUFFIX: &str = ".part";
 
 /// SHA-256 of a blob in lazer's store, 64 lowercase hex characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -918,7 +918,7 @@ fn digests(path: &Path) -> io::Result<(String, String)> {
 
 /// Opens both files for attributes only. Opening a file for reading waits for an
 /// antivirus scan of any file not scanned yet, such as an asset no one has opened.
-fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
+pub(super) fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
     Ok(attributes_handle(a)? == attributes_handle(b)?)
 }
 
@@ -958,7 +958,7 @@ fn is_top_level_osu(path: &Path) -> bool {
     path.components().count() == 1 && is_osu(path)
 }
 
-fn is_temp_name(name: &str) -> bool {
+pub(super) fn is_temp_name(name: &str) -> bool {
     name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
 }
 
