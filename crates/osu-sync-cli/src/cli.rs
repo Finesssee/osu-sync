@@ -59,10 +59,14 @@ impl GlobalFlags {
         let mut rest = Vec::with_capacity(args.len());
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
-            let slot = match arg.as_str() {
+            let (name, inline) = match arg.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (arg.as_str(), None),
+            };
+            let slot = match name {
                 "--stable-path" => &mut flags.overrides.stable,
                 "--lazer-path" => &mut flags.overrides.lazer,
-                "--allow-live" => {
+                "--allow-live" if inline.is_none() => {
                     flags.allow_live = true;
                     continue;
                 }
@@ -71,10 +75,12 @@ impl GlobalFlags {
                     continue;
                 }
             };
-            let value = args
-                .next()
-                .filter(|v| !v.starts_with("--"))
-                .ok_or_else(|| format!("{} requires a folder", arg))?;
+            let value = match inline {
+                Some(value) => Some(value),
+                None => args.next().filter(|v| !v.starts_with("--")),
+            }
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("{} requires a folder", name))?;
             *slot = Some(PathBuf::from(value));
         }
         Ok((flags, rest))
@@ -326,6 +332,7 @@ fn run_sync(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("osu!lazer path not configured"))?;
     live_guard::check_sync(direction, &config)?;
+    let import_dir = config.lazer_import_path().unwrap_or_default();
 
     let songs_path = stable_path.join("Songs");
     let scanner = StableScanner::new(songs_path).skip_hashing();
@@ -365,7 +372,15 @@ fn run_sync(
         eprintln!(); // New line after progress
     }
 
+    let json = options.json;
     print_sync_result(&result, options);
+    if result.staged > 0 && !json {
+        println!();
+        println!(
+            "osu!lazer was not started. The staged .osz files are in {}",
+            import_dir.display()
+        );
+    }
 
     Ok(())
 }
@@ -483,6 +498,7 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
             "{}",
             serde_json::json!({
                 "imported": result.imported,
+                "staged": result.staged,
                 "failed": result.failed,
                 "skipped": result.skipped,
                 "errors": errors,
@@ -491,6 +507,7 @@ fn print_sync_result(result: &SyncResult, options: CliOptions) {
     } else {
         println!("Sync Complete:");
         println!("  Imported: {}", result.imported);
+        println!("  Staged:   {}", result.staged);
         println!("  Failed:   {}", result.failed);
         println!("  Skipped:  {}", result.skipped);
 
@@ -586,6 +603,39 @@ mod tests {
         assert_eq!(
             GlobalFlags::take(strings(&["osu-sync", "--lazer-path", "--cli"])).unwrap_err(),
             "--lazer-path requires a folder"
+        );
+    }
+
+    #[test]
+    fn parses_path_overrides_with_equals() {
+        let (flags, rest) = GlobalFlags::take(strings(&[
+            "osu-sync",
+            "--stable-path=D:/osu-sync-sandbox/a/stable",
+            "--cli",
+            "scan",
+            "--lazer-path=D:/osu-sync-sandbox/a b/lazer",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            flags.overrides,
+            PathOverrides {
+                stable: Some(PathBuf::from("D:/osu-sync-sandbox/a/stable")),
+                lazer: Some(PathBuf::from("D:/osu-sync-sandbox/a b/lazer")),
+            }
+        );
+        assert_eq!(rest, strings(&["osu-sync", "--cli", "scan"]));
+
+        assert_eq!(
+            GlobalFlags::take(strings(&["osu-sync", "--lazer-path="])).unwrap_err(),
+            "--lazer-path requires a folder"
+        );
+
+        let (flags, _) =
+            GlobalFlags::take(strings(&["osu-sync", "--stable-path=D:/missing-folder"])).unwrap();
+        assert_eq!(
+            flags.validate().unwrap_err(),
+            "--stable-path D:/missing-folder is not an osu!stable folder (no Songs folder)"
         );
     }
 

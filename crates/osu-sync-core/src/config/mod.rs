@@ -126,6 +126,11 @@ fn active_path_overrides() -> Option<&'static PathOverrides> {
     PATH_OVERRIDES.get().filter(|o| !o.is_empty())
 }
 
+/// True when `--lazer-path` replaced the lazer data folder for this process.
+pub fn lazer_path_overridden() -> bool {
+    active_path_overrides().is_some_and(|o| o.lazer.is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutcome {
     Saved,

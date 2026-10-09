@@ -28,6 +28,7 @@ rosu-map = "0.2"
 # File handling
 zip = "2"
 walkdir = "2"
+same-file = "1"
 sha2 = "0.10"
 md-5 = "0.10"
 directories = "5"

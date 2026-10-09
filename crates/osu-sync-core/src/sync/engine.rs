@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::beatmap::BeatmapSet;
+use crate::config::live_guard::LazerLaunch;
 use crate::config::Config;
 use crate::dedup::{DuplicateAction, DuplicateDetector, DuplicateIndex, DuplicateStrategy};
 use crate::error::{Error, Result};
@@ -22,6 +23,8 @@ use crate::sync::dry_run::{DryRunAction, DryRunItem, DryRunResult};
 pub struct SyncResult {
     /// Number of beatmaps successfully imported
     pub imported: usize,
+    /// Number of .osz files written to the lazer import folder without starting the game
+    pub staged: usize,
     /// Number of beatmaps skipped (duplicates or user choice)
     pub skipped: usize,
     /// Number of beatmaps that failed to import
@@ -43,7 +46,7 @@ impl SyncResult {
 
     /// Total number of beatmaps processed
     pub fn total(&self) -> usize {
-        self.imported + self.skipped + self.failed
+        self.imported + self.staged + self.skipped + self.failed
     }
 
     /// Check if the sync completed without errors
@@ -54,6 +57,7 @@ impl SyncResult {
     /// Merge another result into this one
     pub fn merge(&mut self, other: SyncResult) {
         self.imported += other.imported;
+        self.staged += other.staged;
         self.skipped += other.skipped;
         self.failed += other.failed;
         self.errors.extend(other.errors);
@@ -709,6 +713,7 @@ impl SyncEngine {
 
         // Phase 3: Import to lazer
         // Use batch mode - create all .osz files first, then trigger lazer once at the end
+        let launch = crate::config::live_guard::lazer_launch()?;
         let mut lazer_importer = LazerImporter::new(
             self.config
                 .lazer_path
@@ -766,8 +771,11 @@ impl SyncEngine {
 
             // Import to lazer
             match lazer_importer.import_beatmap_set(stable_set, &files) {
-                Ok(_) => {
+                Ok(_) if launch == LazerLaunch::Launch => {
                     result.imported += 1;
+                }
+                Ok(_) => {
+                    result.staged += 1;
                 }
                 Err(e) => {
                     tracing::error!("Failed to import {}: {}", set_name, e);
@@ -1139,10 +1147,13 @@ mod tests {
         let mut result2 = SyncResult::new(SyncDirection::LazerToStable);
         result2.imported = 3;
         result2.failed = 1;
+        result2.staged = 4;
 
         result1.merge(result2);
 
         assert_eq!(result1.imported, 8);
+        assert_eq!(result1.staged, 4);
+        assert_eq!(result1.total(), 15);
         assert_eq!(result1.skipped, 2);
         assert_eq!(result1.failed, 1);
     }

@@ -1,46 +1,146 @@
-//! Refuses writes under the auto-detected osu!stable and osu!lazer folders unless
-//! the process opted in with `--allow-live`.
+//! Refuses writes under the live osu!stable and osu!lazer folders unless the
+//! process opted in with `--allow-live`. The live folders are the auto-detected
+//! installs plus the paths saved in the config file.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-use super::{detect_lazer_path, detect_stable_path, Config};
+use same_file::Handle;
+use serde::Deserialize;
+
+use super::{detect_lazer_path, detect_stable_path, lazer_path_overridden, Config};
 use crate::error::{Error, Result};
 use crate::sync::SyncDirection;
 
-/// The live install folders a write must stay out of.
-#[derive(Debug, Clone, Default)]
-pub struct LiveRoots {
+/// One stable folder and one lazer data folder, either of which may be unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct InstallPaths {
+    #[serde(rename = "stable_path")]
     pub stable: Option<PathBuf>,
+    #[serde(rename = "lazer_path")]
     pub lazer: Option<PathBuf>,
 }
 
-impl LiveRoots {
-    pub fn detect() -> Self {
-        Self {
-            stable: detect_stable_path(),
-            lazer: detect_lazer_path(),
-        }
+impl InstallPaths {
+    /// Reads the paths saved in a config file, ignoring every other field.
+    pub fn read_saved(config_file: &Path) -> Self {
+        std::fs::read_to_string(config_file)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default()
     }
 
-    /// Returns the live root that contains `dest`, if any.
-    pub fn containing(&self, dest: &Path) -> Option<&Path> {
-        let dest = resolve(dest);
-        [&self.stable, &self.lazer]
-            .into_iter()
-            .flatten()
-            .find(|root| is_under(&dest, &resolve(root)))
-            .map(PathBuf::as_path)
+    fn iter(&self) -> impl Iterator<Item = &PathBuf> {
+        [&self.stable, &self.lazer].into_iter().flatten()
+    }
+}
+
+/// What a stable-to-lazer sync does with the .osz files it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LazerLaunch {
+    /// Start the installed osu!lazer with each file, which imports into its own data folder.
+    Launch,
+    /// Leave the files in the import folder.
+    Stage(StageReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageReason {
+    /// The game would import into its own data folder, not the overridden one.
+    LazerPathOverridden,
+    /// No live lazer folder is known, so the game's import target is unknown.
+    NoLiveLazer,
+}
+
+/// The live install folders a write must stay out of.
+#[derive(Debug)]
+pub struct LiveRoots {
+    detected: InstallPaths,
+    roots: Vec<Root>,
+}
+
+#[derive(Debug)]
+struct Root {
+    path: PathBuf,
+    resolved: PathBuf,
+    handle: Option<Handle>,
+}
+
+impl LiveRoots {
+    pub fn new(detected: InstallPaths, saved: InstallPaths) -> Self {
+        let mut roots: Vec<Root> = Vec::new();
+        for path in detected.iter().chain(saved.iter()) {
+            if roots.iter().any(|r| &r.path == path) {
+                continue;
+            }
+            roots.push(Root {
+                path: path.clone(),
+                resolved: resolve(path)
+                    .or_else(|| std::path::absolute(path).ok())
+                    .unwrap_or_else(|| path.clone()),
+                handle: Handle::from_path(path).ok(),
+            });
+        }
+        Self { detected, roots }
+    }
+
+    pub fn detect() -> Self {
+        let detected = InstallPaths {
+            stable: detect_stable_path(),
+            lazer: detect_lazer_path(),
+        };
+        let saved = Config::config_path()
+            .map(|file| InstallPaths::read_saved(&file))
+            .unwrap_or_default();
+        Self::new(detected, saved)
     }
 
     pub fn check(&self, dest: &Path) -> Result<()> {
-        match self.containing(dest) {
+        let resolved = resolve(dest).ok_or_else(|| Error::LiveWriteUnresolved {
+            dest: dest.to_path_buf(),
+        })?;
+        let root = self
+            .roots
+            .iter()
+            .find(|root| is_under(&resolved, &root.resolved))
+            .or_else(|| self.root_by_identity(&resolved));
+        match root {
             Some(root) => Err(Error::LiveWriteRefused {
                 dest: dest.to_path_buf(),
-                root: root.to_path_buf(),
+                root: root.path.clone(),
             }),
             None => Ok(()),
+        }
+    }
+
+    /// Finds a root that is the same directory as an existing ancestor of `dest`. This
+    /// catches a live folder reached through a UNC share, a mapped drive or subst.
+    fn root_by_identity(&self, dest: &Path) -> Option<&Root> {
+        dest.ancestors()
+            .filter_map(|ancestor| Handle::from_path(ancestor).ok())
+            .find_map(|ancestor| {
+                self.roots
+                    .iter()
+                    .find(|root| root.handle.as_ref() == Some(&ancestor))
+            })
+    }
+
+    /// Starting osu!lazer imports into the folder its storage.ini names, which is the
+    /// detected lazer root, so a launch counts as a write there.
+    pub fn lazer_launch(&self, lazer_overridden: bool, allow_live: bool) -> Result<LazerLaunch> {
+        if lazer_overridden {
+            return Ok(LazerLaunch::Stage(StageReason::LazerPathOverridden));
+        }
+        if allow_live {
+            return Ok(LazerLaunch::Launch);
+        }
+        match &self.detected.lazer {
+            Some(root) => Err(Error::LiveWriteRefused {
+                dest: root.clone(),
+                root: root.clone(),
+            }),
+            None => Ok(LazerLaunch::Stage(StageReason::NoLiveLazer)),
         }
     }
 }
@@ -48,19 +148,48 @@ impl LiveRoots {
 static ALLOW_LIVE: AtomicBool = AtomicBool::new(false);
 static DETECTED: OnceLock<LiveRoots> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_ROOTS: std::cell::RefCell<Option<LiveRoots>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Makes `check_write` on this thread use `roots` instead of the detected installs.
+#[cfg(test)]
+pub(crate) fn set_test_roots(roots: LiveRoots) {
+    TEST_ROOTS.with(|r| *r.borrow_mut() = Some(roots));
+}
+
+fn with_roots<T>(f: impl FnOnce(&LiveRoots) -> T) -> T {
+    #[cfg(test)]
+    if TEST_ROOTS.with(|r| r.borrow().is_some()) {
+        return TEST_ROOTS.with(|r| f(r.borrow().as_ref().unwrap()));
+    }
+    f(DETECTED.get_or_init(LiveRoots::detect))
+}
+
 pub fn set_allow_live(allow: bool) {
     ALLOW_LIVE.store(allow, Ordering::SeqCst);
 }
 
-/// Entry-point check for every operation that writes into a game folder.
-pub fn check_write(dest: &Path) -> Result<()> {
-    if ALLOW_LIVE.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    DETECTED.get_or_init(LiveRoots::detect).check(dest)
+fn allow_live() -> bool {
+    ALLOW_LIVE.load(Ordering::SeqCst)
 }
 
-/// Checks the folders a sync in `direction` writes to.
+/// Entry-point check for every operation that writes into a game folder.
+pub fn check_write(dest: &Path) -> Result<()> {
+    if allow_live() {
+        return Ok(());
+    }
+    with_roots(|roots| roots.check(dest))
+}
+
+/// Decides whether a stable-to-lazer sync may start osu!lazer to import.
+pub fn lazer_launch() -> Result<LazerLaunch> {
+    with_roots(|roots| roots.lazer_launch(lazer_path_overridden(), allow_live()))
+}
+
+/// Checks the folders a sync in `direction` writes to, and the game launch an
+/// import into lazer ends with.
 pub fn check_sync(direction: SyncDirection, config: &Config) -> Result<()> {
     if direction.syncs_from_lazer() {
         if let Some(songs) = config.stable_songs_path() {
@@ -71,6 +200,7 @@ pub fn check_sync(direction: SyncDirection, config: &Config) -> Result<()> {
         if let Some(lazer) = &config.lazer_path {
             check_write(lazer)?;
         }
+        lazer_launch()?;
     }
     Ok(())
 }
@@ -82,23 +212,27 @@ pub fn is_under(path: &Path, root: &Path) -> bool {
 }
 
 /// Canonicalizes the longest existing ancestor and re-appends the rest, so a
-/// destination that does not exist yet still resolves through junctions and `..`.
-fn resolve(path: &Path) -> PathBuf {
+/// destination that does not exist yet still resolves through junctions. Returns
+/// `None` when a `..` or other non-name component sits in the part that does not
+/// exist, since what it points at cannot be known.
+fn resolve(path: &Path) -> Option<PathBuf> {
+    let path = std::path::absolute(path).ok()?;
     let mut tail = Vec::new();
-    let mut current = path;
+    let mut current = path.as_path();
     loop {
         if let Ok(canonical) = current.canonicalize() {
-            return tail
-                .iter()
-                .rev()
-                .fold(canonical, |acc: PathBuf, part| acc.join(part));
+            return Some(
+                tail.iter()
+                    .rev()
+                    .fold(canonical, |acc: PathBuf, part| acc.join(part)),
+            );
         }
         match (current.parent(), current.components().next_back()) {
             (Some(parent), Some(Component::Normal(part))) => {
                 tail.push(part.to_os_string());
                 current = parent;
             }
-            _ => return path.to_path_buf(),
+            _ => return None,
         }
     }
 }
@@ -108,46 +242,59 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn roots(dir: &TempDir) -> LiveRoots {
-        let stable = dir.path().join("osu!");
-        let lazer = dir.path().join("osu!lazer");
+    fn installs(dir: &Path) -> InstallPaths {
+        let stable = dir.join("osu!");
+        let lazer = dir.join("osu!lazer");
         std::fs::create_dir_all(stable.join("Songs")).unwrap();
         std::fs::create_dir_all(lazer.join("files")).unwrap();
-        LiveRoots {
+        InstallPaths {
             stable: Some(stable),
             lazer: Some(lazer),
+        }
+    }
+
+    fn refused_root(roots: &LiveRoots, dest: &Path) -> Option<PathBuf> {
+        match roots.check(dest) {
+            Err(Error::LiveWriteRefused { root, .. }) => Some(root),
+            Ok(()) => None,
+            Err(e) => panic!("unexpected error for {}: {e}", dest.display()),
         }
     }
 
     #[test]
     fn refuses_write_under_live_path() {
         let dir = TempDir::new().unwrap();
-        let roots = roots(&dir);
+        let roots = LiveRoots::new(installs(dir.path()), InstallPaths::default());
 
         let songs = dir.path().join("osu!").join("Songs").join("123 A - B");
-        let err = roots.check(&songs).unwrap_err();
-        assert!(matches!(
-            &err,
-            Error::LiveWriteRefused { root, .. } if root == &dir.path().join("osu!")
-        ));
+        assert_eq!(refused_root(&roots, &songs), Some(dir.path().join("osu!")));
 
         let blob = dir.path().join("osu!lazer").join("files").join("ab");
         assert_eq!(
-            roots.containing(&blob),
-            Some(dir.path().join("osu!lazer").as_path())
+            refused_root(&roots, &blob),
+            Some(dir.path().join("osu!lazer"))
         );
 
         let dotdot = dir.path().join("sandbox").join("..").join("osu!");
+        assert_eq!(refused_root(&roots, &dotdot), Some(dir.path().join("osu!")));
+
+        let missing_dotdot = dir
+            .path()
+            .join("osu!")
+            .join("newA")
+            .join("newB")
+            .join("..")
+            .join("x");
         assert_eq!(
-            roots.containing(&dotdot),
-            Some(dir.path().join("osu!").as_path())
+            refused_root(&roots, &missing_dotdot),
+            Some(dir.path().join("osu!"))
         );
     }
 
     #[test]
     fn allows_write_under_sandbox() {
         let dir = TempDir::new().unwrap();
-        let roots = roots(&dir);
+        let roots = LiveRoots::new(installs(dir.path()), InstallPaths::default());
 
         for dest in [
             dir.path()
@@ -157,8 +304,132 @@ mod tests {
             dir.path().join("osu!lazer-copy").join("files"),
             dir.path().join("osu"),
         ] {
-            assert!(roots.check(&dest).is_ok(), "{} was refused", dest.display());
+            assert_eq!(refused_root(&roots, &dest), None, "{}", dest.display());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_unresolvable_dotdot() {
+        let dir = TempDir::new().unwrap();
+        let roots = LiveRoots::new(installs(dir.path()), InstallPaths::default());
+
+        let verbatim = format!(
+            r"{}\sandbox\newA\newB\..\x",
+            dir.path().canonicalize().unwrap().display()
+        );
+        let err = roots.check(Path::new(&verbatim)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Refusing to write {verbatim}: the path cannot be resolved to check it against the live installs"
+            )
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_live_path_reached_through_admin_share() {
+        let base = Path::new(r"D:\osu-sync-sandbox");
+        if std::fs::create_dir_all(base).is_err() {
+            return;
+        }
+        let dir = TempDir::new_in(base).unwrap();
+        let roots = LiveRoots::new(installs(dir.path()), InstallPaths::default());
+
+        let local = dir.path().join("osu!").join("Songs").join("1 A - B");
+        let share = format!(
+            r"\\localhost\D$\{}",
+            local.strip_prefix(r"D:\").unwrap().display()
+        );
+        if !Path::new(&share).parent().unwrap().exists() {
+            eprintln!("skipped: {share} is not reachable");
+            return;
+        }
+
+        assert_eq!(
+            refused_root(&roots, Path::new(&share)),
+            Some(dir.path().join("osu!"))
+        );
+        let sandbox_share = format!(
+            r"\\localhost\D$\{}\sandbox\Songs",
+            dir.path().strip_prefix(r"D:\").unwrap().display()
+        );
+        assert_eq!(refused_root(&roots, Path::new(&sandbox_share)), None);
+    }
+
+    #[test]
+    fn treats_saved_config_paths_as_live() {
+        let dir = TempDir::new().unwrap();
+        let saved_stable = dir.path().join("elsewhere").join("osu!");
+        let saved_lazer = dir.path().join("elsewhere").join("lazer-data");
+        std::fs::create_dir_all(saved_stable.join("Songs")).unwrap();
+        let config_file = dir.path().join("config.json");
+        std::fs::write(
+            &config_file,
+            serde_json::json!({
+                "stable_path": saved_stable,
+                "lazer_path": saved_lazer,
+                "theme": "Mocha",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let saved = InstallPaths::read_saved(&config_file);
+        assert_eq!(
+            saved,
+            InstallPaths {
+                stable: Some(saved_stable.clone()),
+                lazer: Some(saved_lazer.clone()),
+            }
+        );
+
+        let roots = LiveRoots::new(installs(dir.path()), saved);
+        assert_eq!(
+            refused_root(&roots, &saved_stable.join("Songs").join("1 A - B")),
+            Some(saved_stable)
+        );
+        assert_eq!(
+            refused_root(&roots, &saved_lazer.join("files")),
+            Some(saved_lazer)
+        );
+        assert_eq!(refused_root(&roots, &dir.path().join("sandbox")), None);
+        assert_eq!(
+            InstallPaths::read_saved(&dir.path().join("missing.json")),
+            InstallPaths::default()
+        );
+    }
+
+    #[test]
+    fn lazer_launch_counts_as_a_live_write() {
+        let dir = TempDir::new().unwrap();
+        let live = installs(dir.path());
+        let lazer_root = live.lazer.clone().unwrap();
+        let roots = LiveRoots::new(live, InstallPaths::default());
+
+        assert_eq!(
+            roots.lazer_launch(true, false).unwrap(),
+            LazerLaunch::Stage(StageReason::LazerPathOverridden)
+        );
+        assert_eq!(
+            roots.lazer_launch(true, true).unwrap(),
+            LazerLaunch::Stage(StageReason::LazerPathOverridden)
+        );
+        assert_eq!(
+            roots.lazer_launch(false, true).unwrap(),
+            LazerLaunch::Launch
+        );
+        assert!(matches!(
+            roots.lazer_launch(false, false),
+            Err(Error::LiveWriteRefused { root, .. }) if root == lazer_root
+        ));
+
+        let no_lazer = LiveRoots::new(InstallPaths::default(), InstallPaths::default());
+        assert_eq!(
+            no_lazer.lazer_launch(false, false).unwrap(),
+            LazerLaunch::Stage(StageReason::NoLiveLazer)
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! Batch import is more efficient for large syncs.
 
 use crate::beatmap::BeatmapSet;
+use crate::config::live_guard::LazerLaunch;
 use crate::error::{Error, Result};
 use crate::parser::create_osz_from_set;
 use crate::utils::sanitize_filename;
@@ -239,6 +240,14 @@ impl LazerImporter {
         let Some(ref lazer_exe) = self.lazer_exe else {
             return false;
         };
+        match self.may_launch() {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(e) => {
+                tracing::warn!("Not starting osu!lazer: {}", e);
+                return false;
+            }
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -295,6 +304,10 @@ impl LazerImporter {
             tracing::warn!("Please start osu!lazer manually to import them.");
             return Ok(false);
         };
+
+        if !self.may_launch()? {
+            return Ok(false);
+        }
 
         let total = self.pending_imports.len();
         tracing::info!("Triggering lazer to import {} beatmaps", total);
@@ -387,6 +400,23 @@ impl LazerImporter {
             }
 
             return Ok(true);
+        }
+    }
+
+    /// Runs the live-path guard for a game launch. The game imports into its own
+    /// data folder, whatever this importer's data path is.
+    fn may_launch(&self) -> Result<bool> {
+        match crate::config::live_guard::lazer_launch()? {
+            LazerLaunch::Launch => Ok(true),
+            LazerLaunch::Stage(reason) => {
+                tracing::info!(
+                    "Not starting osu!lazer ({:?}); {} .osz files are staged in {}",
+                    reason,
+                    self.pending_imports.len(),
+                    self.import_path.display()
+                );
+                Ok(false)
+            }
         }
     }
 
