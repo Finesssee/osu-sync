@@ -57,8 +57,7 @@ fn read_storage_ini(dir: &Path) -> Option<PathBuf> {
         .trim_start_matches('\u{feff}')
         .lines()
         .filter_map(|line| line.split_once('='))
-        .filter(|(key, _)| key.trim() == "FullPath")
-        .last()?;
+        .rfind(|(key, _)| key.trim() == "FullPath")?;
     let path = PathBuf::from(value.trim());
     path.is_absolute().then_some(path)
 }
