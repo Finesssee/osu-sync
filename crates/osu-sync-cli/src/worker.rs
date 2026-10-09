@@ -530,10 +530,7 @@ fn handle_calculate_stats(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Confi
     // Calculate comparison stats
     let stats = StatsAnalyzer::compare(&stable_sets, &lazer_sets);
 
-    let _ = app_tx.send(AppMessage::StatsComplete(stats));
-    if let Some(error) = lazer_error {
-        let _ = app_tx.send(AppMessage::StatsProgress(error));
-    }
+    let _ = app_tx.send(AppMessage::StatsComplete(stats, lazer_error));
 }
 
 fn handle_load_collections(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {

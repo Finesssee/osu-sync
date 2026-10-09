@@ -22,9 +22,12 @@ static class Commands
             using (var realm = Realm.GetInstance(new RealmConfiguration(copy) { IsDynamic = true, IsReadOnly = true }))
                 sets = ReadSets(realm, skipped);
 
-            int written;
+            var json = new ArrayBufferWriter<byte>();
+            int written = Write(sets, json, skipped);
+            if (ExportOutcome.Failure(written, skipped.Count, skipped.First) is string failure)
+                throw new ToolException(1, failure);
             using (Stream output = outPath == null ? Console.OpenStandardOutput() : File.Create(outPath))
-                written = Write(sets, output, skipped);
+                output.Write(json.WrittenSpan);
             Console.Error.WriteLine($"exported {written} sets, {sets.Count(s => s.DeletePending)} delete-pending");
             if (skipped.Count > 0)
                 Console.Error.WriteLine($"warning: skipped {skipped.Count} sets that could not be exported; first error: {skipped.First}");
@@ -44,11 +47,17 @@ static class Commands
 
     public static void Trim(string realmPath, string keepFile)
     {
-        var keep = File.ReadAllLines(keepFile)
-            .Select(line => line.Trim())
-            .Where(line => line.Length > 0)
-            .Select(Guid.Parse)
-            .ToHashSet();
+        var keep = new HashSet<Guid>();
+        string[] lines = File.ReadAllLines(keepFile);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = lines[i].Trim();
+            if (line.Length == 0)
+                continue;
+            if (!Guid.TryParse(line, out var id))
+                throw new ToolException(2, $"{keepFile} line {i + 1} is not a set id (GUID): {line}");
+            keep.Add(id);
+        }
 
         var config = new RealmConfiguration(realmPath) { IsDynamic = true };
         int removed = 0, kept = 0;
@@ -73,9 +82,8 @@ static class Commands
             throw new ToolException(1, $"{keep.Count} ids requested but {kept} sets kept");
     }
 
-    public static void MarkDeletePending(string realmPath, string setId)
+    public static void MarkDeletePending(string realmPath, Guid id)
     {
-        var id = Guid.Parse(setId);
         using var realm = Realm.GetInstance(new RealmConfiguration(realmPath) { IsDynamic = true });
         var set = realm.DynamicApi.All("BeatmapSet").ToList()
             .FirstOrDefault(s => s.DynamicApi.Get<Guid>("ID") == id)
@@ -184,7 +192,7 @@ static class Commands
             difficulty?.DynamicApi.Get<double>("SliderTickRate") ?? 0);
     }
 
-    static int Write(List<SetRecord> sets, Stream output, Skipped skipped)
+    static int Write(List<SetRecord> sets, IBufferWriter<byte> output, Skipped skipped)
     {
         int written = 0;
         using var w = new Utf8JsonWriter(output, new JsonWriterOptions { Indented = false });
@@ -276,18 +284,6 @@ static class Commands
         }
         w.WriteEndArray();
         w.WriteEndObject();
-    }
-}
-
-sealed class Skipped
-{
-    public int Count { get; private set; }
-    public string First { get; private set; }
-
-    public void Add(Exception e)
-    {
-        Count++;
-        First ??= $"{e.GetType().Name}: {e.Message}";
     }
 }
 

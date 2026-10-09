@@ -15,7 +15,8 @@ Root must be under D:\osu-sync-sandbox, because realm-export trims nothing
 outside it. Root must not be inside the live installs or %APPDATA%\osu, must not
 contain either source folder, may not be on a network or subst drive, and no
 existing folder on its path may be a junction or symbolic link. Nothing already
-under Root may be a junction, a symbolic link or a hard-linked file.
+under Root may be a junction, a symbolic link, a hard-linked file or a file
+whose link count cannot be read.
 -RealmExport defaults to OSU_SYNC_REALM_EXPORT, then to
 target\release\realm-export.exe in this repository.
 
@@ -92,13 +93,36 @@ for ($p = $Root; $p; $p = [IO.Path]::GetDirectoryName($p)) {
     }
 }
 
+Add-Type -Namespace OsuSync -Name FileLinks -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, [Out] uint[] info);
+
+public static uint Count(string path)
+{
+    using (var handle = System.IO.File.OpenHandle(path, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+        System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
+    {
+        var info = new uint[13];
+        if (!GetFileInformationByHandle(handle, info))
+            throw new System.ComponentModel.Win32Exception();
+        return info[10]; // BY_HANDLE_FILE_INFORMATION.nNumberOfLinks
+    }
+}
+'@
+
 function Assert-NoLinksUnder([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     foreach ($item in Get-ChildItem -LiteralPath $Path -Recurse -Force) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             Stop-Refused "Refusing to build a sandbox at $Root because $($item.FullName) is a junction or symbolic link"
         }
-        if ($item.LinkType -eq 'HardLink') {
+        if ($item.PSIsContainer) { continue }
+        try {
+            $links = [OsuSync.FileLinks]::Count($item.FullName)
+        } catch {
+            Stop-Refused "Refusing to build a sandbox at $Root because the link count of $($item.FullName) cannot be read: $($_.Exception.InnerException.Message)"
+        }
+        if ($links -gt 1) {
             Stop-Refused "Refusing to build a sandbox at $Root because $($item.FullName) is a hard link to another file"
         }
     }

@@ -23,6 +23,7 @@ dotnet publish tools/realm-export -c Release -o target/release
 ```
 
 This puts `realm-export.exe` next to `osu-sync.exe`.
+`dotnet test tools/realm-export.Tests` runs the helper's unit tests; they do not need Realm or osu!lazer.
 osu-sync looks for the helper in this order:
 
 1. `OSU_SYNC_REALM_EXPORT`, the full path of `realm-export.exe` or `realm-export.dll`.
@@ -45,9 +46,12 @@ realm-export mark-delete-pending <client.realm> --id <set-id> [--lazer-dir <dir>
   A run that is killed before it finishes can leave a `%TEMP%\osu-sync-realm-export-*` folder holding a
   full copy of the realm. It is safe to delete. If the delete fails at the end of a normal run, the helper
   prints a warning to stderr and keeps the original result or error.
-  `--out` refuses a path that ends in `.realm` or that is the input realm itself.
+  `--out` refuses a path that ends in `.realm`, that is the input realm itself, or that names an alternate
+  data stream (`file:stream`).
   A set that cannot be read or written is skipped, and one stderr warning gives the count and the first
-  error. Numbers that are infinite or NaN are written as `null`.
+  error. osu-sync logs that warning. If every set is skipped, `export` writes nothing and exits 1 with the
+  count and the first error, so a systemic failure is not read as an empty library.
+  Numbers that are infinite or NaN are written as `null`.
   Sets are sorted by online ID then set ID, beatmaps the same way, and files by filename, so two exports of
   one realm are byte-identical.
 - `trim` deletes every set whose ID is not listed in `<ids-file>` (one set GUID per line), with its beatmaps,
@@ -63,7 +67,10 @@ link, or has a `client.realm.lock`, `.management` or `.note` beside it that is a
 - Copying a realm while osu!lazer is writing it can give a torn snapshot. The export then fails or lists a
   library that is slightly out of date. Close osu!lazer for an exact read.
 - The helper loads whatever `Realm.dll` the lazer install has. If its version does not match the one the
-  helper was built against (Realm 20.1.0), `export` fails without writing anything, but `trim` can stop
-  halfway and leave a sandbox realm partly trimmed. Rebuild the sandbox in that case.
+  helper was built against (Realm 20.1.0), `export` exits nonzero without writing anything: either the realm
+  fails to open, or every set fails to read. If only some sets fail, `export` writes the rest and warns
+  on stderr. `trim` can stop halfway and leave a sandbox realm partly trimmed. Rebuild the sandbox in that
+  case.
 
-Exit codes: 0 success, 1 failure, 2 usage, 3 missing lazer assembly, 4 refused path.
+Exit codes: 0 success, 1 failure, 2 usage (including an `--id` or `<ids-file>` line that is not a GUID),
+3 missing lazer assembly, 4 refused path.

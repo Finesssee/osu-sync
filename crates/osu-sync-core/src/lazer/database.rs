@@ -378,13 +378,17 @@ fn run_realm_export(
         }
     })?;
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
     if output.status.success() {
+        if !stderr.is_empty() {
+            tracing::warn!("realm-export: {stderr}");
+        }
         return Ok(output.stdout);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
     Err(Error::Realm(export_failure_message(
         output.status.code(),
-        stderr.trim(),
+        stderr,
     )))
 }
 

@@ -35,6 +35,7 @@ static class Program
         string command = args[0];
         string realmPath = Path.GetFullPath(args[1]);
         var options = ParseOptions(args.Skip(2).ToArray());
+        Guid setId = command == "mark-delete-pending" ? ParseSetId(Required(options, "--id")) : Guid.Empty;
 
         if (!File.Exists(realmPath))
             throw new ToolException(1, $"client.realm not found at {realmPath}");
@@ -56,7 +57,7 @@ static class Program
                 return 0;
             case "mark-delete-pending":
                 Sandbox.Require(realmPath);
-                Commands.MarkDeletePending(realmPath, Required(options, "--id"));
+                Commands.MarkDeletePending(realmPath, setId);
                 return 0;
             default:
                 throw new ToolException(2, $"unknown command {command}\n{Usage}");
@@ -77,6 +78,9 @@ static class Program
 
     static string Required(Dictionary<string, string> options, string name) =>
         options.GetValueOrDefault(name) ?? throw new ToolException(2, $"missing {name}\n{Usage}");
+
+    static Guid ParseSetId(string value) =>
+        Guid.TryParse(value, out var id) ? id : throw new ToolException(2, $"--id {value} is not a set id (GUID)\n{Usage}");
 
     static string DefaultLazerDir()
     {
@@ -148,6 +152,8 @@ static class Sandbox
     public static void RequireExportTarget(string realmPath, string outPath)
     {
         string full = Path.GetFullPath(outPath);
+        if (full.IndexOf(':', Path.GetPathRoot(full).Length) >= 0)
+            throw new ToolException(4, $"Refusing to write export output to {full} because it names an alternate data stream");
         if (full.EndsWith(".realm", StringComparison.OrdinalIgnoreCase))
             throw new ToolException(4, $"Refusing to write export output to {full} because it ends in .realm");
         if (string.Equals(full, realmPath, StringComparison.OrdinalIgnoreCase)

@@ -171,7 +171,8 @@ pub enum AppMessage {
     SyncComplete(SyncResult),
     SyncCancelled,
     StatsProgress(String),
-    StatsComplete(ComparisonStats),
+    /// Stats plus the osu!lazer read error, if lazer could not be read
+    StatsComplete(ComparisonStats, Option<String>),
     CollectionsLoaded(Vec<Collection>),
     CollectionSyncProgress {
         collection: String,
@@ -2880,8 +2881,10 @@ impl App {
                         *status_message = message;
                     }
                 }
-                AppMessage::StatsComplete(stats) => {
-                    self.cached_stats = Some(stats.clone());
+                AppMessage::StatsComplete(stats, lazer_error) => {
+                    if lazer_error.is_none() {
+                        self.cached_stats = Some(stats.clone());
+                    }
                     if let AppState::Statistics {
                         stats: s,
                         loading,
@@ -2891,7 +2894,8 @@ impl App {
                     {
                         *s = Some(stats);
                         *loading = false;
-                        *status_message = "Statistics ready".to_string();
+                        *status_message =
+                            lazer_error.unwrap_or_else(|| "Statistics ready".to_string());
                     }
                 }
                 AppMessage::CollectionsLoaded(collections) => {
