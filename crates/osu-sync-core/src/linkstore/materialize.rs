@@ -63,10 +63,14 @@ pub enum How {
 /// Decides how a file at `rel` (relative to the set folder) is placed.
 ///
 /// `.osz2` packages and `Data/e` payloads are encrypted osu!stable leftovers that
-/// stable cannot read from a plain folder, so they are skipped.
+/// stable cannot read from a plain folder, so they are skipped. So are download
+/// leftovers such as `.osu_<guid>`: stable's downloader rewrites `<name>.osu_` in
+/// place, which would write through a link into the lazer file.
 pub fn how(rel: &str, same_volume: bool, link_limit_hit: bool) -> How {
     let lower = rel.replace('\\', "/").to_lowercase();
-    if lower.ends_with(".osz2") || lower.starts_with("data/e/") {
+    let ext = lower.rsplit_once('.').map_or("", |(_, ext)| ext);
+    let osu_leftover = ext.starts_with("osu") && ext != "osu" && !ext.contains('/');
+    if lower.ends_with(".osz2") || lower.starts_with("data/e/") || osu_leftover {
         How::Skip
     } else if lower.ends_with(".osu") || lower.ends_with(".osb") {
         How::Copy
@@ -493,9 +497,11 @@ pub struct Materializer {
 
 impl Materializer {
     /// `files` is lazer's `files` folder, the root of the content-addressed store.
+    /// Songs is made absolute, since stable's path limit counts the full path.
     pub fn new(songs: impl Into<PathBuf>, files: impl Into<PathBuf>) -> Self {
+        let songs = songs.into();
         Self {
-            songs: songs.into(),
+            songs: std::path::absolute(&songs).unwrap_or(songs),
             files: files.into(),
             link: |src, dst| fs::hard_link(src, dst),
         }
@@ -1072,6 +1078,13 @@ mod tests {
         assert_eq!(how("pack.osz2", true, false), How::Skip);
         assert_eq!(how("Data/e/clip.dat", true, false), How::Skip);
         assert_eq!(how("Data\\e\\clip.dat", true, false), How::Skip);
+        assert_eq!(
+            how("a.osu_0f8fad5b-d9cb-469f-a165-70867728950e", true, false),
+            How::Skip
+        );
+        assert_eq!(how("A.OSU_", true, false), How::Skip);
+        assert_eq!(how("osu_files/bg.png", true, false), How::Link);
+        assert_eq!(how("a.osz", true, false), How::Link);
     }
 
     #[test]
@@ -1376,6 +1389,33 @@ mod tests {
     }
 
     #[test]
+    fn osu_names_differing_only_in_case_across_sets_skip_the_later_set() {
+        let fx = Fixture::new();
+        let first = fx.basic_set();
+        let other: &[u8] = b"osu file format v14\n\n[General]\nAudioFilename: other.mp3\n";
+        let hash = fx.blob(other);
+        let second = set(
+            "99999999-0000-0000-0000-000000000000",
+            Some(2002),
+            "Other",
+            "Song",
+            vec![("artist - title (mapper) [easy].osu", hash.clone())],
+            vec![(hash, format!("{:x}", Md5::digest(other)))],
+        );
+        let report = fx.run(&fx.materializer(), &[first, second]);
+
+        assert_eq!(report.sets[0].folder, "1001 Artist - Title");
+        assert_eq!(
+            report.sets[1].outcome,
+            SetOutcome::Skipped(SkipReason::DuplicateOsuFilename {
+                filename: "artist - title (mapper) [easy].osu".to_string(),
+                folder: "1001 Artist - Title".to_string(),
+            })
+        );
+        assert!(!fx.songs.join("2002 Other - Song").exists());
+    }
+
+    #[test]
     fn names_differing_only_in_case_are_a_collision() {
         let fx = Fixture::new();
         let mut s = fx.basic_set();
@@ -1439,6 +1479,35 @@ mod tests {
             StableClaims::default().plan(&s, songs).result.unwrap_err(),
             SkipReason::PathBudget {
                 needed: 250,
+                limit: 248,
+            }
+        );
+    }
+
+    #[test]
+    fn path_budget_counts_the_absolute_songs_path() {
+        let fx = Fixture::new();
+        let relative = Path::new("rel").join("Songs");
+        let m = Materializer::new(&relative, &fx.files);
+        assert!(m.songs.is_absolute());
+        assert!(m.songs.ends_with(&relative));
+
+        // Relative, 9 + 2 + 234 would leave 3 units for the folder.
+        let long = "b".repeat(230) + ".osu";
+        let hash = "ab".repeat(32);
+        let s = set(
+            SET_ID,
+            Some(1),
+            "A",
+            "T",
+            vec![(long.as_str(), hash.clone())],
+            vec![(hash, String::new())],
+        );
+        let plans = m.preview(&[&s], &mut StableClaims::default());
+        assert_eq!(
+            plans[0].result.as_ref().unwrap_err(),
+            &SkipReason::PathBudget {
+                needed: len16(&m.songs.to_string_lossy()) + 2 + 234 + 1,
                 limit: 248,
             }
         );

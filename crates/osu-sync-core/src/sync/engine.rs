@@ -550,7 +550,7 @@ impl SyncEngine {
         let total = filtered_indices.len();
 
         let songs = self.stable_songs()?;
-        let mut claims = self.stable_claims(&songs)?;
+        let (mut claims, _) = self.stable_claims(&songs)?;
         let sets: Vec<&LazerBeatmapSet> =
             filtered_indices.iter().map(|i| &lazer_sets[*i]).collect();
         let materializer = Materializer::new(&songs, self.lazer_database.file_store().files_path());
@@ -848,7 +848,8 @@ impl SyncEngine {
 
         ensure_stable_closed()?;
         let songs = self.stable_songs()?;
-        let mut claims = self.stable_claims(&songs)?;
+        let (mut claims, db_note) = self.stable_claims(&songs)?;
+        result.notes.extend(db_note);
         let sets: Vec<&LazerBeatmapSet> =
             filtered_indices.iter().map(|i| &lazer_sets[*i]).collect();
         let materializer = Materializer::new(&songs, self.lazer_database.file_store().files_path());
@@ -906,30 +907,15 @@ impl SyncEngine {
         })
     }
 
-    /// What stable already holds: the Songs listing plus osu!.db when it can be read.
-    fn stable_claims(&self, songs: &Path) -> Result<StableClaims> {
+    /// What stable already holds: the Songs listing plus osu!.db when it can be
+    /// read, and a note when osu!.db exists but cannot be read.
+    fn stable_claims(&self, songs: &Path) -> Result<(StableClaims, Option<String>)> {
         let mut claims = StableClaims::from_songs(songs)?;
-        let Some(root) = self.config.stable_path.as_deref() else {
-            return Ok(claims);
+        let note = match self.config.stable_path.as_deref() {
+            Some(root) => claim_from_osu_db(&mut claims, root),
+            None => None,
         };
-        if !root.join("osu!.db").is_file() {
-            return Ok(claims);
-        }
-        match StableDatabase::open(root) {
-            Ok(db) => {
-                for beatmap in db.raw_beatmaps() {
-                    if let Some(folder) = beatmap.folder_name.as_deref() {
-                        claims.claim(
-                            folder,
-                            beatmap.file_name.as_deref(),
-                            beatmap.hash.as_deref(),
-                        );
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("Could not read osu!.db, using the Songs listing only: {e}"),
-        }
-        Ok(claims)
+        Ok((claims, note))
     }
 
     /// Collect files from a stable beatmap folder (parallel I/O for 2-3x speedup)
@@ -1092,9 +1078,54 @@ impl Default for SyncEngineBuilder {
     }
 }
 
+/// Adds the beatmaps osu!.db lists to `claims`. Returns a note when osu!.db
+/// exists but cannot be read, since duplicates are then checked by the Songs
+/// listing alone.
+fn claim_from_osu_db(claims: &mut StableClaims, root: &Path) -> Option<String> {
+    if !root.join("osu!.db").is_file() {
+        return None;
+    }
+    match StableDatabase::open(root) {
+        Ok(db) => {
+            for beatmap in db.raw_beatmaps() {
+                if let Some(folder) = beatmap.folder_name.as_deref() {
+                    claims.claim(
+                        folder,
+                        beatmap.file_name.as_deref(),
+                        beatmap.hash.as_deref(),
+                    );
+                }
+            }
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Could not read osu!.db, using the Songs listing only: {e}");
+            Some(format!(
+                "osu!.db could not be read, so duplicates were checked against the Songs folder only: {e}"
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_osu_db_becomes_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut claims = StableClaims::default();
+        assert_eq!(claim_from_osu_db(&mut claims, dir.path()), None);
+
+        std::fs::write(dir.path().join("osu!.db"), b"not a db").unwrap();
+        let note = claim_from_osu_db(&mut claims, dir.path()).unwrap();
+        assert!(
+            note.starts_with(
+                "osu!.db could not be read, so duplicates were checked against the Songs folder only: "
+            ),
+            "{note}"
+        );
+    }
 
     #[test]
     fn test_sync_result() {
