@@ -311,7 +311,6 @@ impl LazerDatabase {
     }
 }
 
-/// Find `realm-export` next to the running executable, then through `OSU_SYNC_REALM_EXPORT`
 fn find_realm_export(exe_dir: Option<&Path>, env_value: Option<OsString>) -> Result<PathBuf> {
     if let Some(dir) = exe_dir {
         for name in ["realm-export.exe", "realm-export.dll"] {
