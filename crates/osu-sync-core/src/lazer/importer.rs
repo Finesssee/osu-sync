@@ -237,17 +237,14 @@ impl LazerImporter {
     /// On Windows, uses `raw_arg()` with quoted path to handle special characters
     /// like `!`, `[]`, `&` that would otherwise break command-line parsing.
     fn trigger_single_import(&self, osz_path: &Path) -> bool {
-        let Some(ref lazer_exe) = self.lazer_exe else {
-            return false;
-        };
-        match self.may_launch() {
-            Ok(true) => {}
-            Ok(false) => return false,
+        let lazer_exe = match self.launch_exe() {
+            Ok(Some(exe)) => exe,
+            Ok(None) => return false,
             Err(e) => {
                 tracing::warn!("Not starting osu!lazer: {}", e);
                 return false;
             }
-        }
+        };
 
         #[cfg(target_os = "windows")]
         {
@@ -295,7 +292,7 @@ impl LazerImporter {
             return Ok(false);
         }
 
-        let Some(ref lazer_exe) = self.lazer_exe else {
+        if self.lazer_exe.is_none() {
             tracing::warn!(
                 "Lazer executable not found. {} .osz files are waiting in: {}",
                 self.pending_imports.len(),
@@ -303,11 +300,10 @@ impl LazerImporter {
             );
             tracing::warn!("Please start osu!lazer manually to import them.");
             return Ok(false);
-        };
-
-        if !self.may_launch()? {
-            return Ok(false);
         }
+        let Some(lazer_exe) = self.launch_exe()? else {
+            return Ok(false);
+        };
 
         let total = self.pending_imports.len();
         tracing::info!("Triggering lazer to import {} beatmaps", total);
@@ -403,11 +399,16 @@ impl LazerImporter {
         }
     }
 
-    /// Runs the live-path guard for a game launch. The game imports into its own
-    /// data folder, whatever this importer's data path is.
-    fn may_launch(&self) -> Result<bool> {
+    /// The executable to start for an import, or `None` to leave the files staged.
+    /// Every spawn takes its executable from here, so the live-path guard decides
+    /// first: the game imports into its own data folder, whatever this importer's
+    /// data path is.
+    fn launch_exe(&self) -> Result<Option<&Path>> {
+        let Some(exe) = self.lazer_exe.as_deref() else {
+            return Ok(None);
+        };
         match crate::config::live_guard::lazer_launch()? {
-            LazerLaunch::Launch => Ok(true),
+            LazerLaunch::Launch => Ok(Some(exe)),
             LazerLaunch::Stage(reason) => {
                 tracing::info!(
                     "Not starting osu!lazer ({:?}); {} .osz files are staged in {}",
@@ -415,7 +416,7 @@ impl LazerImporter {
                     self.pending_imports.len(),
                     self.import_path.display()
                 );
-                Ok(false)
+                Ok(None)
             }
         }
     }
@@ -495,5 +496,48 @@ impl LazerImporter {
     /// Clear tracking of pending imports (after successful batch import)
     pub fn clear_pending(&mut self) {
         self.pending_imports.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::live_guard::{
+        set_test_lazer_overridden, set_test_roots, InstallPaths, LiveRoots,
+    };
+
+    #[test]
+    fn lazer_path_override_stages_instead_of_starting_lazer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let live = dir.path().join("osu!lazer");
+        fs::create_dir_all(live.join("files")).unwrap();
+        set_test_roots(LiveRoots::new(
+            InstallPaths {
+                stable: None,
+                lazer: Some(live.clone()),
+            },
+            Vec::new(),
+            None,
+        ));
+
+        let sandbox = dir.path().join("sandbox").join("lazer");
+        let import_path = sandbox.join("import");
+        let importer = LazerImporter {
+            data_path: sandbox.clone(),
+            import_path: import_path.clone(),
+            lazer_exe: Some(dir.path().join("not-installed").join("osu!.exe")),
+            trigger_import: true,
+            pending_imports: vec![import_path.join("1 A - B.osz")],
+        };
+
+        assert!(matches!(
+            importer.launch_exe(),
+            Err(Error::LiveWriteRefused { root, .. }) if root == live
+        ));
+
+        set_test_lazer_overridden();
+        assert_eq!(importer.launch_exe().unwrap(), None);
+        assert!(!importer.trigger_batch_import().unwrap());
+        assert!(!importer.trigger_single_import(&import_path.join("1 A - B.osz")));
     }
 }
