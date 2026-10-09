@@ -4,12 +4,14 @@
 //!   osu-sync --cli scan                    Scan installations
 //!   osu-sync --cli dry-run <direction>     Preview sync
 //!   osu-sync --cli sync <direction>        Perform sync
+//!   osu-sync --cli relink                  Relink stable copies onto lazer's files
 //!
 //! Directions: stable-to-lazer, lazer-to-stable, bidirectional
 //!
 //! Options:
 //!   --set-ids <ids>    Comma-separated beatmap set IDs to sync
 //!   --json             Output in JSON format
+//!   --relink           After sync s2l, relink stable copies onto lazer's files
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,6 +22,7 @@ use osu_sync_core::config::{
     live_guard, validate_lazer_path, validate_stable_path, Config, PathOverrides,
 };
 use osu_sync_core::lazer::LazerDatabase;
+use osu_sync_core::linkstore::{ensure_stable_closed, RelinkReport, Relinker};
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
     DryRunResult, SyncDirection, SyncEngineBuilder, SyncError, SyncProgress, SyncResult,
@@ -37,12 +40,15 @@ pub enum CliCommand {
         direction: SyncDirection,
         set_ids: Option<HashSet<i32>>,
     },
+    Relink,
 }
 
 /// CLI options
 #[derive(Debug, Clone, Default)]
 pub struct CliOptions {
     pub json: bool,
+    /// Relink stable copies onto lazer's files after a stable-to-lazer sync.
+    pub relink: bool,
 }
 
 /// Flags accepted in every mode, before or after `--cli`.
@@ -118,6 +124,7 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         let arg = &args[i];
         match arg.as_str() {
             "--json" => options.json = true,
+            "--relink" => options.relink = true,
             "--set-ids" => {
                 i += 1;
                 if i >= args.len() {
@@ -126,6 +133,7 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
                 set_ids = Some(parse_set_ids(&args[i])?);
             }
             "scan" => command = Some(CliCommand::Scan),
+            "relink" => command = Some(CliCommand::Relink),
             "dry-run" => {
                 i += 1;
                 if i >= args.len() {
@@ -172,7 +180,9 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         Some(CliCommand::Sync { direction, .. }) => CliCommand::Sync { direction, set_ids },
         Some(cmd) => cmd,
         None => {
-            return Err("No command specified. Use: scan, dry-run <dir>, or sync <dir>".to_string())
+            return Err(
+                "No command specified. Use: scan, dry-run <dir>, sync <dir>, or relink".to_string(),
+            )
         }
     };
 
@@ -207,6 +217,67 @@ pub fn run(command: CliCommand, options: CliOptions) -> anyhow::Result<()> {
         CliCommand::Scan => run_scan(options),
         CliCommand::DryRun { direction, set_ids } => run_dry_run(direction, set_ids, options),
         CliCommand::Sync { direction, set_ids } => run_sync(direction, set_ids, options),
+        CliCommand::Relink => run_relink(options),
+    }
+}
+
+/// Replaces the stable files that are plain copies of lazer files with hard links to
+/// them. Both folders pass the live guard and stable must be closed.
+fn run_relink(options: CliOptions) -> anyhow::Result<()> {
+    let config = Config::load();
+    let songs = config
+        .stable_songs_path()
+        .ok_or_else(|| anyhow::anyhow!("osu!stable path not configured"))?;
+    let files = config
+        .lazer_files_path()
+        .ok_or_else(|| anyhow::anyhow!("osu!lazer path not configured"))?;
+    live_guard::check_write(&songs)?;
+    live_guard::check_write(&files)?;
+    ensure_stable_closed()?;
+
+    let relinker = Relinker::new(&songs, &files, Relinker::default_cache(&songs));
+    let show_progress = !options.json;
+    let report = relinker.run(&mut |done, total| {
+        if show_progress && (done % 1000 == 0 || done == total) {
+            eprint!("\rRelinking: {done}/{total}");
+        }
+    })?;
+    if show_progress {
+        eprintln!();
+    }
+    print_relink_report(&report, options);
+    relink_failures(&report)
+}
+
+/// A relink with any file that failed exits nonzero, after its report is printed.
+fn relink_failures(report: &RelinkReport) -> anyhow::Result<()> {
+    if !report.errors.is_empty() {
+        anyhow::bail!("{} files failed to relink", report.errors.len());
+    }
+    Ok(())
+}
+
+fn print_relink_report(report: &RelinkReport, options: CliOptions) {
+    if options.json {
+        println!("{}", serde_json::json!(report));
+        return;
+    }
+    println!("Relink Complete:");
+    println!("  Relinked:        {}", report.relinked);
+    println!("  Bytes reclaimed: {}", report.bytes_reclaimed);
+    println!(
+        "  Hashed:          {} files, {} bytes",
+        report.hashed_files, report.hashed_bytes
+    );
+    for (reason, count) in &report.skipped {
+        println!("  Skipped ({reason:?}): {count}");
+    }
+    for error in &report.errors {
+        println!("  Error: {error}");
+    }
+    for note in &report.notes {
+        println!();
+        println!("Note: {note}");
     }
 }
 
@@ -378,6 +449,7 @@ fn run_sync(
     };
 
     let mut builder = SyncEngineBuilder::new()
+        .relink(options.relink)
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
@@ -580,6 +652,7 @@ pub fn print_help() {
     println!("    scan                        Scan and show installations");
     println!("    dry-run <direction>         Preview what would be synced");
     println!("    sync <direction>            Perform sync");
+    println!("    relink                      Hard-link stable copies of lazer files to them");
     println!();
     println!("DIRECTIONS:");
     println!("    stable-to-lazer, s2l        Sync from stable to lazer");
@@ -589,6 +662,9 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!("    --set-ids <ids>             Comma-separated beatmap set IDs");
     println!("    --json                      Output in JSON format");
+    println!(
+        "    --relink                    After sync s2l, relink stable copies to lazer's files"
+    );
     println!("    --stable-path <dir>         Use this osu!stable folder");
     println!("    --lazer-path <dir>          Use this osu!lazer data folder");
     println!("    --allow-live                Allow writes into the detected live installs");
@@ -598,6 +674,7 @@ pub fn print_help() {
     println!("    osu-sync --cli dry-run stable-to-lazer");
     println!("    osu-sync --cli sync s2l --set-ids 123,456,789");
     println!("    osu-sync --cli dry-run bi --json");
+    println!("    osu-sync --cli relink --json");
 }
 
 #[cfg(test)]
@@ -848,5 +925,39 @@ mod tests {
         let args = vec!["scan".to_string(), "--json".to_string()];
         let (_, options) = parse_args(&args).unwrap();
         assert!(options.json);
+    }
+
+    #[test]
+    fn parses_relink() {
+        let (cmd, options) = parse_args(&strings(&["relink", "--json"])).unwrap();
+        assert!(matches!(cmd, CliCommand::Relink));
+        assert!(options.json);
+        assert!(!options.relink);
+
+        let (_, options) = parse_args(&strings(&["sync", "s2l", "--relink"])).unwrap();
+        assert!(options.relink);
+        assert_eq!(
+            parse_args(&strings(&["relink", "--relnik"])).unwrap_err(),
+            "Unknown flag: --relnik"
+        );
+    }
+
+    #[test]
+    fn relink_with_failed_files_exits_nonzero() {
+        let failed = RelinkReport {
+            relinked: 3,
+            errors: vec!["a: denied".to_string(), "b: denied".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            relink_failures(&failed).unwrap_err().to_string(),
+            "2 files failed to relink"
+        );
+        let locked_only = RelinkReport {
+            relinked: 3,
+            notes: vec!["left a as it is".to_string()],
+            ..Default::default()
+        };
+        assert!(relink_failures(&locked_only).is_ok());
     }
 }
