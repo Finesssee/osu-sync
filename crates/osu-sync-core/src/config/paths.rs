@@ -140,7 +140,7 @@ pub(crate) fn lazer_default_dirs() -> Vec<PathBuf> {
 
 /// The lazer data folders a default location leads to: the folder `storage.ini`
 /// redirects to, plus the default itself when it holds that redirect, since lazer
-/// still reads it at startup and it keeps the data from before the move.
+/// reads that `storage.ini` at startup and a move can leave old data behind there.
 pub(crate) fn lazer_live_dirs(default: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = resolve_lazer_dir(default).into_iter().collect();
     if read_storage_ini(default).is_some() && !dirs.iter().any(|d| d == default) {
