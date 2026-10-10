@@ -11,9 +11,9 @@
 //! realm's modified time nor its size and raises no change event. Every commit rewrites
 //! the realm's header, so while idle the watcher reads the realm stamp (size, modified
 //! time and 24 header bytes) once per interval, and a stamp that differs from the one
-//! the last step took right before reading the realm runs the step. Changes arriving
-//! during a step are dropped, and Songs and `files` changes within a grace period after
-//! it are the step's own.
+//! the last step took right before reading the realm runs the step. Songs and `files`
+//! changes arriving during a step or within a grace period after it may be the step's
+//! own writes, so instead of a step each they run one confirming step after the grace.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -58,6 +58,9 @@ pub enum WatchEvent {
     Changed(PathBuf),
     /// The step waits because osu!stable is running.
     Deferred,
+    /// Songs or `files` changed during the last step or just after it, so the step
+    /// runs once more after the grace period.
+    Recheck,
     Ran(StepReport),
     Failed(String),
 }
@@ -69,6 +72,9 @@ impl fmt::Display for WatchEvent {
             Self::Deferred => f.write_str(
                 "sync deferred: osu!stable is running and rewrites Songs and osu!.db while open; \
                  retrying after it closes",
+            ),
+            Self::Recheck => f.write_str(
+                "Songs or lazer's files changed during the last sync; syncing once more to confirm",
             ),
             Self::Ran(report) => {
                 f.write_str("sync done: ")?;
@@ -145,6 +151,42 @@ impl TriggerFilter {
                 .is_some_and(|e| e.eq_ignore_ascii_case("tmp"));
         (!temp).then_some(source)
     }
+
+    /// The path of a Songs or `files` change in `message`. A feed error or a rescan
+    /// request may hide one, so it counts as a change to Songs.
+    fn content_change(&self, message: &notify::Result<Event>) -> Option<PathBuf> {
+        let event = match message {
+            Ok(event) => event,
+            Err(_) => return Some(self.songs.clone()),
+        };
+        if event.need_rescan() {
+            return Some(self.songs.clone());
+        }
+        event
+            .paths
+            .iter()
+            .find(|path| {
+                matches!(
+                    self.classify(path),
+                    Some(ChangeSource::Songs | ChangeSource::Library)
+                )
+            })
+            .cloned()
+    }
+
+    fn touches_realm(&self, message: &notify::Result<Event>) -> bool {
+        message
+            .as_ref()
+            .is_ok_and(|event| event.paths.iter().any(|path| *path == self.realm))
+    }
+}
+
+/// Shared between the change handler and the loop: whether a step runs, and whether
+/// the handler dropped a Songs or `files` change while it ran.
+#[derive(Debug, Default)]
+struct StepGate {
+    stepping: AtomicBool,
+    missed: AtomicBool,
 }
 
 /// Checks the engine's folders once, then watches them and runs its step on changes
@@ -157,8 +199,8 @@ pub fn watch(
     engine.preflight()?;
     let filter = TriggerFilter::new(&engine.songs(), &engine.files(), &engine.realm());
     let (tx, rx) = std::sync::mpsc::channel();
-    let stepping = Arc::new(AtomicBool::new(false));
-    let mut watcher = notify::recommended_watcher(feed(tx, stepping.clone()))
+    let gate = Arc::new(StepGate::default());
+    let mut watcher = notify::recommended_watcher(feed(tx, gate.clone(), filter.clone()))
         .map_err(|e| Error::WatcherError(format!("could not start the watcher: {e}")))?;
     for (path, mode) in filter.watch_targets() {
         watcher
@@ -170,7 +212,7 @@ pub fn watch(
         &rx,
         &filter,
         timing,
-        &stepping,
+        &gate,
         &mut || engine.sync(&mut |_, _, _| {}),
         &|| RealmStamp::read(&realm),
         log,
@@ -178,26 +220,30 @@ pub fn watch(
     Err(Error::WatcherError("the change feed closed".to_string()))
 }
 
-/// The change handler: passes events on to `tx`, except while `stepping` is set.
+/// The change handler: passes events on to `tx`. While a step runs it drops them,
+/// noting in the gate when a dropped one was a Songs or `files` change.
 fn feed(
     tx: Sender<notify::Result<Event>>,
-    stepping: Arc<AtomicBool>,
+    gate: Arc<StepGate>,
+    filter: TriggerFilter,
 ) -> impl FnMut(notify::Result<Event>) + Send + 'static {
     move |event| {
-        if !stepping.load(Ordering::Relaxed) {
+        if !gate.stepping.load(Ordering::Relaxed) {
             let _ = tx.send(event);
+        } else if filter.content_change(&event).is_some() {
+            gate.missed.store(true, Ordering::Relaxed);
         }
     }
 }
 
 /// The watcher's loop over a change feed, with the step and the realm stamp passed
-/// in. Sets `stepping` while the step runs. Runs one step at start, to catch up, reads
-/// the realm stamp once per interval while idle, and returns when `rx` closes.
+/// in. Marks the gate stepping while the step runs. Runs one step at start, to catch
+/// up, reads the realm stamp once per interval while idle, and returns when `rx` closes.
 fn watch_loop(
     rx: &Receiver<notify::Result<Event>>,
     filter: &TriggerFilter,
     timing: WatchTiming,
-    stepping: &AtomicBool,
+    gate: &StepGate,
     step: &mut dyn FnMut() -> Result<StepReport>,
     realm_stamp: &dyn Fn() -> Option<RealmStamp>,
     log: &mut dyn FnMut(WatchEvent),
@@ -234,9 +280,22 @@ fn watch_loop(
         };
 
         if let Some(message) = message {
-            let in_grace = grace_until.is_some_and(|until| Instant::now() < until);
-            if let Some(path) = trigger(&message, filter, in_grace, last_realm, realm_stamp) {
-                let now = Instant::now();
+            let now = Instant::now();
+            let grace = grace_until.filter(|until| now < *until);
+            let changed = match (filter.content_change(&message), grace) {
+                (Some(_), Some(until)) => {
+                    pending.get_or_insert_with(|| {
+                        log(WatchEvent::Recheck);
+                        Pending::by(until)
+                    });
+                    None
+                }
+                (Some(path), None) => Some(path),
+                (None, _) => (filter.touches_realm(&message)
+                    && realm_committed(realm_stamp, last_realm))
+                .then(|| filter.realm.clone()),
+            };
+            if let Some(path) = changed {
                 let p = pending.get_or_insert_with(|| {
                     log(WatchEvent::Changed(path));
                     Pending::by(now + timing.interval)
@@ -246,10 +305,11 @@ fn watch_loop(
             continue;
         }
 
-        stepping.store(true, Ordering::Relaxed);
+        gate.stepping.store(true, Ordering::Relaxed);
         let result = step();
-        stepping.store(false, Ordering::Relaxed);
-        grace_until = Some(Instant::now() + timing.grace);
+        gate.stepping.store(false, Ordering::Relaxed);
+        let until = Instant::now() + timing.grace;
+        grace_until = Some(until);
         pending = None;
         let retry = Pending::by(Instant::now() + timing.interval);
         match result {
@@ -269,6 +329,11 @@ fn watch_loop(
                 log(WatchEvent::Failed(e.to_string()));
             }
         }
+        if gate.missed.swap(false, Ordering::Relaxed) {
+            log(WatchEvent::Recheck);
+            let at = pending.map_or(until, |p| p.deadline.min(until));
+            pending = Some(Pending::by(at));
+        }
     }
 }
 
@@ -279,32 +344,6 @@ fn realm_committed(
     last: Option<RealmStamp>,
 ) -> bool {
     realm_stamp().is_some_and(|now| Some(now) != last)
-}
-
-/// The path that makes `message` run the step, if it should.
-fn trigger(
-    message: &notify::Result<Event>,
-    filter: &TriggerFilter,
-    in_grace: bool,
-    last_realm: Option<RealmStamp>,
-    realm_stamp: &dyn Fn() -> Option<RealmStamp>,
-) -> Option<PathBuf> {
-    let event = match message {
-        Ok(event) => event,
-        Err(_) => return Some(filter.songs.clone()),
-    };
-    if event.need_rescan() {
-        return Some(filter.songs.clone());
-    }
-    event
-        .paths
-        .iter()
-        .find(|path| match filter.classify(path) {
-            Some(ChangeSource::Songs | ChangeSource::Library) => !in_grace,
-            Some(ChangeSource::Realm) => realm_committed(realm_stamp, last_realm),
-            None => false,
-        })
-        .cloned()
 }
 
 /// A scheduled step: it runs at `due`, which a change moves to `quiet` after it but
@@ -367,7 +406,7 @@ mod tests {
         })
     }
 
-    /// Runs the loop on `rx` with no `stepping` flag to share and no realm.
+    /// Runs the loop on `rx` with a gate of its own and no realm.
     fn run(
         rx: &Receiver<notify::Result<Event>>,
         step: &mut dyn FnMut() -> Result<StepReport>,
@@ -377,7 +416,7 @@ mod tests {
             rx,
             &filter(),
             fast(),
-            &AtomicBool::new(false),
+            &StepGate::default(),
             step,
             &|| None,
             log,
@@ -505,7 +544,7 @@ mod tests {
             &rx,
             &filter(),
             fast(),
-            &AtomicBool::new(false),
+            &StepGate::default(),
             &mut || {
                 seen.borrow_mut().push(realm.load(Ordering::Relaxed));
                 Ok(StepReport {
@@ -520,11 +559,27 @@ mod tests {
         assert_eq!(seen.into_inner(), [1, 2]);
     }
 
+    const RECHECK: &str =
+        "Songs or lazer's files changed during the last sync; syncing once more to confirm";
+
+    fn names(log: &[WatchEvent]) -> Vec<&'static str> {
+        log.iter()
+            .map(|e| match e {
+                WatchEvent::Changed(_) => "changed",
+                WatchEvent::Deferred => "deferred",
+                WatchEvent::Recheck => "recheck",
+                WatchEvent::Ran(_) => "ran",
+                WatchEvent::Failed(_) => "failed",
+            })
+            .collect()
+    }
+
     #[test]
-    fn changes_during_and_just_after_a_step_are_its_own() {
+    fn changes_just_after_a_step_run_one_confirming_step_after_the_grace() {
         let (tx, rx) = channel();
         let sender = RefCell::new(Some(tx));
         let steps = Cell::new(0);
+        let mut log = Vec::new();
         run(
             &rx,
             &mut || {
@@ -533,49 +588,127 @@ mod tests {
                     send(&tx, r"C:\s\Songs\1 A - B\audio.mp3");
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_millis(20));
-                        send(&tx, r"C:\s\Songs\1 A - B\bg.jpg");
+                        send(&tx, r"C:\l\files\0\00\blob");
                         std::thread::sleep(Duration::from_millis(300));
                     });
                 }
                 Ok(StepReport::default())
             },
-            &mut |_| {},
+            &mut |e| log.push(e),
         );
-        assert_eq!(steps.get(), 1);
+        assert_eq!(steps.get(), 2);
+        assert_eq!(names(&log), ["ran", "recheck", "ran"]);
+        assert_eq!(log[1].to_string(), RECHECK);
     }
 
     #[test]
-    fn the_feed_drops_events_while_a_step_runs() {
+    fn a_change_dropped_during_a_step_runs_one_confirming_step() {
         let (tx, rx) = channel();
-        let stepping = Arc::new(AtomicBool::new(true));
-        let mut handler = feed(tx, stepping.clone());
+        let gate = Arc::new(StepGate::default());
+        let mut handler = Some(feed(tx.clone(), gate.clone(), filter()));
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            drop(tx);
+        });
+        let steps = Cell::new(0);
+        let mut log = Vec::new();
+        watch_loop(
+            &rx,
+            &filter(),
+            fast(),
+            &gate,
+            &mut || {
+                steps.set(steps.get() + 1);
+                if let Some(mut handler) = handler.take() {
+                    handler(event(r"C:\s\Songs\1 A - B\audio.mp3"));
+                }
+                Ok(StepReport::default())
+            },
+            &|| None,
+            &mut |e| log.push(e),
+        );
+        closer.join().unwrap();
+        assert_eq!(steps.get(), 2);
+        assert_eq!(names(&log), ["ran", "recheck", "ran"]);
+        assert!(!gate.missed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_step_with_only_temp_and_realm_lock_changes_runs_once() {
+        let (tx, rx) = channel();
+        let gate = Arc::new(StepGate::default());
+        let mut handler = Some(feed(tx.clone(), gate.clone(), filter()));
+        let late = tx.clone();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            send(&late, r"C:\s\Songs\1 A - B\osu-sync_tmp_bg.jpg.part");
+            send(&late, r"C:\l\client.realm.lock");
+            std::thread::sleep(Duration::from_millis(600));
+        });
+        drop(tx);
+        let steps = Cell::new(0);
+        let mut log = Vec::new();
+        watch_loop(
+            &rx,
+            &filter(),
+            fast(),
+            &gate,
+            &mut || {
+                steps.set(steps.get() + 1);
+                if let Some(mut handler) = handler.take() {
+                    handler(event(r"C:\s\Songs\1 A - B\osu-sync_tmp_audio.mp3.part"));
+                    handler(event(r"C:\l\client.realm.lock"));
+                }
+                Ok(StepReport::default())
+            },
+            &|| None,
+            &mut |e| log.push(e),
+        );
+        closer.join().unwrap();
+        assert_eq!(steps.get(), 1);
+        assert_eq!(names(&log), ["ran"]);
+    }
+
+    #[test]
+    fn the_feed_drops_events_while_a_step_runs_and_notes_library_changes() {
+        let (tx, rx) = channel();
+        let gate = Arc::new(StepGate::default());
+        gate.stepping.store(true, Ordering::Relaxed);
+        let mut handler = feed(tx, gate.clone(), filter());
+        handler(event(r"C:\l\client.realm.lock"));
+        assert_eq!(rx.try_recv().ok().map(|e| e.unwrap().paths), None);
+        assert!(!gate.missed.load(Ordering::Relaxed));
+        handler(event(r"C:\l\files\0\00\blob"));
+        assert_eq!(rx.try_recv().ok().map(|e| e.unwrap().paths), None);
+        assert!(gate.missed.load(Ordering::Relaxed));
+        gate.stepping.store(false, Ordering::Relaxed);
         handler(event(r"C:\s\Songs\1 A - B\audio.mp3"));
-        assert!(rx.try_recv().is_err());
-        stepping.store(false, Ordering::Relaxed);
-        handler(event(r"C:\s\Songs\1 A - B\audio.mp3"));
-        assert!(rx.try_recv().is_ok());
+        assert_eq!(
+            rx.try_recv().ok().map(|e| e.unwrap().paths),
+            Some(vec![PathBuf::from(r"C:\s\Songs\1 A - B\audio.mp3")])
+        );
     }
 
     #[test]
     fn the_loop_marks_itself_stepping_only_while_the_step_runs() {
         let (tx, rx) = channel::<notify::Result<Event>>();
         drop(tx);
-        let stepping = AtomicBool::new(false);
+        let gate = StepGate::default();
         let during = Cell::new(false);
         watch_loop(
             &rx,
             &filter(),
             fast(),
-            &stepping,
+            &gate,
             &mut || {
-                during.set(stepping.load(Ordering::Relaxed));
+                during.set(gate.stepping.load(Ordering::Relaxed));
                 Ok(StepReport::default())
             },
             &|| None,
             &mut |_| {},
         );
         assert!(during.get());
-        assert!(!stepping.load(Ordering::Relaxed));
+        assert!(!gate.stepping.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -627,7 +760,7 @@ mod tests {
             &rx,
             &filter(),
             fast(),
-            &AtomicBool::new(false),
+            &StepGate::default(),
             &mut || {
                 steps.set(steps.get() + 1);
                 let read = stamp(realm.get());
@@ -659,7 +792,7 @@ mod tests {
             &rx,
             &filter(),
             fast(),
-            &AtomicBool::new(false),
+            &StepGate::default(),
             &mut || {
                 steps.set(steps.get() + 1);
                 Ok(StepReport {
