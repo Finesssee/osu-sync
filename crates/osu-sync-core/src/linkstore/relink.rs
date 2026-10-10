@@ -561,6 +561,8 @@ impl Relinker {
                 }
             }
         };
+        // MoveFileExW is denied over our own hold; std retries with POSIX rename semantics
+        // from Rust 1.85.1 (rust-lang/rust#137528), below the workspace rust-version.
         let renamed = fs::rename(&temp, &plan.stable);
         drop(held);
         match renamed {
@@ -922,6 +924,14 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// The replace renames over a stable file this process holds open, which only works
+    /// with the access-denied fallback that std::fs::rename gained in Rust 1.85.1. The
+    /// workspace needs 1.87 anyway (`is_multiple_of` in backup).
+    #[test]
+    fn rust_version_has_the_rename_relink_needs() {
+        assert_eq!(env!("CARGO_PKG_RUST_VERSION"), "1.87");
     }
 
     #[test]

@@ -4,6 +4,7 @@ description = "osu! beatmap synchronization tool (TUI + optional GUI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "osu-sync"
