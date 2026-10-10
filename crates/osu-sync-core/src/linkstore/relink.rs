@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -725,29 +725,37 @@ fn hold(path: &Path) -> io::Result<File> {
 /// Reads the held stable file and its blob side by side right before the replace, so
 /// neither a blob with wrong bytes nor a stale cached hash can put other bytes in the
 /// stable file. Returns the stable file's hard-link count when both hold the same bytes,
-/// or why the file stays as it is.
+/// or why the file stays as it is. A lock on part of the file, such as another program's
+/// byte-range lock, leaves it as it is like any other file in use.
 fn verify(
     stable: &mut File,
     plan: &Relink,
     c: &Candidate,
 ) -> io::Result<std::result::Result<u32, Left>> {
     let mut blob = File::open(&plan.blob)?;
-    let same = same_bytes(stable, &mut blob, c.size)?;
-    let links = link_count(stable)?;
-    if same {
-        return Ok(Ok(links));
+    let checked = (|| {
+        let same = same_bytes(stable, &mut blob, c.size)?;
+        let links = link_count(stable)?;
+        if same {
+            return Ok(Ok(links));
+        }
+        stable.seek(SeekFrom::Start(0))?;
+        if sha256_of(stable)? != c.sha {
+            return Ok(Err((RelinkSkip::Changed, None)));
+        }
+        Ok(Err((
+            RelinkSkip::BlobMismatch,
+            Some(format!(
+                "{} has the content hash that names {}, but their bytes differ",
+                plan.stable.display(),
+                plan.blob.display()
+            )),
+        )))
+    })();
+    match checked {
+        Err(e) if is_locked(&e) => Ok(Err(locked(&plan.stable, &e))),
+        checked => checked,
     }
-    if sha256(&plan.stable)? != c.sha {
-        return Ok(Err((RelinkSkip::Changed, None)));
-    }
-    Ok(Err((
-        RelinkSkip::BlobMismatch,
-        Some(format!(
-            "{} has the content hash that names {}, but their bytes differ",
-            plan.stable.display(),
-            plan.blob.display()
-        )),
-    )))
 }
 
 /// Hard links to the data of an open file.
@@ -827,7 +835,10 @@ fn mtime_key(meta: &fs::Metadata) -> (u64, u32) {
 
 /// SHA-256 of a file as lowercase hex. Only SHA-256, since this reads every asset.
 fn sha256(path: &Path) -> io::Result<String> {
-    let mut input = File::open(path)?;
+    sha256_of(&mut File::open(path)?)
+}
+
+fn sha256_of(input: &mut impl Read) -> io::Result<String> {
     let mut sha = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -1761,5 +1772,48 @@ mod tests {
             assert_eq!(links(&stable), 1);
             assert_eq!(names(stable.parent().unwrap()), ["audio.mp3"]);
         }
+    }
+
+    /// A byte-range lock that the mismatch rehash runs into leaves the file as it is
+    /// instead of failing the run. The compare stops in the first MiB, which differs, and
+    /// the rehash then reads the locked range past it.
+    #[cfg(windows)]
+    #[test]
+    fn a_lock_hit_while_rehashing_a_mismatch_is_a_locked_skip() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::LockFile;
+        let fx = Fixture::new();
+        let content: Vec<u8> = (0..3u32 << 20).map(|i| (i % 251) as u8).collect();
+        let sha = format!("{:x}", Sha256::digest(&content));
+        let blob = BlobHash::parse(&sha).unwrap().path_in(&fx.files);
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        let mut tampered = content.clone();
+        tampered[0] ^= 0xff;
+        fs::write(&blob, &tampered).unwrap();
+        let stable = fx.stable("1 A - B/audio.mp3", &content);
+        let first = run(&fx.relinker());
+        assert_eq!(first.skipped, skipped(&[(RelinkSkip::BlobMismatch, 1)]));
+        assert_eq!(first.hashed_files, 1);
+
+        let locker = File::open(&stable).unwrap();
+        // SAFETY: `locker` keeps the handle open for the call.
+        unsafe { LockFile(HANDLE(locker.as_raw_handle() as isize), 2 << 20, 0, 1, 0) }.unwrap();
+        let second = run(&fx.relinker());
+        drop(locker);
+
+        assert_eq!(second.hashed_files, 0);
+        assert_eq!(second.relinked, 0);
+        assert_eq!(second.skipped, skipped(&[(RelinkSkip::Locked, 1)]));
+        assert_eq!(second.errors, Vec::<String>::new());
+        assert_eq!(
+            second.notes,
+            [format!(
+                "left {} as it is: it is in use or read-only (The process cannot access the file because another process has locked a portion of the file. (os error 33))",
+                stable.display()
+            )]
+        );
+        assert_eq!(fs::read(&stable).unwrap(), content);
+        assert_eq!(links(&stable), 1);
     }
 }
