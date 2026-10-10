@@ -191,18 +191,53 @@ fn a_junctioned_songs_folder_is_refused_and_left_alone() {
         .sync_sets(&sets, &mut |_, _, _| {})
         .unwrap_err()
         .to_string();
+    let refusal = format!(
+        "Unified storage error: the stable Songs folder {songs} is a junction or symbolic \
+         link, which an older unified storage mode makes. The linked store needs the real \
+         folder there. Remove the link with rmdir \"{songs}\" (without /s, so the folder it \
+         points to stays), move the real folder back (older modes kept it as Songs_backup \
+         next to the link), then run setup again.",
+        songs = songs.display()
+    );
+    assert_eq!(message, refusal);
+    assert_eq!(fx.engine().status().unwrap_err().to_string(), refusal);
+    assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
+    assert!(fs::symlink_metadata(&songs)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junctioned_lazer_files_folder_is_refused_and_left_alone() {
+    let fx = Fixture::new();
+    let sets = [fx.set()];
+    let files = fx.lazer.join("files");
+    let shared = fx.lazer.parent().unwrap().join("shared-files");
+    fs::rename(&files, &shared).unwrap();
+    junction(&files, &shared);
+    let before = fs::read_dir(&shared).unwrap().count();
+
+    let message = fx
+        .engine()
+        .sync_sets(&sets, &mut |_, _, _| {})
+        .unwrap_err()
+        .to_string();
     assert_eq!(
         message,
         format!(
-            "Unified storage error: the stable Songs folder {} is a junction or symbolic link, \
-             which an older unified storage mode makes. The linked store needs the real folder \
-             there. Restore it, then run setup again.",
-            songs.display()
+            "Unified storage error: the lazer files folder {files} is a junction or symbolic \
+             link, which an older unified storage mode makes. The linked store needs the real \
+             folder there. Remove the link with rmdir \"{files}\" (without /s, so the folder \
+             it points to stays), move the real folder back (older modes kept it as \
+             files_backup next to the link), then run setup again.",
+            files = files.display()
         )
     );
-    assert!(fx.engine().status().is_err());
-    assert_eq!(fs::read_dir(&shared).unwrap().count(), 0);
-    assert!(fs::symlink_metadata(&songs)
+    assert_eq!(fs::read_dir(fx.songs()).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&shared).unwrap().count(), before);
+    assert!(fs::symlink_metadata(&files)
         .unwrap()
         .file_type()
         .is_symlink());

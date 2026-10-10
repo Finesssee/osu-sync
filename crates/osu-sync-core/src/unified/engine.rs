@@ -362,10 +362,14 @@ fn is_link(path: &Path) -> bool {
 
 fn refuse_link(what: &str, path: &Path) -> Result<()> {
     if is_link(path) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         return Err(Error::UnifiedStorage(format!(
-            "the {what} {} is a junction or symbolic link, which an older unified storage mode \
-             makes. The linked store needs the real folder there. Restore it, then run setup again.",
-            path.display()
+            "the {what} {path} is a junction or symbolic link, which an older unified storage \
+             mode makes. The linked store needs the real folder there. Remove the link with \
+             rmdir \"{path}\" (without /s, so the folder it points to stays), move the real \
+             folder back (older modes kept it as {name}_backup next to the link), then run \
+             setup again.",
+            path = path.display()
         )));
     }
     Ok(())
