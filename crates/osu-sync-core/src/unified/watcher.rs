@@ -177,7 +177,7 @@ impl TriggerFilter {
     fn touches_realm(&self, message: &notify::Result<Event>) -> bool {
         message
             .as_ref()
-            .is_ok_and(|event| event.paths.iter().any(|path| *path == self.realm))
+            .is_ok_and(|event| event.paths.contains(&self.realm))
     }
 }
 
