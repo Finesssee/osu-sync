@@ -145,6 +145,18 @@ fn print_help() {
     );
     println!("    --allow-live            Allow writes into the detected live installs");
     println!();
+    println!("CLI COMMANDS (osu-sync --cli <cmd>):");
+    println!("    scan                    Scan and show installations");
+    println!("    dry-run <direction>     Preview what would be synced");
+    println!("    sync <direction>        Perform sync");
+    println!("    relink                  Hard-link stable copies of lazer files to them");
+    println!(
+        "    --relink                After sync s2l or bi, relink stable copies to lazer's files"
+    );
+    println!(
+        "    --threads <n>           Threads for relink (default: a quarter of the CPUs, 1 to 4)"
+    );
+    println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
     println!();
     println!("For CLI mode help: osu-sync --cli --help");

@@ -36,8 +36,8 @@ struct Probes {
     readable: HashSet<BlobHash>,
 }
 
-const TEMP_PREFIX: &str = "osu-sync_tmp_";
-const TEMP_SUFFIX: &str = ".part";
+pub(super) const TEMP_PREFIX: &str = "osu-sync_tmp_";
+pub(super) const TEMP_SUFFIX: &str = ".part";
 
 /// SHA-256 of a blob in lazer's store, 64 lowercase hex characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -116,8 +116,16 @@ pub enum SkipReason {
     NoOsuFiles,
     #[error("already in stable as {folder} (md5 {md5})")]
     AlreadyInStable { md5: String, folder: String },
-    #[error("{filename} already exists in {folder}")]
-    DuplicateOsuFilename { filename: String, folder: String },
+    /// A `.osu` name of the set is taken, so none of its `maps` reach stable.
+    #[error("skipped the whole set because {filename} already exists in {folder}; maps not placed: {maps}")]
+    DuplicateOsuFilename {
+        filename: String,
+        folder: String,
+        maps: usize,
+    },
+    /// One `.osu` file of a placed row whose name is taken; the row's other maps are placed.
+    #[error("{filename} already exists in {folder}, so this map was not placed")]
+    OsuFilenameTaken { filename: String, folder: String },
     #[error("{a} and {b} differ only in case or normalization")]
     CaseCollision { a: String, b: String },
     #[error("unsafe filename {filename:?}")]
@@ -204,7 +212,8 @@ pub struct MaterializeReport {
     /// The first hard-link error that made a file fall back to a copy.
     pub link_error: Option<String>,
     /// Files copied because hard-linking them failed for any reason other than
-    /// the link limit, counted in every set, including sets that failed later.
+    /// the link limit, counted once the copy is in place, in every set,
+    /// including sets that failed later.
     pub link_error_copies: usize,
 }
 
@@ -481,19 +490,28 @@ impl StableClaims {
                     _ => continue,
                 },
             };
-            let duplicate = SkipReason::DuplicateOsuFilename {
-                filename: filename.clone(),
-                folder: owner.to_string(),
-            };
             if repeated.is_none() {
-                return Err(duplicate);
+                return Err(SkipReason::DuplicateOsuFilename {
+                    filename: filename.clone(),
+                    folder: owner.to_string(),
+                    maps: osu_keys.len(),
+                });
             }
             placements.retain(|p| name_key(&p.dest.to_string_lossy()) != *key);
-            left_out.push(duplicate);
+            left_out.push((filename.clone(), owner.to_string()));
         }
         if left_out.len() == osu_keys.len() {
-            return Err(left_out.remove(0));
+            let (filename, folder) = left_out.swap_remove(0);
+            return Err(SkipReason::DuplicateOsuFilename {
+                filename,
+                folder,
+                maps: osu_keys.len(),
+            });
         }
+        let left_out = left_out
+            .into_iter()
+            .map(|(filename, folder)| SkipReason::OsuFilenameTaken { filename, folder })
+            .collect();
 
         placements.sort_by_key(|p| is_osu(&p.dest));
         Ok(PlannedSet {
@@ -759,6 +777,7 @@ impl Materializer {
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
+            let (mut limited, mut link_failed) = (false, None);
             if p.how == How::Link && !*cross_volume {
                 if let Some(dir) = blob.parent() {
                     if !checked_dirs.contains(dir) {
@@ -772,12 +791,9 @@ impl Materializer {
                         continue;
                     }
                     Err(e) => match classify_hard_link_error(&e) {
-                        HardLinkFailure::LinkLimit => counts.link_limit_copies += 1,
+                        HardLinkFailure::LinkLimit => limited = true,
                         HardLinkFailure::CrossVolume => *cross_volume = true,
-                        HardLinkFailure::Other => {
-                            *link_error_copies += 1;
-                            link_error.get_or_insert_with(|| e.to_string());
-                        }
+                        HardLinkFailure::Other => link_failed = Some(e.to_string()),
                     },
                 }
             }
@@ -785,6 +801,12 @@ impl Materializer {
             let mtime = is_osu(&p.dest).then_some(date_added);
             copy_via_temp(&blob, &p.blob, &dest, &folder, expected_md5, mtime)?;
             counts.copied += 1;
+            counts.link_limit_copies += usize::from(limited);
+            // The note quotes a link error only from a file whose fallback copy landed.
+            if let Some(e) = link_failed {
+                *link_error_copies += 1;
+                link_error.get_or_insert(e);
+            }
         }
         Ok(counts)
     }
@@ -897,7 +919,7 @@ fn digests(path: &Path) -> io::Result<(String, String)> {
 
 /// Opens both files for attributes only. Opening a file for reading waits for an
 /// antivirus scan of any file not scanned yet, such as an asset no one has opened.
-fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
+pub(super) fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
     Ok(attributes_handle(a)? == attributes_handle(b)?)
 }
 
@@ -937,7 +959,7 @@ fn is_top_level_osu(path: &Path) -> bool {
     path.components().count() == 1 && is_osu(path)
 }
 
-fn is_temp_name(name: &str) -> bool {
+pub(super) fn is_temp_name(name: &str) -> bool {
     name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
 }
 
@@ -1272,6 +1294,69 @@ mod tests {
     }
 
     #[test]
+    fn link_error_counted_only_when_copy_succeeds() {
+        let fx = Fixture::new();
+        let s = fx.basic_set();
+        let mut m = fx.materializer();
+        // The link fails after a folder took the asset's name, so the fallback
+        // copy cannot be renamed into place either.
+        m.link = |_, dst| {
+            fs::create_dir(dst)?;
+            Err(io::Error::from_raw_os_error(1))
+        };
+        let report = fx.run(&m, &[s]);
+
+        assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
+        assert_eq!(report.link_error_copies, 0);
+        assert_eq!(report.notes(&fx.songs), Vec::<String>::new());
+    }
+
+    #[test]
+    fn link_error_note_quotes_a_file_whose_copy_landed() {
+        let fx = Fixture::new();
+        let first = fx.basic_set();
+        let other: &[u8] = b"osu file format v14\n\n[General]\nAudioFilename: other.mp3\n";
+        let hash = fx.blob(other);
+        let audio = fx.blob(b"ID3 other audio");
+        let second = set(
+            "99999999-0000-0000-0000-000000000000",
+            Some(2002),
+            "Other",
+            "Song",
+            vec![
+                ("Other - Song (Mapper) [Easy].osu", hash.clone()),
+                ("other.mp3", audio),
+            ],
+            vec![(hash, format!("{:x}", Md5::digest(other)))],
+        );
+        let mut m = fx.materializer();
+        // In the first set a folder takes the name, so its fallback copy fails too;
+        // the second set's link fails with another error and its copy lands.
+        m.link = |_, dst| {
+            if dst.to_string_lossy().contains("1001 Artist - Title") {
+                fs::create_dir(dst)?;
+                return Err(io::Error::from_raw_os_error(1));
+            }
+            Err(io::Error::from_raw_os_error(5))
+        };
+        let report = fx.run(&m, &[first, second]);
+
+        assert!(matches!(report.sets[0].outcome, SetOutcome::Failed(_)));
+        assert!(matches!(
+            report.sets[1].outcome,
+            SetOutcome::Materialized(_)
+        ));
+        assert_eq!(report.link_error_copies, 1);
+        assert_eq!(
+            report.notes(&fx.songs),
+            [format!(
+                "1 files were copied because hard-linking them failed, first error: {}",
+                io::Error::from_raw_os_error(5)
+            )]
+        );
+    }
+
+    #[test]
     fn rerun_is_a_no_op() {
         let fx = Fixture::new();
         let s = fx.basic_set();
@@ -1411,7 +1496,46 @@ mod tests {
             SkipReason::DuplicateOsuFilename {
                 filename: OSU_NAME.to_string(),
                 folder: "Old Folder".to_string(),
+                maps: 1,
             }
+        );
+        assert_eq!(
+            only_skip(&report).to_string(),
+            "skipped the whole set because Artist - Title (Mapper) [Easy].osu already exists in Old Folder; maps not placed: 1"
+        );
+        assert!(!fx.songs.join("1001 Artist - Title").exists());
+    }
+
+    #[test]
+    fn duplicate_osu_filename_skip_counts_every_map_of_the_set() {
+        let fx = Fixture::new();
+        let mut s = fx.basic_set();
+        let hard: &[u8] = b"osu file format v14
+
+[General]
+AudioFilename: audio.mp3
+// hard
+";
+        let hash = fx.blob(hard);
+        s.files.push(LazerNamedFile {
+            filename: "Artist - Title (Mapper) [Hard].osu".to_string(),
+            hash: hash.clone(),
+        });
+        s.beatmaps.push(LazerBeatmapInfo {
+            hash,
+            md5_hash: format!("{:x}", Md5::digest(hard)),
+            ..s.beatmaps[0].clone()
+        });
+        let mut claims = StableClaims::default();
+        claims.claim("Old Folder", Some(OSU_NAME), None);
+        let report = fx
+            .materializer()
+            .run(&[&s], &mut claims, &mut |_, _, _| ControlFlow::Continue(()))
+            .unwrap();
+
+        assert_eq!(
+            only_skip(&report).to_string(),
+            "skipped the whole set because Artist - Title (Mapper) [Easy].osu already exists in Old Folder; maps not placed: 2"
         );
         assert!(!fx.songs.join("1001 Artist - Title").exists());
     }
@@ -1432,6 +1556,7 @@ mod tests {
             SetOutcome::Skipped(SkipReason::DuplicateOsuFilename {
                 filename: OSU_NAME.to_string(),
                 folder: "1001 Artist - Title".to_string(),
+                maps: 1,
             })
         );
         assert!(!fx.songs.join("2002 Artist - Title").exists());
@@ -1452,6 +1577,7 @@ mod tests {
         let reason = SkipReason::DuplicateOsuFilename {
             filename: OSU_NAME.to_string(),
             folder: "1001 Artist - Title".to_string(),
+            maps: 1,
         };
 
         let mut claims = StableClaims::default();
@@ -1504,6 +1630,7 @@ mod tests {
             SetOutcome::Skipped(SkipReason::DuplicateOsuFilename {
                 filename: "artist - title (mapper) [easy].osu".to_string(),
                 folder: "1001 Artist - Title".to_string(),
+                maps: 1,
             })
         );
         assert!(!fx.songs.join("2002 Other - Song").exists());
@@ -1808,7 +1935,7 @@ mod tests {
 
         assert_eq!(
             report.sets[1].left_out,
-            [SkipReason::DuplicateOsuFilename {
+            [SkipReason::OsuFilenameTaken {
                 filename: normal_name.to_string(),
                 folder: "1001 Artist - Title".to_string(),
             }]

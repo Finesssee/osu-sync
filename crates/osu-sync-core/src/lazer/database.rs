@@ -221,6 +221,17 @@ impl LazerDatabase {
         })
     }
 
+    /// A library with no sets at `data_path`, without reading a realm.
+    #[cfg(test)]
+    pub(crate) fn empty(data_path: &Path) -> Self {
+        Self {
+            file_store: LazerFileStore::new(data_path),
+            sets: Vec::new(),
+            skipped: None,
+            export_time: Duration::ZERO,
+        }
+    }
+
     /// Sets that could not be read and are missing from the set list
     pub fn skipped(&self) -> Option<&SkippedSets> {
         self.skipped.as_ref()

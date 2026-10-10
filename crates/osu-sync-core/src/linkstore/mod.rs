@@ -2,7 +2,10 @@
 //!
 //! Assets become hard links to lazer's blobs, so a set costs no extra disk space.
 //! `.osu` and `.osb` files are copied, because stable rewrites them in place.
+//! `relink` turns stable assets that are plain copies of blobs into such links.
 
 mod materialize;
+mod relink;
 
 pub use materialize::*;
+pub use relink::*;

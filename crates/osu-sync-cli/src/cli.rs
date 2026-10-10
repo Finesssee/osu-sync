@@ -4,15 +4,18 @@
 //!   osu-sync --cli scan                    Scan installations
 //!   osu-sync --cli dry-run <direction>     Preview sync
 //!   osu-sync --cli sync <direction>        Perform sync
+//!   osu-sync --cli relink                  Relink stable copies onto lazer's files
 //!
 //! Directions: stable-to-lazer, lazer-to-stable, bidirectional
 //!
 //! Options:
 //!   --set-ids <ids>    Comma-separated beatmap set IDs to sync
 //!   --json             Output in JSON format
+//!   --relink           After sync s2l or bi, relink stable copies onto lazer's files
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -20,6 +23,7 @@ use osu_sync_core::config::{
     live_guard, validate_lazer_path, validate_stable_path, Config, PathOverrides,
 };
 use osu_sync_core::lazer::LazerDatabase;
+use osu_sync_core::linkstore::{ensure_stable_closed, RelinkReport, Relinker};
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
     DryRunResult, SyncDirection, SyncEngineBuilder, SyncError, SyncProgress, SyncResult,
@@ -37,12 +41,17 @@ pub enum CliCommand {
         direction: SyncDirection,
         set_ids: Option<HashSet<i32>>,
     },
+    Relink,
 }
 
 /// CLI options
 #[derive(Debug, Clone, Default)]
 pub struct CliOptions {
     pub json: bool,
+    /// Relink stable copies onto lazer's files after a stable-to-lazer sync.
+    pub relink: bool,
+    /// Threads for a relink; `None` uses the relink default.
+    pub threads: Option<NonZeroUsize>,
 }
 
 /// Flags accepted in every mode, before or after `--cli`.
@@ -118,6 +127,14 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         let arg = &args[i];
         match arg.as_str() {
             "--json" => options.json = true,
+            "--relink" => options.relink = true,
+            "--threads" => {
+                i += 1;
+                let value = args.get(i).ok_or("--threads requires a value")?;
+                options.threads = Some(value.parse().map_err(|_| {
+                    format!("--threads needs a whole number of 1 or more, not '{value}'")
+                })?);
+            }
             "--set-ids" => {
                 i += 1;
                 if i >= args.len() {
@@ -126,6 +143,7 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
                 set_ids = Some(parse_set_ids(&args[i])?);
             }
             "scan" => command = Some(CliCommand::Scan),
+            "relink" => command = Some(CliCommand::Relink),
             "dry-run" => {
                 i += 1;
                 if i >= args.len() {
@@ -172,9 +190,24 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         Some(CliCommand::Sync { direction, .. }) => CliCommand::Sync { direction, set_ids },
         Some(cmd) => cmd,
         None => {
-            return Err("No command specified. Use: scan, dry-run <dir>, or sync <dir>".to_string())
+            return Err(
+                "No command specified. Use: scan, dry-run <dir>, sync <dir>, or relink".to_string(),
+            )
         }
     };
+    let relinks = matches!(
+        command,
+        CliCommand::Sync {
+            direction: SyncDirection::StableToLazer | SyncDirection::Bidirectional,
+            ..
+        }
+    );
+    if options.relink && !relinks {
+        return Err("--relink works only with sync s2l or sync bi".to_string());
+    }
+    if options.threads.is_some() && !options.relink && !matches!(command, CliCommand::Relink) {
+        return Err("--threads works only with relink or sync s2l/bi --relink".to_string());
+    }
 
     Ok((command, options))
 }
@@ -207,6 +240,72 @@ pub fn run(command: CliCommand, options: CliOptions) -> anyhow::Result<()> {
         CliCommand::Scan => run_scan(options),
         CliCommand::DryRun { direction, set_ids } => run_dry_run(direction, set_ids, options),
         CliCommand::Sync { direction, set_ids } => run_sync(direction, set_ids, options),
+        CliCommand::Relink => run_relink(options),
+    }
+}
+
+/// Replaces the stable files that are plain copies of lazer files with hard links to
+/// them. Both folders pass the live guard and stable must be closed.
+fn run_relink(options: CliOptions) -> anyhow::Result<()> {
+    let config = Config::load();
+    let songs = config
+        .stable_songs_path()
+        .ok_or_else(|| anyhow::anyhow!("osu!stable path not configured"))?;
+    let files = config
+        .lazer_files_path()
+        .ok_or_else(|| anyhow::anyhow!("osu!lazer path not configured"))?;
+    live_guard::check_write(&songs)?;
+    live_guard::check_write(&files)?;
+    ensure_stable_closed()?;
+
+    let relinker = relinker(&songs, &files, &options);
+    let show_progress = !options.json;
+    let report = relinker.run(&mut |done, total| {
+        if show_progress && (done % 1000 == 0 || done == total) {
+            eprint!("\rRelinking: {done}/{total}");
+        }
+    })?;
+    if show_progress {
+        eprintln!();
+    }
+    print_relink_report(&report, options);
+    relink_failures(&report)
+}
+
+/// The relinker `relink` runs, from `songs` onto `files` with the cache for `songs`.
+fn relinker(songs: &Path, files: &Path, options: &CliOptions) -> Relinker {
+    Relinker::new(songs, files, Relinker::default_cache(songs)).threads(options.threads)
+}
+
+/// A relink with any file that failed exits nonzero, after its report is printed.
+fn relink_failures(report: &RelinkReport) -> anyhow::Result<()> {
+    if !report.errors.is_empty() {
+        anyhow::bail!("{} files failed to relink", report.errors.len());
+    }
+    Ok(())
+}
+
+fn print_relink_report(report: &RelinkReport, options: CliOptions) {
+    if options.json {
+        println!("{}", serde_json::json!(report));
+        return;
+    }
+    println!("Relink Complete:");
+    println!("  Relinked:        {}", report.relinked);
+    println!("  Bytes reclaimed: {}", report.bytes_reclaimed);
+    println!(
+        "  Hashed:          {} files, {} bytes",
+        report.hashed_files, report.hashed_bytes
+    );
+    for (reason, count) in &report.skipped {
+        println!("  Skipped ({reason:?}): {count}");
+    }
+    for error in &report.errors {
+        println!("  Error: {error}");
+    }
+    for note in &report.notes {
+        println!();
+        println!("Note: {note}");
     }
 }
 
@@ -340,6 +439,13 @@ fn run_dry_run(
     Ok(())
 }
 
+/// The sync engine builder with the relink settings from `options`.
+fn sync_builder(options: &CliOptions) -> SyncEngineBuilder {
+    SyncEngineBuilder::new()
+        .relink(options.relink)
+        .relink_threads(options.threads)
+}
+
 fn run_sync(
     direction: SyncDirection,
     set_ids: Option<HashSet<i32>>,
@@ -377,7 +483,7 @@ fn run_sync(
         Box::new(|_| {})
     };
 
-    let mut builder = SyncEngineBuilder::new()
+    let mut builder = sync_builder(&options)
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
@@ -580,6 +686,7 @@ pub fn print_help() {
     println!("    scan                        Scan and show installations");
     println!("    dry-run <direction>         Preview what would be synced");
     println!("    sync <direction>            Perform sync");
+    println!("    relink                      Hard-link stable copies of lazer files to them");
     println!();
     println!("DIRECTIONS:");
     println!("    stable-to-lazer, s2l        Sync from stable to lazer");
@@ -589,6 +696,12 @@ pub fn print_help() {
     println!("OPTIONS:");
     println!("    --set-ids <ids>             Comma-separated beatmap set IDs");
     println!("    --json                      Output in JSON format");
+    println!(
+        "    --relink                    After sync s2l or bi, relink stable copies to lazer's files"
+    );
+    println!(
+        "    --threads <n>               Threads for relink (default: a quarter of the CPUs, 1 to 4)"
+    );
     println!("    --stable-path <dir>         Use this osu!stable folder");
     println!("    --lazer-path <dir>          Use this osu!lazer data folder");
     println!("    --allow-live                Allow writes into the detected live installs");
@@ -598,6 +711,7 @@ pub fn print_help() {
     println!("    osu-sync --cli dry-run stable-to-lazer");
     println!("    osu-sync --cli sync s2l --set-ids 123,456,789");
     println!("    osu-sync --cli dry-run bi --json");
+    println!("    osu-sync --cli relink --json");
 }
 
 #[cfg(test)]
@@ -848,5 +962,126 @@ mod tests {
         let args = vec!["scan".to_string(), "--json".to_string()];
         let (_, options) = parse_args(&args).unwrap();
         assert!(options.json);
+    }
+
+    #[test]
+    fn parses_relink() {
+        let (cmd, options) = parse_args(&strings(&["relink", "--json"])).unwrap();
+        assert!(matches!(cmd, CliCommand::Relink));
+        assert!(options.json);
+        assert!(!options.relink);
+
+        let (_, options) = parse_args(&strings(&["sync", "s2l", "--relink"])).unwrap();
+        assert!(options.relink);
+        assert_eq!(
+            parse_args(&strings(&["relink", "--relnik"])).unwrap_err(),
+            "Unknown flag: --relnik"
+        );
+    }
+
+    #[test]
+    fn relink_flag_is_rejected_outside_s2l_and_bi_sync() {
+        for args in [
+            &["sync", "l2s", "--relink"][..],
+            &["--relink", "dry-run", "s2l"],
+            &["dry-run", "bi", "--relink"],
+            &["scan", "--relink"],
+            &["relink", "--relink"],
+        ] {
+            assert_eq!(
+                parse_args(&strings(args)).unwrap_err(),
+                "--relink works only with sync s2l or sync bi",
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["sync", "s2l", "--relink"][..],
+            &["--relink", "sync", "stable-to-lazer"],
+            &["sync", "bi", "--relink", "--json"],
+        ] {
+            let (_, options) = parse_args(&strings(args)).unwrap();
+            assert!(options.relink, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn threads_flag_sets_the_relink_thread_count() {
+        let (_, options) = parse_args(&strings(&["relink", "--threads", "2"])).unwrap();
+        assert_eq!(options.threads, NonZeroUsize::new(2));
+        let (_, options) =
+            parse_args(&strings(&["sync", "s2l", "--relink", "--threads", "32"])).unwrap();
+        assert_eq!(options.threads, NonZeroUsize::new(32));
+        let (_, options) = parse_args(&strings(&["relink"])).unwrap();
+        assert_eq!(options.threads, None);
+    }
+
+    #[test]
+    fn threads_flag_reaches_the_relinker_and_the_sync_engine() {
+        // Building a relinker touches no file, so the folders need not exist.
+        let dir = Path::new("not-there");
+        for (threads, expected) in [("7", 7), ("32", 32), ("1", 1)] {
+            let (_, options) = parse_args(&strings(&["relink", "--threads", threads])).unwrap();
+            let r = relinker(&dir.join("Songs"), &dir.join("files"), &options);
+            assert_eq!(r.thread_count(), expected);
+
+            let (_, options) =
+                parse_args(&strings(&["sync", "s2l", "--relink", "--threads", threads])).unwrap();
+            assert_eq!(
+                sync_builder(&options).requested_relink_threads(),
+                NonZeroUsize::new(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn threads_flag_rejects_zero_words_and_commands_that_do_not_relink() {
+        for (args, error) in [
+            (
+                &["relink", "--threads", "0"][..],
+                "--threads needs a whole number of 1 or more, not '0'",
+            ),
+            (
+                &["relink", "--threads", "four"],
+                "--threads needs a whole number of 1 or more, not 'four'",
+            ),
+            (
+                &["relink", "--threads", "-1"],
+                "--threads needs a whole number of 1 or more, not '-1'",
+            ),
+            (&["relink", "--threads"], "--threads requires a value"),
+            (
+                &["sync", "s2l", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+            (
+                &["scan", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+            (
+                &["dry-run", "s2l", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+        ] {
+            assert_eq!(parse_args(&strings(args)).unwrap_err(), error, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn relink_with_failed_files_exits_nonzero() {
+        let failed = RelinkReport {
+            relinked: 3,
+            errors: vec!["a: denied".to_string(), "b: denied".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            relink_failures(&failed).unwrap_err().to_string(),
+            "2 files failed to relink"
+        );
+        let locked_only = RelinkReport {
+            relinked: 3,
+            notes: vec!["left a as it is".to_string()],
+            ..Default::default()
+        };
+        assert!(relink_failures(&locked_only).is_ok());
     }
 }
