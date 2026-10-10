@@ -1,4 +1,4 @@
-//! Background mode belongs to the whole process, so this test has a binary of its own.
+//! Relink must leave the process priority alone, so this test has a binary of its own.
 #![cfg(windows)]
 
 use std::fs;
@@ -6,11 +6,12 @@ use std::fs;
 use osu_sync_core::linkstore::{BlobHash, Relinker};
 use sha2::{Digest, Sha256};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetPriorityClass, GetProcessInformation, ProcessMemoryPriority,
-    SetPriorityClass, IDLE_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION, NORMAL_PRIORITY_CLASS,
+    GetCurrentProcess, GetCurrentThread, GetPriorityClass, GetProcessInformation,
+    GetThreadPriority, ProcessMemoryPriority, SetPriorityClass, IDLE_PRIORITY_CLASS,
+    MEMORY_PRIORITY_INFORMATION, NORMAL_PRIORITY_CLASS,
 };
 
-fn memory_priority() -> u32 {
+fn priorities() -> (u32, u32, i32) {
     let mut info = MEMORY_PRIORITY_INFORMATION::default();
     // SAFETY: `info` is a valid out pointer of the size passed.
     unsafe {
@@ -22,11 +23,18 @@ fn memory_priority() -> u32 {
         )
     }
     .unwrap();
-    info.MemoryPriority.0
+    // SAFETY: pseudo handles of the current process and thread are always valid.
+    let (class, thread) = unsafe {
+        (
+            GetPriorityClass(GetCurrentProcess()),
+            GetThreadPriority(GetCurrentThread()),
+        )
+    };
+    (class, info.MemoryPriority.0, thread)
 }
 
 #[test]
-fn relink_runs_in_background_mode_and_restores_the_priority_class() {
+fn relink_leaves_the_process_priority_alone() {
     let dir = tempfile::tempdir().unwrap();
     let content = b"ID3 not really audio";
     let files = dir.path().join("lazer").join("files");
@@ -41,17 +49,18 @@ fn relink_runs_in_background_mode_and_restores_the_priority_class() {
 
     // SAFETY: the pseudo handle of the current process is always valid.
     unsafe { SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS) }.unwrap();
-    let before = memory_priority();
+    let before = priorities();
     let mut during = Vec::new();
     let report = Relinker::new(&songs, &files, None)
-        .run(&mut |_, _| during.push(memory_priority()))
+        .run(&mut |_, _| during.push(priorities()))
         .unwrap();
+    let after = priorities();
     // SAFETY: as above.
-    let class = unsafe { GetPriorityClass(GetCurrentProcess()) };
-    let after = memory_priority();
     unsafe { SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS) }.unwrap();
 
     assert_eq!(report.relinked, 1);
-    assert_eq!((before, during, after), (5, vec![1], 5));
-    assert_eq!(class, IDLE_PRIORITY_CLASS.0);
+    assert_eq!(
+        (before, during, after),
+        ((64, 5, 0), vec![(64, 5, -1)], (64, 5, 0))
+    );
 }

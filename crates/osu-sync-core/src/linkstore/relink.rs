@@ -7,9 +7,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -222,9 +223,11 @@ impl Relinker {
     /// Relinks every stable file whose content is a lazer blob. One file failing never
     /// stops the run; it lands in `errors`. The caller checks that stable is closed.
     ///
-    /// The run uses its own pool of [`Relinker::threads`] threads, and on Windows puts the
-    /// process in background mode (lower CPU, disk and memory priority) until it returns.
+    /// The run uses its own pool of [`Relinker::threads`] threads. On Windows those threads
+    /// and the calling thread run in background mode until it returns; the process
+    /// priority class is never changed.
     pub fn run(&self, progress: &mut dyn FnMut(usize, usize)) -> Result<RelinkReport> {
+        let _background = BackgroundThread::enter();
         live_guard::check_write(&self.songs)?;
         live_guard::check_write(&self.files)?;
         if !self.songs.is_dir() {
@@ -244,10 +247,12 @@ impl Relinker {
             return Ok(report);
         }
 
-        let _background = Background::enter();
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.threads)
             .thread_name(|i| format!("osu-sync-relink-{i}"))
+            .start_handler(|_| {
+                begin_background_thread();
+            })
             .build()
             .map_err(|e| Error::Other(format!("could not start the relink threads: {e}")))?;
         let candidates = self.walk(&mut report);
@@ -625,76 +630,70 @@ fn logical_cpus() -> usize {
     std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
 }
 
-/// Windows background mode for the process while at least one relink runs. The mode is
-/// per process, so concurrent runs share it: the first begins it, the last ends it and
-/// restores the priority class, which ending the mode resets to normal.
-struct Background;
+/// Keeps the calling thread in background mode for the length of a run. It ends the mode
+/// on the thread that began it, so it is not `Send`.
+struct BackgroundThread {
+    began: bool,
+    _thread: PhantomData<*const ()>,
+}
 
-/// Runs in progress, and the priority class to restore when this process began the mode.
-static BACKGROUND: Mutex<(usize, Option<u32>)> = Mutex::new((0, None));
-
-impl Background {
+impl BackgroundThread {
     fn enter() -> Self {
-        let mut state = BACKGROUND.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.0 == 0 {
-            state.1 = begin_background();
+        Self {
+            began: begin_background_thread(),
+            _thread: PhantomData,
         }
-        state.0 += 1;
-        Self
     }
 }
 
-impl Drop for Background {
+impl Drop for BackgroundThread {
     fn drop(&mut self) {
-        let mut state = BACKGROUND.lock().unwrap_or_else(PoisonError::into_inner);
-        state.0 -= 1;
-        if state.0 == 0 {
-            if let Some(class) = state.1.take() {
-                end_background(class);
-            }
+        if self.began {
+            end_background_thread();
         }
     }
 }
 
-/// Begins background mode and returns the priority class to restore, or `None` when the
-/// mode did not begin (it was on already, or this is not Windows).
-fn begin_background() -> Option<u32> {
+/// Puts the current thread in Windows background mode: very low I/O and memory priority
+/// and CPU base priority 4. In an Idle process 4 is no drop, so the CPU priority then goes
+/// to the lower of below normal and its old value. Returns whether the mode began; it
+/// does not when the thread is in it already.
+fn begin_background_thread() -> bool {
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::{
-            GetCurrentProcess, GetPriorityClass, SetPriorityClass, PROCESS_MODE_BACKGROUND_BEGIN,
+            GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+            THREAD_PRIORITY, THREAD_PRIORITY_BELOW_NORMAL,
         };
-        // SAFETY: the pseudo handle of the current process is always valid.
+        // SAFETY: the pseudo handle of the current thread is always valid.
         unsafe {
-            let class = GetPriorityClass(GetCurrentProcess());
-            SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_BEGIN)
-                .ok()
-                .map(|()| class)
+            let thread = GetCurrentThread();
+            let floor = GetThreadPriority(thread).min(THREAD_PRIORITY_BELOW_NORMAL.0);
+            let began = SetThreadPriority(thread, THREAD_MODE_BACKGROUND_BEGIN).is_ok();
+            if began && GetThreadPriority(thread) > floor {
+                let _ = SetThreadPriority(thread, THREAD_PRIORITY(floor));
+            }
+            began
         }
     }
     #[cfg(not(windows))]
     {
-        None
+        false
     }
 }
 
-fn end_background(class: u32) {
+/// Ends background mode on the current thread, which restores its CPU priority from before.
+fn end_background_thread() {
     #[cfg(windows)]
     {
         use windows::Win32::System::Threading::{
-            GetCurrentProcess, SetPriorityClass, PROCESS_CREATION_FLAGS,
-            PROCESS_MODE_BACKGROUND_END,
+            GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
         };
-        // SAFETY: the pseudo handle of the current process is always valid.
+        // SAFETY: the pseudo handle of the current thread is always valid.
         unsafe {
-            let _ = SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_END);
-            if class != 0 {
-                let _ = SetPriorityClass(GetCurrentProcess(), PROCESS_CREATION_FLAGS(class));
-            }
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
         }
     }
-    #[cfg(not(windows))]
-    let _ = class;
 }
 
 fn locked(path: &Path, e: &io::Error) -> (RelinkSkip, Option<String>) {
@@ -1665,43 +1664,191 @@ mod tests {
         assert!(same(&stable, &blob));
     }
 
+    /// Tests that set the process priority class or read thread priorities take this lock,
+    /// so a class one of them sets never shows up in another.
     #[cfg(windows)]
-    fn memory_priority() -> u32 {
+    static PRIORITY: Mutex<()> = Mutex::new(());
+
+    /// The process priority class, and the current thread's priority relative to it and its
+    /// memory priority (1 very low in background mode, 5 normal).
+    #[cfg(windows)]
+    fn priorities() -> (u32, i32, u32) {
         use windows::Win32::System::Threading::{
-            GetCurrentProcess, GetProcessInformation, ProcessMemoryPriority,
-            MEMORY_PRIORITY_INFORMATION,
+            GetCurrentProcess, GetCurrentThread, GetPriorityClass, GetThreadInformation,
+            GetThreadPriority, ThreadMemoryPriority, MEMORY_PRIORITY_INFORMATION,
         };
-        let mut info = MEMORY_PRIORITY_INFORMATION::default();
-        // SAFETY: `info` is a valid out pointer of the size passed.
+        let mut memory = MEMORY_PRIORITY_INFORMATION::default();
+        // SAFETY: pseudo handles are always valid, and `memory` is a valid out pointer of
+        // the size passed.
         unsafe {
-            GetProcessInformation(
-                GetCurrentProcess(),
-                ProcessMemoryPriority,
-                (&mut info as *mut MEMORY_PRIORITY_INFORMATION).cast(),
+            GetThreadInformation(
+                GetCurrentThread(),
+                ThreadMemoryPriority,
+                (&mut memory as *mut MEMORY_PRIORITY_INFORMATION).cast(),
                 std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
             )
+            .unwrap();
+            (
+                GetPriorityClass(GetCurrentProcess()),
+                GetThreadPriority(GetCurrentThread()),
+                memory.MemoryPriority.0,
+            )
         }
-        .unwrap();
-        info.MemoryPriority.0
     }
 
-    /// Background mode shows as memory priority 1 (very low) instead of 5 (normal).
+    /// Sets the process priority class and returns the one it had.
+    #[cfg(windows)]
+    fn set_class(class: u32) -> u32 {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetPriorityClass, SetPriorityClass, PROCESS_CREATION_FLAGS,
+        };
+        // SAFETY: the pseudo handle of the current process is always valid.
+        unsafe {
+            let old = GetPriorityClass(GetCurrentProcess());
+            SetPriorityClass(GetCurrentProcess(), PROCESS_CREATION_FLAGS(class)).unwrap();
+            old
+        }
+    }
+
+    /// Sets the process priority class and puts the old one back when dropped.
+    #[cfg(windows)]
+    struct ClassFor(u32);
+
+    #[cfg(windows)]
+    impl ClassFor {
+        fn set(class: u32) -> Self {
+            Self(set_class(class))
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for ClassFor {
+        fn drop(&mut self) {
+            set_class(self.0);
+        }
+    }
+
+    /// Background mode used to be process-wide, which showed the class as normal (32) and
+    /// ran an Idle (64) or below-normal (16384) process at normal CPU priority. Now only
+    /// relink's threads drop: thread priority -1 in Idle (base 3), -2 in below normal and
+    /// -4 in normal (base 4 in both), memory priority 1, and the class stays as it was.
     #[cfg(windows)]
     #[test]
-    fn relink_runs_in_background_mode() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static SEEN: AtomicU32 = AtomicU32::new(0);
+    fn relink_threads_run_in_background_and_the_class_is_unchanged() {
+        static POOL: Mutex<Vec<(u32, i32, u32)>> = Mutex::new(Vec::new());
+        let _lock = PRIORITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut seen = Vec::new();
+        for class in [64, 16384, 32] {
+            let _class = ClassFor::set(class);
+            let fx = Fixture::new();
+            fx.blob(AUDIO);
+            fx.stable("1 A - B/audio.mp3", AUDIO);
+            let mut r = fx.relinker();
+            r.link = |src, dst| {
+                POOL.lock().unwrap().push(priorities());
+                fs::hard_link(src, dst)
+            };
+            let before = priorities();
+            let mut caller = Vec::new();
+            let report = r.run(&mut |_, _| caller.push(priorities())).unwrap();
+            let pool = std::mem::take(&mut *POOL.lock().unwrap());
+            assert_eq!(report.relinked, 1);
+            seen.push((class, before, pool, caller, priorities()));
+        }
+        assert_eq!(
+            seen,
+            [
+                (
+                    64,
+                    (64, 0, 5),
+                    vec![(64, -1, 1)],
+                    vec![(64, -1, 1)],
+                    (64, 0, 5)
+                ),
+                (
+                    16384,
+                    (16384, 0, 5),
+                    vec![(16384, -2, 1)],
+                    vec![(16384, -2, 1)],
+                    (16384, 0, 5)
+                ),
+                (
+                    32,
+                    (32, 0, 5),
+                    vec![(32, -4, 1)],
+                    vec![(32, -4, 1)],
+                    (32, 0, 5)
+                ),
+            ]
+        );
+    }
+
+    /// Ending process background mode used to reset a class set by someone else mid-run.
+    #[cfg(windows)]
+    #[test]
+    fn a_class_set_during_the_run_is_kept() {
+        let _lock = PRIORITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _class = ClassFor::set(32);
         let fx = Fixture::new();
         fx.blob(AUDIO);
         fx.stable("1 A - B/audio.mp3", AUDIO);
-        let mut r = fx.relinker();
-        r.link = |src, dst| {
-            SEEN.store(memory_priority(), Ordering::SeqCst);
-            fs::hard_link(src, dst)
-        };
+        let mut during = Vec::new();
 
-        assert_eq!(run(&r).relinked, 1);
-        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+        fx.relinker()
+            .run(&mut |_, _| {
+                set_class(64);
+                during.push(priorities().0);
+            })
+            .unwrap();
+
+        assert_eq!(during, [64]);
+        assert_eq!(priorities().0, 64);
+    }
+
+    /// The calling thread leaves background mode on every way out of a run: an error, a
+    /// panic in the pool, and a run nested in another's progress callback.
+    #[cfg(windows)]
+    #[test]
+    fn the_calling_thread_leaves_background_mode_on_every_path() {
+        let _lock = PRIORITY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fx = Fixture::new();
+        fx.blob(AUDIO);
+        fx.stable("1 A - B/audio.mp3", AUDIO);
+
+        let missing = Relinker::new(fx.songs.join("missing"), &fx.files, None);
+        assert!(missing.run(&mut |_, _| {}).is_err());
+        let after_error = priorities();
+
+        let mut panics = fx.relinker();
+        panics.link = |_, _| panic!("link failed");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&panics)));
+        let after_panic = priorities();
+
+        let nested_fx = Fixture::new();
+        nested_fx.blob(AUDIO);
+        nested_fx.stable("1 A - B/audio.mp3", AUDIO);
+        let mut inner = Vec::new();
+        fx.relinker()
+            .run(&mut |_, _| {
+                inner.push(run(&nested_fx.relinker()).relinked);
+                inner.push(priorities().2 as usize);
+            })
+            .unwrap();
+
+        assert_eq!(after_error.1, 0);
+        assert_eq!(after_error.2, 5);
+        assert!(unwound.is_err());
+        assert_eq!(after_panic.1, 0);
+        assert_eq!(after_panic.2, 5);
+        assert_eq!(inner, [1, 1]);
+        assert_eq!(priorities().1, 0);
+        assert_eq!(priorities().2, 5);
     }
 
     /// A third-party write after the byte compare used to land in the replaced file and be
