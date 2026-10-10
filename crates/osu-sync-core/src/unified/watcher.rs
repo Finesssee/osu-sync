@@ -3,17 +3,22 @@
 //!
 //! The watcher sleeps on the OS change feed for Songs and `files`. A change starts a
 //! short quiet period; the step runs once changes stop for `quiet` (a second at most),
-//! or at most `interval` after the first change. A step refused because osu!stable
-//! runs is retried an interval later, and the watcher logs why.
+//! or at most `interval` after the first change. A step never starts sooner than
+//! `interval` after the previous one ended, so a long copy into Songs runs at most one
+//! step per interval. A step refused because osu!stable runs is retried an interval
+//! later, and the watcher logs why; a step that fails otherwise is retried at the next
+//! realm read when the realm changed since the last step that succeeded.
 //!
 //! Lazer writes a new set's blobs as ordinary files, which the feed reports, then
 //! commits the set to `client.realm` through a mapped view, which changes neither the
 //! realm's modified time nor its size and raises no change event. Every commit rewrites
 //! the realm's header, so while idle the watcher reads the realm stamp (size, modified
-//! time and 24 header bytes) once per interval, and a stamp that differs from the one
-//! the last step took right before reading the realm runs the step. Songs and `files`
-//! changes arriving during a step or within a grace period after it may be the step's
-//! own writes, so instead of a step each they run one confirming step after the grace.
+//! time and 24 header bytes) once per interval, on a fixed schedule that other events
+//! do not delay, and a stamp that differs from the one the last step took right before
+//! reading the realm runs the step. Songs and `files` changes arriving during a step or
+//! within a grace period after it may be the step's own writes, so instead of a step
+//! each they run one confirming step after the grace, and no sooner than an interval
+//! after the step.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -31,8 +36,9 @@ use crate::linkstore::is_temp_name;
 /// Timing for the watcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchTiming {
-    /// Longest wait from the first change to the step, and the retry delay while
-    /// osu!stable runs.
+    /// Longest wait from the first change to the step, the shortest time from the end
+    /// of one step to the start of the next, the realm read period and the retry delay
+    /// while osu!stable runs.
     pub interval: Duration,
     /// The step runs once no change arrived for this long.
     pub quiet: Duration,
@@ -238,7 +244,8 @@ fn feed(
 
 /// The watcher's loop over a change feed, with the step and the realm stamp passed
 /// in. Marks the gate stepping while the step runs. Runs one step at start, to catch
-/// up, reads the realm stamp once per interval while idle, and returns when `rx` closes.
+/// up, reads the realm stamp every interval while idle, starts no step sooner than an
+/// interval after the last one ended, and returns when `rx` closes.
 fn watch_loop(
     rx: &Receiver<notify::Result<Event>>,
     filter: &TriggerFilter,
@@ -251,22 +258,30 @@ fn watch_loop(
     let mut pending = Some(Pending::by(Instant::now()));
     let mut grace_until: Option<Instant> = None;
     let mut last_realm: Option<RealmStamp> = None;
+    // The earliest start of the next step, and when the idle loop next reads the realm.
+    let mut not_before = Instant::now();
+    let mut next_poll = Instant::now();
 
     loop {
         let message = match &pending {
-            None => match rx.recv_timeout(timing.interval) {
-                Ok(message) => Some(message),
-                Err(RecvTimeoutError::Timeout) => {
+            None => {
+                let now = Instant::now();
+                if now >= next_poll {
+                    next_poll = now + timing.interval;
                     if realm_committed(realm_stamp, last_realm) {
                         log(WatchEvent::Changed(filter.realm.clone()));
-                        pending = Some(Pending::by(Instant::now()));
+                        pending = Some(Pending::by(now));
                     }
                     continue;
                 }
-                Err(RecvTimeoutError::Disconnected) => return,
-            },
+                match rx.recv_timeout(next_poll - now) {
+                    Ok(message) => Some(message),
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
             Some(p) => {
-                let wait = p.due.saturating_duration_since(Instant::now());
+                let wait = p.due.max(not_before).saturating_duration_since(Instant::now());
                 if wait.is_zero() {
                     None
                 } else {
@@ -308,10 +323,13 @@ fn watch_loop(
         gate.stepping.store(true, Ordering::Relaxed);
         let result = step();
         gate.stepping.store(false, Ordering::Relaxed);
-        let until = Instant::now() + timing.grace;
+        let end = Instant::now();
+        let until = end + timing.grace;
         grace_until = Some(until);
+        not_before = end + timing.interval;
+        next_poll = not_before;
         pending = None;
-        let retry = Pending::by(Instant::now() + timing.interval);
+        let retry = Pending::by(not_before);
         match result {
             Ok(report) => {
                 last_realm = report.realm_stamp.or(last_realm);
@@ -324,10 +342,7 @@ fn watch_loop(
                 log(WatchEvent::Deferred);
                 pending = Some(retry);
             }
-            Err(e) => {
-                last_realm = realm_stamp().or(last_realm);
-                log(WatchEvent::Failed(e.to_string()));
-            }
+            Err(e) => log(WatchEvent::Failed(e.to_string())),
         }
         if gate.missed.swap(false, Ordering::Relaxed) {
             log(WatchEvent::Recheck);
@@ -586,7 +601,7 @@ mod tests {
                     std::thread::spawn(move || {
                         std::thread::sleep(Duration::from_millis(20));
                         send(&tx, r"C:\l\files\0\00\blob");
-                        std::thread::sleep(Duration::from_millis(300));
+                        std::thread::sleep(Duration::from_millis(700));
                     });
                 }
                 Ok(StepReport::default())
@@ -774,6 +789,141 @@ mod tests {
         );
         closer.join().unwrap();
         assert_eq!(steps.get(), 2);
+    }
+
+    /// Runs the loop on a header-only realm commit at 200 ms while an event the filter
+    /// ignores arrives every 150 ms from 350 ms to 3350 ms, and returns each step's
+    /// start in milliseconds.
+    fn steps_with_noise(noise: &'static str) -> Vec<u128> {
+        let (tx, rx) = channel();
+        let realm = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let commit = realm.clone();
+        let start = Instant::now();
+        let feeder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            commit.store(2, Ordering::Relaxed);
+            for _ in 0..21 {
+                std::thread::sleep(Duration::from_millis(150));
+                send(&tx, noise);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        let mut at = Vec::new();
+        watch_loop(
+            &rx,
+            &filter(),
+            fast(),
+            &StepGate::default(),
+            &mut || {
+                at.push(start.elapsed().as_millis());
+                Ok(StepReport {
+                    realm_stamp: stamp(realm.load(Ordering::Relaxed)),
+                    ..StepReport::default()
+                })
+            },
+            &|| stamp(realm.load(Ordering::Relaxed)),
+            &mut |_| {},
+        );
+        feeder.join().unwrap();
+        at
+    }
+
+    /// The realm read one interval (400 ms) after the catch-up step finds the commit;
+    /// ignored events must not push it back.
+    fn assert_commit_stepped_at_the_first_read(at: &[u128]) {
+        assert_eq!(at.len(), 2, "step starts {at:?}");
+        assert!(at[0] < 50, "step starts {at:?}");
+        assert!((400..=700).contains(&at[1]), "step starts {at:?}");
+    }
+
+    #[test]
+    fn events_in_lazers_folder_do_not_delay_the_realm_read() {
+        assert_commit_stepped_at_the_first_read(&steps_with_noise(r"C:\l\game.ini"));
+    }
+
+    #[test]
+    fn temp_file_events_in_songs_do_not_delay_the_realm_read() {
+        assert_commit_stepped_at_the_first_read(&steps_with_noise(
+            r"C:\s\Songs\1 A - B\osu-sync_tmp_3.part",
+        ));
+    }
+
+    /// A Songs change every 50 ms for 6 s, as during a long copy, with a step that
+    /// takes 100 ms: steps start at most once per interval (1 s), so 6 s hold 5 to 7.
+    #[test]
+    fn sustained_changes_run_at_most_one_step_per_interval() {
+        let (tx, rx) = channel();
+        let start = Instant::now();
+        let feeder = std::thread::spawn(move || {
+            let mut i = 0u32;
+            while start.elapsed() < Duration::from_millis(6000) {
+                i += 1;
+                send(&tx, &format!(r"C:\s\Songs\1 A - B\f{i}.png"));
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let mut at = Vec::new();
+        watch_loop(
+            &rx,
+            &filter(),
+            WatchTiming {
+                interval: Duration::from_millis(1000),
+                quiet: Duration::from_millis(200),
+                grace: Duration::from_millis(400),
+            },
+            &StepGate::default(),
+            &mut || {
+                at.push(start.elapsed().as_millis());
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(StepReport::default())
+            },
+            &|| None,
+            &mut |_| {},
+        );
+        feeder.join().unwrap();
+        assert!((5..=7).contains(&at.len()), "step starts {at:?}");
+        assert!(
+            at.windows(2).all(|w| w[1] - w[0] >= 1000),
+            "step starts {at:?}"
+        );
+    }
+
+    /// A step that fails after a realm commit leaves the commit unseen, so the next
+    /// realm read runs the step again.
+    #[test]
+    fn a_failed_step_is_retried_at_the_next_realm_read() {
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        let realm = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let commit = realm.clone();
+        let feeder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            commit.store(2, Ordering::Relaxed);
+            std::thread::sleep(Duration::from_millis(1000));
+            drop(tx);
+        });
+        let steps = Cell::new(0);
+        let mut log = Vec::new();
+        watch_loop(
+            &rx,
+            &filter(),
+            fast(),
+            &StepGate::default(),
+            &mut || {
+                steps.set(steps.get() + 1);
+                if steps.get() == 2 {
+                    return Err(Error::WatcherError("lazer's files are busy".to_string()));
+                }
+                Ok(StepReport {
+                    realm_stamp: stamp(realm.load(Ordering::Relaxed)),
+                    ..StepReport::default()
+                })
+            },
+            &|| stamp(realm.load(Ordering::Relaxed)),
+            &mut |e| log.push(e),
+        );
+        feeder.join().unwrap();
+        assert_eq!(names(&log), ["ran", "changed", "failed", "changed", "ran"]);
+        assert_eq!(steps.get(), 3);
     }
 
     #[test]
