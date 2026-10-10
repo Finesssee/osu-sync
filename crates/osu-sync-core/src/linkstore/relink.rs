@@ -522,11 +522,18 @@ impl Relinker {
         if let Decision::Skip(reason) = plan.decision {
             return Ok(Err((reason, None)));
         }
-        let meta = fs::metadata(&plan.stable)?;
+        // Held from the stat check through the rename, so no writer can change the file
+        // after its bytes are compared, and one that has it open already makes this a skip.
+        let mut held = match hold(&plan.stable) {
+            Ok(file) => file,
+            Err(e) if is_locked(&e) => return Ok(Err(locked(&plan.stable, &e))),
+            Err(e) => return Err(e),
+        };
+        let meta = held.metadata()?;
         if meta.len() != c.size || mtime_key(&meta) != c.mtime {
             return Ok(Err((RelinkSkip::Changed, None)));
         }
-        let links = match verify(plan, c)? {
+        let links = match verify(&mut held, plan, c)? {
             Ok(links) => links,
             Err(left) => return Ok(Err(left)),
         };
@@ -549,7 +556,9 @@ impl Relinker {
                 }
             }
         };
-        match fs::rename(&temp, &plan.stable) {
+        let renamed = fs::rename(&temp, &plan.stable);
+        drop(held);
+        match renamed {
             Ok(()) => Ok(Ok(links == 1)),
             Err(e) => {
                 let _ = fs::remove_file(&temp);
@@ -698,21 +707,33 @@ fn locked(path: &Path, e: &io::Error) -> (RelinkSkip, Option<String>) {
     )
 }
 
-/// Reads the stable file and its blob side by side right before the replace, so neither a
-/// blob with wrong bytes nor a stale cached hash can put other bytes in the stable file.
-/// Returns the stable file's hard-link count when both hold the same bytes, or why the
-/// file stays as it is.
-fn verify(plan: &Relink, c: &Candidate) -> io::Result<std::result::Result<u32, Left>> {
-    let (same, links) = {
-        let mut stable = match File::open(&plan.stable) {
-            Ok(file) => file,
-            Err(e) if is_locked(&e) => return Ok(Err(locked(&plan.stable, &e))),
-            Err(e) => return Err(e),
-        };
-        let mut blob = File::open(&plan.blob)?;
-        let same = same_bytes(&mut stable, &mut blob, c.size)?;
-        (same, link_count(&stable)?)
-    };
+/// Opens the stable file for reading and keeps writers out while the handle is open. On
+/// Windows it shares read and delete but not write: a writer that has the file open makes
+/// the open fail, no new writer can open it, and the rename over it still works.
+fn hold(path: &Path) -> io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        options.share_mode(FILE_SHARE_READ.0 | FILE_SHARE_DELETE.0);
+    }
+    options.open(path)
+}
+
+/// Reads the held stable file and its blob side by side right before the replace, so
+/// neither a blob with wrong bytes nor a stale cached hash can put other bytes in the
+/// stable file. Returns the stable file's hard-link count when both hold the same bytes,
+/// or why the file stays as it is.
+fn verify(
+    stable: &mut File,
+    plan: &Relink,
+    c: &Candidate,
+) -> io::Result<std::result::Result<u32, Left>> {
+    let mut blob = File::open(&plan.blob)?;
+    let same = same_bytes(stable, &mut blob, c.size)?;
+    let links = link_count(stable)?;
     if same {
         return Ok(Ok(links));
     }
@@ -1670,5 +1691,75 @@ mod tests {
 
         assert_eq!(run(&r).relinked, 1);
         assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+    }
+
+    /// A third-party write after the byte compare used to land in the replaced file and be
+    /// lost. The held handle keeps writers out until the rename, so the write fails instead.
+    #[cfg(windows)]
+    #[test]
+    fn a_write_between_the_compare_and_the_rename_is_refused() {
+        use std::sync::OnceLock;
+        static TARGET: OnceLock<PathBuf> = OnceLock::new();
+        static WRITES: Mutex<Vec<Option<i32>>> = Mutex::new(Vec::new());
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+        TARGET.set(stable.clone()).unwrap();
+        let mut r = fx.relinker();
+        r.link = |src, dst| {
+            let write = fs::write(TARGET.get().unwrap(), b"USER EDIT 20 BYTES!!");
+            WRITES
+                .lock()
+                .unwrap()
+                .push(write.err().and_then(|e| e.raw_os_error()));
+            fs::hard_link(src, dst)
+        };
+
+        let report = run(&r);
+
+        assert_eq!(*WRITES.lock().unwrap(), [Some(32)]);
+        assert_eq!(report.relinked, 1);
+        assert_eq!(report.skipped, skipped(&[]));
+        assert_eq!(fs::read(&stable).unwrap(), AUDIO);
+        assert!(same(&stable, &blob));
+    }
+
+    /// A writer that has the file open, whether or not it shares delete, makes the file a
+    /// locked skip, and its later writes land in the stable file, not in orphaned data.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_open_for_writing_is_left_as_it_is() {
+        use std::io::Write;
+        use std::os::windows::fs::OpenOptionsExt;
+        for share in [1 | 2 | 4, 1 | 2] {
+            let fx = Fixture::new();
+            let blob = fx.blob(AUDIO);
+            let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+            let mut writer = File::options()
+                .write(true)
+                .share_mode(share)
+                .open(&stable)
+                .unwrap();
+
+            let report = run(&fx.relinker());
+            writer.write_all(b"X").unwrap();
+            drop(writer);
+
+            assert_eq!(report.relinked, 0, "share {share}");
+            assert_eq!(report.skipped, skipped(&[(RelinkSkip::Locked, 1)]));
+            assert_eq!(report.errors, Vec::<String>::new());
+            assert!(
+                report.notes[0].starts_with(&format!(
+                    "left {} as it is: it is in use or read-only (The process cannot access the file because it is being used by another process. (os error 32))",
+                    stable.display()
+                )),
+                "{}",
+                report.notes[0]
+            );
+            assert_eq!(fs::read(&stable).unwrap(), b"XD3 not really audio");
+            assert_eq!(fs::read(&blob).unwrap(), AUDIO);
+            assert_eq!(links(&stable), 1);
+            assert_eq!(names(stable.parent().unwrap()), ["audio.mp3"]);
+        }
     }
 }
