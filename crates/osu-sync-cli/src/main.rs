@@ -153,6 +153,9 @@ fn print_help() {
     println!(
         "    --relink                After sync s2l or bi, relink stable copies to lazer's files"
     );
+    println!(
+        "    --threads <n>           Threads for relink (default: a quarter of the CPUs, 1 to 4)"
+    );
     println!();
     println!("By default, osu-sync runs in TUI (terminal) mode.");
     println!();

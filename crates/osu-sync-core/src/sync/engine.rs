@@ -2,6 +2,7 @@
 
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -162,6 +163,7 @@ pub struct SyncEngine {
     lazer_sets_cache: OnceLock<Vec<LazerBeatmapSet>>,
     /// Relink stable copies onto lazer's files after a stable-to-lazer sync
     relink: bool,
+    relink_threads: Option<NonZeroUsize>,
 }
 
 impl SyncEngine {
@@ -187,6 +189,7 @@ impl SyncEngine {
             cancellation: None,
             lazer_sets_cache: OnceLock::new(),
             relink: false,
+            relink_threads: None,
         }
     }
 
@@ -254,9 +257,11 @@ impl SyncEngine {
         self
     }
 
-    /// Relink stable files that are copies of lazer's files after a stable-to-lazer sync
-    pub fn with_relink(mut self, relink: bool) -> Self {
+    /// Relink stable files that are copies of lazer's files after a stable-to-lazer sync,
+    /// on `threads` threads (`None` uses the relink default)
+    pub fn with_relink(mut self, relink: bool, threads: Option<NonZeroUsize>) -> Self {
         self.relink = relink;
+        self.relink_threads = threads;
         self
     }
 
@@ -934,7 +939,9 @@ impl SyncEngine {
             ensure_stable_closed()?;
             let songs = self.stable_songs()?;
             let files = self.lazer_database.file_store().files_path();
-            Relinker::new(&songs, files, Relinker::default_cache(&songs)).run(&mut |_, _| {})
+            Relinker::new(&songs, files, Relinker::default_cache(&songs))
+                .threads(self.relink_threads)
+                .run(&mut |_, _| {})
         };
         match run() {
             Ok(report) => relink_notes(report),
@@ -1022,6 +1029,7 @@ pub struct SyncEngineBuilder {
     selected_folders: Option<HashSet<String>>,
     cancellation: Option<Arc<AtomicBool>>,
     relink: bool,
+    relink_threads: Option<NonZeroUsize>,
 }
 
 impl SyncEngineBuilder {
@@ -1037,6 +1045,7 @@ impl SyncEngineBuilder {
             selected_folders: None,
             cancellation: None,
             relink: false,
+            relink_threads: None,
         }
     }
 
@@ -1102,6 +1111,12 @@ impl SyncEngineBuilder {
         self
     }
 
+    /// Threads for the relink after a sync; `None` uses the relink default
+    pub fn relink_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.relink_threads = threads;
+        self
+    }
+
     /// Build the sync engine
     pub fn build(self) -> Result<SyncEngine> {
         let config = self.config.ok_or(Error::MissingComponent {
@@ -1135,7 +1150,7 @@ impl SyncEngineBuilder {
             engine = engine.with_cancellation(token);
         }
 
-        Ok(engine.with_relink(self.relink))
+        Ok(engine.with_relink(self.relink, self.relink_threads))
     }
 }
 

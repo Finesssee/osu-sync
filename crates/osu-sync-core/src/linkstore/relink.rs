@@ -7,8 +7,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -87,6 +88,12 @@ pub fn decide(
     } else {
         Decision::Relink
     }
+}
+
+/// Threads for a relink run: the requested count, or a quarter of the `logical` CPUs,
+/// at least 1 and at most 4, so a relink leaves the machine usable.
+pub fn relink_threads(requested: Option<NonZeroUsize>, logical: usize) -> usize {
+    requested.map_or((logical / 4).clamp(1, 4), NonZeroUsize::get)
 }
 
 /// What a relink run did.
@@ -176,6 +183,7 @@ pub struct Relinker {
     songs: PathBuf,
     files: PathBuf,
     cache: Option<PathBuf>,
+    threads: usize,
     link: fn(&Path, &Path) -> io::Result<()>,
     same_volume: fn(&Path, &Path) -> io::Result<bool>,
 }
@@ -193,9 +201,16 @@ impl Relinker {
             songs: std::path::absolute(&songs).unwrap_or(songs),
             files: files.into(),
             cache,
+            threads: relink_threads(None, logical_cpus()),
             link: |src, dst| fs::hard_link(src, dst),
             same_volume,
         }
+    }
+
+    /// Runs on `requested` threads instead of the default from [`relink_threads`].
+    pub fn threads(mut self, requested: Option<NonZeroUsize>) -> Self {
+        self.threads = relink_threads(requested, logical_cpus());
+        self
     }
 
     /// The hash cache file for `songs` in the per-user osu-sync cache folder.
@@ -206,6 +221,9 @@ impl Relinker {
 
     /// Relinks every stable file whose content is a lazer blob. One file failing never
     /// stops the run; it lands in `errors`. The caller checks that stable is closed.
+    ///
+    /// The run uses its own pool of [`Relinker::threads`] threads, and on Windows puts the
+    /// process in background mode (lower CPU, disk and memory priority) until it returns.
     pub fn run(&self, progress: &mut dyn FnMut(usize, usize)) -> Result<RelinkReport> {
         live_guard::check_write(&self.songs)?;
         live_guard::check_write(&self.files)?;
@@ -226,6 +244,12 @@ impl Relinker {
             return Ok(report);
         }
 
+        let _background = Background::enter();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.threads)
+            .thread_name(|i| format!("osu-sync-relink-{i}"))
+            .build()
+            .map_err(|e| Error::Other(format!("could not start the relink threads: {e}")))?;
         let candidates = self.walk(&mut report);
         let cache = self
             .cache
@@ -244,17 +268,20 @@ impl Relinker {
         // reads stable files that are still in the page cache.
         for batch in folder_batches(candidates, |(stable, _)| stable.parent()) {
             let walked: usize = batch.iter().map(Vec::len).sum();
-            let batch: Vec<Vec<Candidate>> = batch
-                .into_par_iter()
-                .map(|folder| {
-                    folder
-                        .into_par_iter()
-                        .filter_map(|(stable, rel)| self.inspect(stable, rel, &cache))
-                        .collect()
-                })
-                .collect();
+            let batch: Vec<Vec<Candidate>> = pool.install(|| {
+                batch
+                    .into_par_iter()
+                    .map(|folder| {
+                        folder
+                            .into_par_iter()
+                            .filter_map(|(stable, rel)| self.inspect(stable, rel, &cache))
+                            .collect()
+                    })
+                    .collect()
+            });
             // A shard folder under `files` can be a junction into a live store, so each
-            // blob folder is guarded on its own before any temp is linked from it.
+            // blob folder is guarded on its own before any temp is linked from it. This runs
+            // on the caller's thread, where the guard's roots are set.
             for c in batch.iter().flatten() {
                 if let Found::Blob {
                     blob,
@@ -270,18 +297,20 @@ impl Relinker {
                 }
             }
 
-            let settled: Vec<Vec<(Candidate, Settled)>> = batch
-                .into_par_iter()
-                .map(|folder| {
-                    folder
-                        .into_iter()
-                        .map(|c| {
-                            let settled = self.settle(&c, &limited);
-                            (c, settled)
-                        })
-                        .collect()
-                })
-                .collect();
+            let settled: Vec<Vec<(Candidate, Settled)>> = pool.install(|| {
+                batch
+                    .into_par_iter()
+                    .map(|folder| {
+                        folder
+                            .into_iter()
+                            .map(|c| {
+                                let settled = self.settle(&c, &limited);
+                                (c, settled)
+                            })
+                            .collect()
+                    })
+                    .collect()
+            });
             for (c, settled) in settled.into_iter().flatten() {
                 if c.hashed {
                     report.hashed_files += 1;
@@ -581,6 +610,82 @@ fn folder_batches<T>(items: Vec<T>, folder_of: impl Fn(&T) -> Option<&Path>) -> 
         batches.push(rest.by_ref().take(FOLDERS_PER_BATCH).collect());
     }
     batches
+}
+
+fn logical_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// Windows background mode for the process while at least one relink runs. The mode is
+/// per process, so concurrent runs share it: the first begins it, the last ends it and
+/// restores the priority class, which ending the mode resets to normal.
+struct Background;
+
+/// Runs in progress, and the priority class to restore when this process began the mode.
+static BACKGROUND: Mutex<(usize, Option<u32>)> = Mutex::new((0, None));
+
+impl Background {
+    fn enter() -> Self {
+        let mut state = BACKGROUND.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.0 == 0 {
+            state.1 = begin_background();
+        }
+        state.0 += 1;
+        Self
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        let mut state = BACKGROUND.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0 -= 1;
+        if state.0 == 0 {
+            if let Some(class) = state.1.take() {
+                end_background(class);
+            }
+        }
+    }
+}
+
+/// Begins background mode and returns the priority class to restore, or `None` when the
+/// mode did not begin (it was on already, or this is not Windows).
+fn begin_background() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetPriorityClass, SetPriorityClass, PROCESS_MODE_BACKGROUND_BEGIN,
+        };
+        // SAFETY: the pseudo handle of the current process is always valid.
+        unsafe {
+            let class = GetPriorityClass(GetCurrentProcess());
+            SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_BEGIN)
+                .ok()
+                .map(|()| class)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn end_background(class: u32) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, PROCESS_CREATION_FLAGS,
+            PROCESS_MODE_BACKGROUND_END,
+        };
+        // SAFETY: the pseudo handle of the current process is always valid.
+        unsafe {
+            let _ = SetPriorityClass(GetCurrentProcess(), PROCESS_MODE_BACKGROUND_END);
+            if class != 0 {
+                let _ = SetPriorityClass(GetCurrentProcess(), PROCESS_CREATION_FLAGS(class));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = class;
 }
 
 fn locked(path: &Path, e: &io::Error) -> (RelinkSkip, Option<String>) {
@@ -1492,5 +1597,78 @@ mod tests {
         assert!(same(&shared, &blob) && same(&sole, &blob));
         assert_eq!(links(&outside), 1);
         assert_eq!(fs::read(&outside).unwrap(), AUDIO);
+    }
+
+    #[test]
+    fn default_relink_threads_are_a_quarter_of_the_cpus_from_1_to_4() {
+        let n = NonZeroUsize::new;
+        assert_eq!(relink_threads(None, 32), 4);
+        assert_eq!(relink_threads(None, 16), 4);
+        assert_eq!(relink_threads(None, 12), 3);
+        assert_eq!(relink_threads(None, 8), 2);
+        assert_eq!(relink_threads(None, 3), 1);
+        assert_eq!(relink_threads(None, 1), 1);
+        assert_eq!(relink_threads(None, 0), 1);
+        assert_eq!(relink_threads(n(32), 32), 32);
+        assert_eq!(relink_threads(n(1), 32), 1);
+    }
+
+    #[test]
+    fn relink_runs_in_its_own_pool_of_the_requested_size() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+        let mut r = fx.relinker().threads(NonZeroUsize::new(3));
+        r.link = |src, dst| {
+            SEEN.store(rayon::current_num_threads(), Ordering::SeqCst);
+            fs::hard_link(src, dst)
+        };
+
+        let report = run(&r);
+
+        assert_eq!(report.relinked, 1);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 3);
+        assert!(same(&stable, &blob));
+    }
+
+    #[cfg(windows)]
+    fn memory_priority() -> u32 {
+        use windows::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessInformation, ProcessMemoryPriority,
+            MEMORY_PRIORITY_INFORMATION,
+        };
+        let mut info = MEMORY_PRIORITY_INFORMATION::default();
+        // SAFETY: `info` is a valid out pointer of the size passed.
+        unsafe {
+            GetProcessInformation(
+                GetCurrentProcess(),
+                ProcessMemoryPriority,
+                (&mut info as *mut MEMORY_PRIORITY_INFORMATION).cast(),
+                std::mem::size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            )
+        }
+        .unwrap();
+        info.MemoryPriority.0
+    }
+
+    /// Background mode shows as memory priority 1 (very low) instead of 5 (normal).
+    #[cfg(windows)]
+    #[test]
+    fn relink_runs_in_background_mode() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        let fx = Fixture::new();
+        fx.blob(AUDIO);
+        fx.stable("1 A - B/audio.mp3", AUDIO);
+        let mut r = fx.relinker();
+        r.link = |src, dst| {
+            SEEN.store(memory_priority(), Ordering::SeqCst);
+            fs::hard_link(src, dst)
+        };
+
+        assert_eq!(run(&r).relinked, 1);
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1);
     }
 }

@@ -14,6 +14,7 @@
 //!   --relink           After sync s2l or bi, relink stable copies onto lazer's files
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -49,6 +50,8 @@ pub struct CliOptions {
     pub json: bool,
     /// Relink stable copies onto lazer's files after a stable-to-lazer sync.
     pub relink: bool,
+    /// Threads for a relink; `None` uses the relink default.
+    pub threads: Option<NonZeroUsize>,
 }
 
 /// Flags accepted in every mode, before or after `--cli`.
@@ -125,6 +128,13 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         match arg.as_str() {
             "--json" => options.json = true,
             "--relink" => options.relink = true,
+            "--threads" => {
+                i += 1;
+                let value = args.get(i).ok_or("--threads requires a value")?;
+                options.threads = Some(value.parse().map_err(|_| {
+                    format!("--threads needs a whole number of 1 or more, not '{value}'")
+                })?);
+            }
             "--set-ids" => {
                 i += 1;
                 if i >= args.len() {
@@ -195,6 +205,9 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
     if options.relink && !relinks {
         return Err("--relink works only with sync s2l or sync bi".to_string());
     }
+    if options.threads.is_some() && !options.relink && !matches!(command, CliCommand::Relink) {
+        return Err("--threads works only with relink or sync s2l/bi --relink".to_string());
+    }
 
     Ok((command, options))
 }
@@ -245,7 +258,8 @@ fn run_relink(options: CliOptions) -> anyhow::Result<()> {
     live_guard::check_write(&files)?;
     ensure_stable_closed()?;
 
-    let relinker = Relinker::new(&songs, &files, Relinker::default_cache(&songs));
+    let relinker =
+        Relinker::new(&songs, &files, Relinker::default_cache(&songs)).threads(options.threads);
     let show_progress = !options.json;
     let report = relinker.run(&mut |done, total| {
         if show_progress && (done % 1000 == 0 || done == total) {
@@ -460,6 +474,7 @@ fn run_sync(
 
     let mut builder = SyncEngineBuilder::new()
         .relink(options.relink)
+        .relink_threads(options.threads)
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
@@ -674,6 +689,9 @@ pub fn print_help() {
     println!("    --json                      Output in JSON format");
     println!(
         "    --relink                    After sync s2l or bi, relink stable copies to lazer's files"
+    );
+    println!(
+        "    --threads <n>               Threads for relink (default: a quarter of the CPUs, 1 to 4)"
     );
     println!("    --stable-path <dir>         Use this osu!stable folder");
     println!("    --lazer-path <dir>          Use this osu!lazer data folder");
@@ -974,6 +992,50 @@ mod tests {
         ] {
             let (_, options) = parse_args(&strings(args)).unwrap();
             assert!(options.relink, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn threads_flag_sets_the_relink_thread_count() {
+        let (_, options) = parse_args(&strings(&["relink", "--threads", "2"])).unwrap();
+        assert_eq!(options.threads, NonZeroUsize::new(2));
+        let (_, options) =
+            parse_args(&strings(&["sync", "s2l", "--relink", "--threads", "32"])).unwrap();
+        assert_eq!(options.threads, NonZeroUsize::new(32));
+        let (_, options) = parse_args(&strings(&["relink"])).unwrap();
+        assert_eq!(options.threads, None);
+    }
+
+    #[test]
+    fn threads_flag_rejects_zero_words_and_commands_that_do_not_relink() {
+        for (args, error) in [
+            (
+                &["relink", "--threads", "0"][..],
+                "--threads needs a whole number of 1 or more, not '0'",
+            ),
+            (
+                &["relink", "--threads", "four"],
+                "--threads needs a whole number of 1 or more, not 'four'",
+            ),
+            (
+                &["relink", "--threads", "-1"],
+                "--threads needs a whole number of 1 or more, not '-1'",
+            ),
+            (&["relink", "--threads"], "--threads requires a value"),
+            (
+                &["sync", "s2l", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+            (
+                &["scan", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+            (
+                &["dry-run", "s2l", "--threads", "2"],
+                "--threads works only with relink or sync s2l/bi --relink",
+            ),
+        ] {
+            assert_eq!(parse_args(&strings(args)).unwrap_err(), error, "{args:?}");
         }
     }
 
