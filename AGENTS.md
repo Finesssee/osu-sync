@@ -30,7 +30,7 @@ osu-sync/
 | Lazer DB queries | `core/src/lazer/database.rs` | Runs tools/realm-export (.NET 8) |
 | Stable DB queries | `core/src/lazer/database.rs` | StableDatabase uses osu-db crate |
 | Add widget | `cli/src/widgets/` | Reusable TUI components |
-| Unified storage | `core/src/unified/` | Symlink/junction logic |
+| Unified storage | `core/src/unified/` | Linked store: hard links into lazer's files |
 | Media extraction | `core/src/media/` | Audio + background extraction |
 | Replay export | `core/src/replay/` | .osr file handling |
 | Backup/restore | `core/src/backup/` | Archive operations |
@@ -54,7 +54,7 @@ osu-sync/
 | `stable` | StableScanner, StableExporter |
 | `stats` | StatsAnalyzer, comparison, export (JSON/CSV/HTML) |
 | `sync` | SyncEngine, DryRun, ConflictResolver |
-| `unified` | UnifiedStorageEngine, file watcher, game detection |
+| `unified` | UnifiedStorageEngine (linked store), watcher, game detection |
 
 ### CLI Architecture
 
@@ -130,11 +130,11 @@ cargo run -- --gui             # GUI mode (requires feature)
 
 ## NOTES
 
-- **Windows Focus**: Primary platform, junctions for symlinks
+- **Windows Focus**: Primary platform, NTFS hard links for unified storage
 - **Lazer File Store**: Content-addressed by SHA256 hash
 - **Stable Songs Format**: `{SetID} Artist - Title/` folders
 - **First Scan Slow**: Computes hashes, cached for subsequent runs
-- **Game Detection**: Blocks unified storage ops while game running
+- **Game Detection**: Unified storage waits while osu!stable runs
 
 ## PERFORMANCE
 

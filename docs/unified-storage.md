@@ -1,273 +1,94 @@
-# Unified Storage Feature
+# Unified storage
 
-## Overview
+Unified storage lets osu!stable and osu!lazer share one copy of each beatmap file.
+osu-sync builds stable's `Songs` folder out of hard links into lazer's `files` store.
+This is the linked store, and it is the only unified storage mode. The other choice
+is disabled.
 
-The Unified Storage feature allows users to combine osu!stable and osu!lazer installations into a shared folder structure using symlinks/junctions. This saves disk space and keeps both installations in sync automatically.
+## Requirements
 
-## User Requirements
+- Songs and lazer's `files` folder must be on the same NTFS volume. Hard links cannot
+  cross volumes. On different volumes, setup still writes missing sets, but as plain
+  copies, and relinking skips every file.
+- osu!stable must be closed while the step runs. Stable rewrites Songs and `osu!.db`
+  while it is open, so the step refuses to start and the watcher waits.
+- Songs and `files` must be real folders. If an older osu-sync version replaced either
+  with a junction or symbolic link, the step refuses to run and changes nothing.
 
-| Requirement | Implementation |
-|-------------|----------------|
-| Source modes | Stable Master, Lazer Master, True Unified |
-| Resources | Beatmaps, Skins, Replays, Screenshots, Exports, Backgrounds |
-| Sync triggers | File watcher + Manual trigger + On game launch |
-| Mechanism | Symlinks/Junctions (not file copying) |
+## What the step does
 
-## Architecture
+Setup, `unified watch` and "sync now" all run the same step, and a rerun with nothing
+new changes nothing.
 
-### Core Module Structure
+1. Read lazer's library through the realm export helper.
+2. Write every lazer set stable lacks into Songs as `{OnlineID} Artist - Title`.
+   Audio, images, video and storyboard assets become hard links to lazer's blobs.
+   `.osu` and `.osb` files are copied, because stable rewrites them in place.
+3. Relink: stable files that are byte-for-byte copies of a lazer blob become hard
+   links to that blob. `.osu`, `.osb` and other files stable writes stay copies.
 
-```
-crates/osu-sync-core/src/unified/
-├── mod.rs           # Module exports and documentation
-├── config.rs        # Configuration types
-├── manifest.rs      # Link tracking manifest
-├── link.rs          # Platform-specific symlink/junction operations
-├── engine.rs        # UnifiedStorageEngine orchestration
-├── watcher.rs       # File system watcher (notify crate)
-├── game_detect.rs   # Game launch detection
-└── migration.rs     # Migration from separate to unified
-```
+The step never changes lazer's store, lazer's realm or `osu!.db`.
 
-### CLI Screens
+## What each game sees
 
-```
-crates/osu-sync-cli/src/screens/
-├── unified_config.rs   # Configuration UI
-├── unified_setup.rs    # Setup progress screen
-└── unified_status.rs   # Status dashboard
-```
+- osu!stable sees normal folders in Songs. New sets show up once stable reloads
+  Songs. Editing a `.osu` file changes only stable's copy.
+- osu!lazer sees no change. Its blobs keep their names and content. A linked blob just
+  has a second name in Songs.
+- Deleting a set in either game removes only that game's name for the files. The data
+  stays on disk while the other game still links to it.
 
-## Storage Modes
+## Commands
 
-### 1. Disabled (Default)
-- Standard copy-based sync
-- Files are duplicated between installations
-- No symlinks or junctions created
-
-### 2. Stable as Master
-- Beatmaps live in stable's `Songs/` folder
-- Lazer imports from stable via `.osz` files in import folder
-- New stable beatmaps trigger lazer import automatically
-
-### 3. Lazer as Master
-- Beatmaps extracted from lazer's hash store to shared folder
-- Junctions created from stable's `Songs/` to shared folder
-- New lazer beatmaps get extracted and linked
-
-### 4. True Unified
-- New shared folder structure created:
-  ```
-  /shared/osu-unified/
-  ├── beatmaps/{SetID} Artist - Title/
-  ├── skins/SkinName/
-  ├── replays/
-  └── screenshots/
-  ```
-- Stable's `Songs/` becomes junction to `shared/beatmaps/`
-- Lazer uses import folder approach or hash-links
-
-## Windows Symlink Strategy
-
-The implementation uses a cascading approach for maximum compatibility:
-
-1. **Prefer NTFS Junctions** (directories) - No admin rights needed
-2. **Try Symlinks** (files) - May require Developer Mode
-3. **Request Elevation** (UAC prompt) - If symlinks fail
-4. **Fallback to Copy** - With warning if user declines elevation
-
-```rust
-pub enum LinkCapability {
-    Full,           // Can create all link types
-    JunctionsOnly,  // Can only create junctions (Windows non-admin)
-    None,           // Cannot create any links
-}
-```
-
-## Key Data Structures
-
-### UnifiedStorageConfig
-
-```rust
-pub struct UnifiedStorageConfig {
-    pub mode: UnifiedStorageMode,
-    pub shared_path: Option<PathBuf>,
-    pub shared_resources: HashSet<SharedResourceType>,
-    pub triggers: SyncTriggers,
-    pub use_junctions: bool,
-    pub track_manifest: bool,
-}
-```
-
-### SyncTriggers
-
-```rust
-pub struct SyncTriggers {
-    pub file_watcher: bool,      // Background monitoring
-    pub on_game_launch: bool,    // Sync when game starts
-    pub manual: bool,            // Manual trigger only
-    pub watcher_interval_secs: u64,
-}
-```
-
-### UnifiedManifest
-
-Tracks all created links for verification and repair:
-
-```rust
-pub struct LinkedResource {
-    pub resource_type: SharedResourceType,
-    pub source_path: PathBuf,
-    pub link_paths: Vec<PathBuf>,
-    pub content_hash: Option<String>,
-    pub status: LinkStatus,  // Active, Broken, Stale, Pending
-}
-```
-
-## File Watcher
-
-Uses the `notify` crate for cross-platform file watching:
-
-- Debounces events to avoid duplicate processing
-- Filters temporary files (.tmp, .partial, etc.)
-- Configurable polling interval
-- Events: Created, Modified, Deleted, Renamed
-
-## Game Launch Detection
-
-Cross-platform process detection:
-
-| Platform | Method |
-|----------|--------|
-| Windows | Win32 ProcessStatus APIs via `sysinfo` |
-| Linux | `/proc` filesystem |
-| macOS | `sysinfo` crate |
-
-Detects:
-- `osu!.exe` (stable)
-- `osu!lazer.exe` or `osu!.exe` in lazer directory
-
-## Migration System
-
-### Migration Steps
-
-1. `CheckPrerequisites` - Verify games closed, disk space, permissions
-2. `CreateSharedFolder` - Create unified directory structure
-3. `BackupOriginal` - Create backup manifest
-4. `CopyBeatmaps` - Copy files to shared location
-5. `CreateJunctions` - Create symlinks/junctions
-6. `UpdateManifest` - Record all links
-7. `VerifyIntegrity` - Validate both games can access files
-8. `CleanupBackups` - Remove temporary files
-
-### Rollback Support
-
-If migration fails at any step, the system can rollback:
-- Remove created junctions/symlinks
-- Restore original folder structure
-- Clear migration manifest
-
-## Dependencies Added
-
-```toml
-# File watching
-notify = "6"
-notify-debouncer-mini = "0.4"
-
-# Process detection
-sysinfo = "0.30"
-
-# Windows-specific
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.54", features = [
-    "Win32_System_ProcessStatus",
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_Storage_FileSystem",
-] }
-```
-
-## Error Handling
-
-New error variants added:
-
-```rust
-#[error("Unified storage error: {0}")]
-UnifiedStorage(String),
-
-#[error("Failed to create symlink/junction from {source} to {link}: {message}")]
-LinkCreation { source: PathBuf, link: PathBuf, message: String },
-
-#[error("Symlink/junction is broken: {path}")]
-BrokenLink { path: PathBuf },
-
-#[error("Elevated privileges required for symlink creation")]
-ElevationRequired,
-
-#[error("Game is currently running: {game}")]
-GameRunning { game: String },
-
-#[error("Migration failed at step '{step}': {message}")]
-MigrationFailed { step: String, message: String },
-
-#[error("File watcher error: {0}")]
-WatcherError(String),
-
-#[error("Manifest error: {0}")]
-ManifestError(String),
-```
-
-## UI Screens
-
-### Configuration Screen
-- Mode selection with radio buttons
-- Shared folder path input (for TrueUnified)
-- Resource type checkboxes
-- Sync trigger toggles
-- Apply/Cancel buttons
-
-### Setup Progress Screen
-- Current operation display
-- Progress bar with percentage
-- Bytes processed / total
-- Log of completed steps
-- Cancel button
-
-### Status Dashboard
-- Current mode display
-- Link health gauge (active/broken/stale)
-- Storage statistics (space used/saved)
-- Recent sync events
-- Quick actions: Verify, Repair, Sync Now, Configure
-
-## Future Enhancements
-
-1. **Headless CLI Commands** - Expose unified storage actions via CLI flags
-2. **Cross-Platform Validation** - Expand automated tests for Linux/macOS
-3. **Background Health Checks** - Periodic verify/repair scheduling
-
-## Testing
-
-Run tests with:
 ```bash
-cargo test -p osu-sync-core unified
+osu-sync --cli unified setup     # Run the step once, then save the linked-store mode
+osu-sync --cli unified status    # Count linked and copied files in Songs
+osu-sync --cli unified watch     # Run the step when lazer's realm or Songs changes
+osu-sync --cli unified disable   # Save the disabled mode; changes no files
 ```
 
-## Implementation Status
+`--threads <n>` sets relink threads for setup and watch. `--json` prints JSON.
+With `--stable-path` or `--lazer-path` set, the mode is not saved to the config file.
 
-| Component | Status |
-|-----------|--------|
-| Core module structure | ✅ Complete |
-| Configuration types | ✅ Complete |
-| Manifest tracking | ✅ Complete |
-| Link operations | ✅ Complete |
-| Storage engine | ✅ Complete |
-| File watcher | ✅ Complete |
-| Game detection | ✅ Complete |
-| Migration system | ✅ Complete |
-| Config screen | ✅ Complete |
-| Setup screen | ✅ Complete |
-| Status screen | ✅ Complete |
-| Main menu integration | ✅ Complete |
-| Worker integration | ✅ Complete |
-| Full app integration | ✅ Complete |
+In the TUI, the Unified Storage screen offers the linked store and disabled. Its status
+screen shows linked files, copied files and bytes saved.
+
+## Status
+
+Status reads the NTFS link count of every file in Songs. There is no manifest.
+
+- Linked files have two or more links.
+- Copied files have one link: `.osu` and `.osb` files, stable-only sets and fallbacks.
+- Bytes saved is the total size of linked files, which are stored once instead of twice.
+
+A link count of two or more shows that the file shares its data with another name. It
+does not prove the other name is in lazer's store.
+
+## Watcher
+
+`unified watch` runs one catch-up step, then watches Songs recursively and the folder
+that holds lazer's `client.realm`. Lazer commits a new set to the realm after writing its
+blobs, so the watcher follows the realm, not `files`. After a change, the step runs once
+changes stop for a quiet second, and at most `watcher_interval_secs` (default 5) after
+the first change.
+
+The watcher ignores temp files and realm events without a new realm commit. It drops
+changes that arrive while a step runs, and treats Songs changes in the two seconds after
+a step as the step's own writes. Each step stamps the realm's modified time and size right
+before it reads the realm, so a commit made during a step still gets its own step. While
+osu!stable runs, the watcher logs why it waits and retries after the interval. The
+watcher runs only from the CLI; the TUI has no watcher.
+
+## Disable
+
+Disable saves the disabled mode and touches no files. Linked files stay readable from
+both games. To stop sharing a file's data, delete one of its names.
+
+## Upgrading from the junction modes
+
+Older versions had StableMaster, LazerMaster and TrueUnified modes, which moved folders
+and made junctions. Configs with those modes, or a mode osu-sync does not know, load as
+disabled with a notice. The junctions and the records those versions wrote
+(`.osu-sync-migration.json` in the stable folder and `unified-manifest.json` in the
+osu-sync config folder) are left in place, and status and setup name them. Sharing
+skins, replays and screenshots ended with those modes.
