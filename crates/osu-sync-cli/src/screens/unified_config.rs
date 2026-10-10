@@ -50,12 +50,19 @@ impl UnifiedConfigScreen {
         UnifiedStorageMode::ALL[self.selected]
     }
 
+    /// Moving and Enter wait until the worker reports the saved mode, so a key press
+    /// before that cannot start setup from the default selection.
     pub fn handle_key(&mut self, key: KeyCode) -> Option<ConfigAction> {
         let last = UnifiedStorageMode::ALL.len() - 1;
+        let loaded = self.current.is_some();
         match key {
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
-            KeyCode::Enter => {
+            KeyCode::Up | KeyCode::Char('k') if loaded => {
+                self.selected = self.selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') if loaded => {
+                self.selected = (self.selected + 1).min(last)
+            }
+            KeyCode::Enter if loaded => {
                 return Some(match self.selected_mode() {
                     UnifiedStorageMode::LinkedStore => ConfigAction::EnableLinkedStore,
                     UnifiedStorageMode::Disabled => ConfigAction::Disable,
@@ -68,6 +75,8 @@ impl UnifiedConfigScreen {
         None
     }
 }
+
+const LOADING: &str = "Loading the saved mode; this waits for any running job to finish.";
 
 pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
     let block = Block::default()
@@ -117,7 +126,15 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
         chunks[0],
     );
 
-    let mut lines = vec![
+    let mut lines = Vec::new();
+    if screen.current.is_none() {
+        lines.push(Line::from(Span::styled(
+            LOADING,
+            Style::default().fg(WARNING),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.extend([
         Line::from(Span::styled(
             "Linked store: Songs gets hard links into lazer's files folder. Both folders must be on one NTFS volume.",
             Style::default().fg(TEXT),
@@ -126,7 +143,7 @@ pub fn render(frame: &mut Frame, area: Rect, screen: &UnifiedConfigScreen) {
             ".osu and .osb files are copies, so stable can edit them. Setup changes nothing in lazer.",
             Style::default().fg(TEXT),
         )),
-    ];
+    ]);
     if let Some(notice) = &screen.notice {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -169,5 +186,36 @@ mod tests {
         );
         screen.handle_key(KeyCode::Up);
         assert_eq!(screen.selected_mode(), UnifiedStorageMode::LinkedStore);
+    }
+
+    fn rendered(screen: &UnifiedConfigScreen) -> String {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), screen))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn keys_wait_for_the_saved_mode_and_the_screen_says_so() {
+        let mut screen = UnifiedConfigScreen::new();
+        assert_eq!(screen.handle_key(KeyCode::Enter), None);
+        assert_eq!(screen.handle_key(KeyCode::Down), None);
+        assert_eq!(screen.selected, 0);
+        assert!(rendered(&screen).contains(LOADING));
+        assert_eq!(screen.handle_key(KeyCode::Esc), Some(ConfigAction::Back));
+
+        screen.set_saved(UnifiedStorageMode::LinkedStore, None);
+        assert!(!rendered(&screen).contains(LOADING));
+        assert_eq!(
+            screen.handle_key(KeyCode::Enter),
+            Some(ConfigAction::EnableLinkedStore)
+        );
     }
 }
