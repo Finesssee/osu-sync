@@ -946,6 +946,23 @@ fn create_temp(folder: &Path) -> io::Result<(PathBuf, File)> {
     }
 }
 
+/// Writes `content` to `dest` through a temp file in the same folder that then
+/// replaces `dest`. An existing `dest` that is a hard link to a lazer blob loses that
+/// name instead of having the shared data rewritten.
+pub(crate) fn write_replacing(dest: &Path, content: &mut dyn Read) -> io::Result<u64> {
+    let folder = dest.parent().unwrap_or(Path::new("."));
+    let (temp, mut out) = create_temp(folder)?;
+    let written = io::copy(content, &mut out).and_then(|n| out.sync_all().map(|()| n));
+    drop(out);
+    match written.and_then(|n| fs::rename(&temp, dest).map(|()| n)) {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            let _ = fs::remove_file(&temp);
+            Err(e)
+        }
+    }
+}
+
 fn copy_hashing(src: &Path, out: &mut File) -> io::Result<(String, String)> {
     let mut input = File::open(src)?;
     let mut sha = Sha256::new();

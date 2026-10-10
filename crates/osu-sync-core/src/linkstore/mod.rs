@@ -10,4 +10,4 @@ mod relink;
 pub use materialize::*;
 pub use relink::*;
 
-pub(crate) use materialize::is_temp_name;
+pub(crate) use materialize::{is_temp_name, write_replacing};

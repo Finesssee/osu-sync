@@ -1,6 +1,7 @@
 //! Archive creation and extraction for backups
 
 use crate::error::{Error, Result};
+use crate::linkstore::write_replacing;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -476,10 +477,7 @@ pub fn extract_backup_archive(
                 }
             }
 
-            // Extract file
-            let mut outfile = File::create(&outpath)?;
-            let bytes = std::io::copy(&mut file, &mut outfile)?;
-            bytes_written += bytes;
+            bytes_written += write_replacing(&outpath, &mut file)?;
         }
 
         files_processed += 1;
