@@ -15,7 +15,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -258,8 +258,7 @@ fn run_relink(options: CliOptions) -> anyhow::Result<()> {
     live_guard::check_write(&files)?;
     ensure_stable_closed()?;
 
-    let relinker =
-        Relinker::new(&songs, &files, Relinker::default_cache(&songs)).threads(options.threads);
+    let relinker = relinker(&songs, &files, &options);
     let show_progress = !options.json;
     let report = relinker.run(&mut |done, total| {
         if show_progress && (done % 1000 == 0 || done == total) {
@@ -271,6 +270,11 @@ fn run_relink(options: CliOptions) -> anyhow::Result<()> {
     }
     print_relink_report(&report, options);
     relink_failures(&report)
+}
+
+/// The relinker `relink` runs, from `songs` onto `files` with the cache for `songs`.
+fn relinker(songs: &Path, files: &Path, options: &CliOptions) -> Relinker {
+    Relinker::new(songs, files, Relinker::default_cache(songs)).threads(options.threads)
 }
 
 /// A relink with any file that failed exits nonzero, after its report is printed.
@@ -435,6 +439,13 @@ fn run_dry_run(
     Ok(())
 }
 
+/// The sync engine builder with the relink settings from `options`.
+fn sync_builder(options: &CliOptions) -> SyncEngineBuilder {
+    SyncEngineBuilder::new()
+        .relink(options.relink)
+        .relink_threads(options.threads)
+}
+
 fn run_sync(
     direction: SyncDirection,
     set_ids: Option<HashSet<i32>>,
@@ -472,9 +483,7 @@ fn run_sync(
         Box::new(|_| {})
     };
 
-    let mut builder = SyncEngineBuilder::new()
-        .relink(options.relink)
-        .relink_threads(options.threads)
+    let mut builder = sync_builder(&options)
         .config(config)
         .stable_scanner(scanner)
         .lazer_database(database)
@@ -1004,6 +1013,24 @@ mod tests {
         assert_eq!(options.threads, NonZeroUsize::new(32));
         let (_, options) = parse_args(&strings(&["relink"])).unwrap();
         assert_eq!(options.threads, None);
+    }
+
+    #[test]
+    fn threads_flag_reaches_the_relinker_and_the_sync_engine() {
+        // Building a relinker touches no file, so the folders need not exist.
+        let dir = Path::new("not-there");
+        for (threads, expected) in [("7", 7), ("32", 32), ("1", 1)] {
+            let (_, options) = parse_args(&strings(&["relink", "--threads", threads])).unwrap();
+            let r = relinker(&dir.join("Songs"), &dir.join("files"), &options);
+            assert_eq!(r.thread_count(), expected);
+
+            let (_, options) =
+                parse_args(&strings(&["sync", "s2l", "--relink", "--threads", threads])).unwrap();
+            assert_eq!(
+                sync_builder(&options).requested_relink_threads(),
+                NonZeroUsize::new(expected)
+            );
+        }
     }
 
     #[test]

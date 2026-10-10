@@ -938,15 +938,18 @@ impl SyncEngine {
         let run = || -> Result<RelinkReport> {
             ensure_stable_closed()?;
             let songs = self.stable_songs()?;
-            let files = self.lazer_database.file_store().files_path();
-            Relinker::new(&songs, files, Relinker::default_cache(&songs))
-                .threads(self.relink_threads)
-                .run(&mut |_, _| {})
+            self.relinker(&songs).run(&mut |_, _| {})
         };
         match run() {
             Ok(report) => relink_notes(report),
             Err(e) => vec![format!("relink skipped: {e}")],
         }
+    }
+
+    /// The relinker for the relink after an import, from `songs` onto lazer's files.
+    fn relinker(&self, songs: &Path) -> Relinker {
+        let files = self.lazer_database.file_store().files_path();
+        Relinker::new(songs, files, Relinker::default_cache(songs)).threads(self.relink_threads)
     }
 
     fn stable_songs(&self) -> Result<std::path::PathBuf> {
@@ -1117,6 +1120,11 @@ impl SyncEngineBuilder {
         self
     }
 
+    /// The relink threads set with [`Self::relink_threads`]
+    pub fn requested_relink_threads(&self) -> Option<NonZeroUsize> {
+        self.relink_threads
+    }
+
     /// Build the sync engine
     pub fn build(self) -> Result<SyncEngine> {
         let config = self.config.ok_or(Error::MissingComponent {
@@ -1213,6 +1221,32 @@ mod tests {
                 r"relink failed: D:\osu-sync-sandbox\x\a.mp3: denied",
             ]
         );
+    }
+
+    #[test]
+    fn relink_threads_set_on_the_builder_reach_the_relinker() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = |threads| {
+            SyncEngineBuilder::new()
+                .relink(true)
+                .relink_threads(threads)
+                .config(Config::default())
+                .stable_scanner(StableScanner::new(dir.path().join("Songs")))
+                .lazer_database(LazerDatabase::empty(dir.path()))
+                .build()
+                .unwrap()
+        };
+        let songs = dir.path().join("Songs");
+        for (threads, expected) in [(7, 7), (32, 32), (1, 1)] {
+            assert_eq!(
+                SyncEngineBuilder::new()
+                    .relink_threads(NonZeroUsize::new(threads))
+                    .requested_relink_threads(),
+                NonZeroUsize::new(expected)
+            );
+            let engine = build(NonZeroUsize::new(threads));
+            assert_eq!(engine.relinker(&songs).thread_count(), expected);
+        }
     }
 
     #[test]

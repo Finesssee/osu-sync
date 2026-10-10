@@ -185,6 +185,7 @@ pub struct Relinker {
     files: PathBuf,
     cache: Option<PathBuf>,
     threads: usize,
+    hash: fn(&Path) -> io::Result<String>,
     link: fn(&Path, &Path) -> io::Result<()>,
     same_volume: fn(&Path, &Path) -> io::Result<bool>,
 }
@@ -203,6 +204,7 @@ impl Relinker {
             files: files.into(),
             cache,
             threads: relink_threads(None, logical_cpus()),
+            hash: sha256,
             link: |src, dst| fs::hard_link(src, dst),
             same_volume,
         }
@@ -212,6 +214,11 @@ impl Relinker {
     pub fn threads(mut self, requested: Option<NonZeroUsize>) -> Self {
         self.threads = relink_threads(requested, logical_cpus());
         self
+    }
+
+    /// The number of threads a run uses.
+    pub fn thread_count(&self) -> usize {
+        self.threads
     }
 
     /// The hash cache file for `songs` in the per-user osu-sync cache folder.
@@ -437,7 +444,7 @@ impl Relinker {
         if let Some(sha) = cached {
             c.sha = sha.to_string();
         } else {
-            match sha256(&c.stable) {
+            match (self.hash)(&c.stable) {
                 Ok(sha) => {
                     c.sha = sha;
                     c.hashed = true;
@@ -1671,6 +1678,38 @@ mod tests {
 
         assert_eq!(report.relinked, 1);
         assert_eq!(SEEN.load(Ordering::SeqCst), 3);
+        assert!(same(&stable, &blob));
+    }
+
+    #[test]
+    fn relink_hashes_in_its_own_pool_of_the_requested_size() {
+        static SEEN: Mutex<Vec<(usize, Option<String>)>> = Mutex::new(Vec::new());
+        let fx = Fixture::new();
+        let blob = fx.blob(AUDIO);
+        let stable = fx.stable("1 A - B/audio.mp3", AUDIO);
+        let mut r = fx.relinker().threads(NonZeroUsize::new(3));
+        r.hash = |path| {
+            let thread = std::thread::current().name().map(str::to_string);
+            SEEN.lock()
+                .unwrap()
+                .push((rayon::current_num_threads(), thread));
+            sha256(path)
+        };
+
+        let report = run(&r);
+
+        assert_eq!(report.hashed_files, 1);
+        assert_eq!(report.relinked, 1);
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, 3);
+        assert!(
+            matches!(
+                seen[0].1.as_deref(),
+                Some("osu-sync-relink-0" | "osu-sync-relink-1" | "osu-sync-relink-2")
+            ),
+            "{seen:?}"
+        );
         assert!(same(&stable, &blob));
     }
 
