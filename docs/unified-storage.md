@@ -37,6 +37,11 @@ The step never changes lazer's store, lazer's realm or `osu!.db`.
   has a second name in Songs.
 - Deleting a set in either game removes only that game's name for the files. The data
   stays on disk while the other game still links to it.
+- Editing a linked Songs asset in place (an audio file, background or video) also
+  changes lazer's copy, because both names point at the same data. To change an asset
+  for stable only, save the edited file under a new name, then rename it over the old
+  one. That replaces the Songs name and leaves lazer's blob as it was. Restoring a Songs
+  backup with osu-sync works this way.
 
 ## Commands
 
@@ -49,6 +54,8 @@ osu-sync --cli unified disable   # Save the disabled mode; changes no files
 
 `--threads <n>` sets relink threads for setup and watch. `--json` prints JSON.
 With `--stable-path` or `--lazer-path` set, the mode is not saved to the config file.
+`unified watch` runs whatever mode is saved, disabled included, and does not save a
+mode. Each step it runs writes to Songs just as setup does.
 
 In the TUI, the Unified Storage screen offers the linked store and disabled. Its status
 screen shows linked files, copied files and bytes saved.
@@ -76,9 +83,12 @@ while idle the watcher reads the realm's size, modified time and header once per
 After a change, the step runs once changes stop for a quiet second, and at most
 `watcher_interval_secs` (default 5) after the first change.
 
-The watcher ignores temp files and realm events without a new realm commit. It drops
-changes that arrive while a step runs, and treats Songs and `files` changes in the two
-seconds after a step as the step's own writes. Each step stamps the realm right before it
+The watcher ignores temp files and realm events without a new realm commit. A step's
+own writes to Songs and `files` raise change events while it runs and in the two seconds
+after it. The watcher cannot tell those from a change made by a game, so after any Songs
+or `files` change in that window it runs one confirming step once the two seconds pass.
+That step finds nothing new when the changes were its own, writes nothing and raises no
+events, so the watcher goes back to idle. Each step stamps the realm right before it
 reads the realm, so a commit made during a step still gets its own step. While
 osu!stable runs, the watcher logs why it waits and retries after the interval. The
 watcher runs only from the CLI; the TUI has no watcher.
@@ -96,3 +106,20 @@ disabled with a notice. The junctions and the records those versions wrote
 (`.osu-sync-migration.json` in the stable folder and `unified-manifest.json` in the
 osu-sync config folder) are left in place, and status and setup name them. Sharing
 skins, replays and screenshots ended with those modes.
+
+osu-sync no longer removes those junctions. Setup and watch refuse to run while Songs
+or lazer's `files` is one, and status refuses while Songs is one. Junctions on other
+folders (`Skins`, `Replays`, `Screenshots`, `Exports`, `Backgrounds`) stay until you
+remove them by hand. For each one, with both games closed:
+
+1. Run `dir /AL` in the folder that holds it (the stable or lazer folder) to list the
+   junctions and the folders they point to.
+2. Remove the junction with `rmdir "<folder>"`. Without `/s`, `rmdir` removes only the
+   link and leaves the folder it points to as it was.
+3. Rename `<folder>_backup`, the copy the old mode kept next to the junction, back to
+   `<folder>`. If you added files through the junction since then, copy them over from
+   the folder it pointed to.
+
+These are Command Prompt commands. Do not delete the files inside a junction, for
+example with `del /s "<folder>\*"` or by selecting its contents in Explorer. Those are
+the files of the folder it points to, which is the other game's copy or the shared copy.
