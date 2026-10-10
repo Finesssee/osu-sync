@@ -79,19 +79,24 @@ blobs into `files` as ordinary files, which raise change events. It then commits
 to the realm through a memory map, which changes neither the realm's modified time nor
 its size and raises no change event. Every commit rewrites the realm's 24-byte header, so
 while idle the watcher reads the realm's size, modified time and header once per interval
-(a shared read that never locks or writes the file), and a new header runs the step.
-After a change, the step runs once changes stop for a quiet second, and at most
-`watcher_interval_secs` (default 5) after the first change.
+on a fixed schedule that other events in lazer's folder do not delay (a shared read that
+never locks or writes the file), and a new header runs the step. After a change, the step
+runs once changes stop for a quiet second, and at most `watcher_interval_secs` (default 5)
+after the first change. A step never starts sooner than one interval after the previous
+step ended, so a long copy into Songs runs at most one step per interval.
 
 The watcher ignores temp files and realm events without a new realm commit. A step's
 own writes to Songs and `files` raise change events while it runs and in the two seconds
 after it. The watcher cannot tell those from a change made by a game, so after any Songs
-or `files` change in that window it runs one confirming step once the two seconds pass.
+or `files` change in that window it runs one confirming step once the two seconds pass
+and one interval has passed since the step ended.
 That step finds nothing new when the changes were its own, writes nothing and raises no
 events, so the watcher goes back to idle. Each step stamps the realm right before it
 reads the realm, so a commit made during a step still gets its own step. While
-osu!stable runs, the watcher logs why it waits and retries after the interval. The
-watcher runs only from the CLI; the TUI has no watcher.
+osu!stable runs, the watcher logs why it waits and retries after the interval. A step
+that fails for another reason does not mark the realm as seen, so the next realm read
+retries it when the realm changed since the last step that succeeded. The watcher runs
+only from the CLI; the TUI has no watcher.
 
 ## Disable
 
