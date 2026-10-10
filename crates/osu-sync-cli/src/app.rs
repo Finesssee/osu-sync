@@ -285,6 +285,11 @@ pub enum WorkerMessage {
     /// Saves the disabled mode. Changes no files.
     DisableUnifiedStorage,
     UpdateConfig(osu_sync_core::config::Config),
+    /// Replaces the install paths in the worker's config and keeps its other settings.
+    SetPaths {
+        stable: Option<std::path::PathBuf>,
+        lazer: Option<std::path::PathBuf>,
+    },
     Cancel,
     Shutdown,
 }
@@ -922,18 +927,14 @@ impl App {
                         });
                     }
 
-                    // Save config to disk
-                    let config = osu_sync_core::config::Config {
-                        stable_path: new_stable.clone().map(std::path::PathBuf::from),
-                        lazer_path: new_lazer.clone().map(std::path::PathBuf::from),
-                        duplicate_strategy: osu_sync_core::config::DuplicateStrategy::Ask,
-                        theme: theme::current_theme_name(),
-                        unified_storage: None,
-                    };
-                    let save_result = config.save();
+                    let stable = new_stable.clone().map(std::path::PathBuf::from);
+                    let lazer = new_lazer.clone().map(std::path::PathBuf::from);
+                    let save_result = osu_sync_core::config::Config::load()
+                        .with_paths(stable.clone(), lazer.clone())
+                        .save();
                     let _ = self
                         .worker_tx
-                        .send(WorkerMessage::UpdateConfig(config.clone()));
+                        .send(WorkerMessage::SetPaths { stable, lazer });
 
                     self.state = AppState::Config {
                         selected,

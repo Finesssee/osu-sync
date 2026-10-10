@@ -213,6 +213,11 @@ fn run_worker(
                     *guard = new_config;
                 }
             }
+            Ok(WorkerMessage::SetPaths { stable, lazer }) => {
+                if let Ok(mut guard) = config.write() {
+                    *guard = guard.clone().with_paths(stable, lazer);
+                }
+            }
             Ok(WorkerMessage::Cancel) => {
                 cancelled.store(true, Ordering::SeqCst);
             }
@@ -1189,6 +1194,41 @@ mod tests {
             .expect("Timed out waiting for UnifiedStorageStatus");
 
         match status {
+            AppMessage::UnifiedStorageStatus { mode, status, .. } => {
+                assert_eq!(mode, UnifiedStorageMode::LinkedStore);
+                assert_eq!(status, Err("osu!stable path not configured".to_string()));
+            }
+            other => panic!("Unexpected message: {:?}", other),
+        }
+
+        let _ = worker_tx.send(WorkerMessage::Shutdown);
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn new_paths_keep_the_workers_unified_mode() {
+        let (app_tx, app_rx) = mpsc::channel::<AppMessage>();
+        let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
+        let (_resolution_tx, resolution_rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let handle = thread::spawn(move || {
+            run_worker(worker_rx, app_tx, resolution_rx, cancelled);
+        });
+
+        let config = Config {
+            unified_storage: Some(UnifiedStorageConfig::linked_store()),
+            ..Config::default()
+        };
+        worker_tx.send(WorkerMessage::UpdateConfig(config)).unwrap();
+        worker_tx
+            .send(WorkerMessage::SetPaths {
+                stable: None,
+                lazer: None,
+            })
+            .unwrap();
+        worker_tx.send(WorkerMessage::GetUnifiedStatus).unwrap();
+
+        match app_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             AppMessage::UnifiedStorageStatus { mode, status, .. } => {
                 assert_eq!(mode, UnifiedStorageMode::LinkedStore);
                 assert_eq!(status, Err("osu!stable path not configured".to_string()));
