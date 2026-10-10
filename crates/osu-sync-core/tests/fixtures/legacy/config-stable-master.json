@@ -1,0 +1,22 @@
+{
+  "stable_path": "D:\\osu!",
+  "lazer_path": "D:\\osu!lazer",
+  "duplicate_strategy": "Ask",
+  "theme": "Default",
+  "unified_storage": {
+    "mode": "StableMaster",
+    "shared_path": null,
+    "shared_resources": [
+      "Beatmaps",
+      "Skins"
+    ],
+    "triggers": {
+      "file_watcher": true,
+      "on_game_launch": false,
+      "manual": true,
+      "watcher_interval_secs": 5
+    },
+    "use_junctions": true,
+    "track_manifest": true
+  }
+}

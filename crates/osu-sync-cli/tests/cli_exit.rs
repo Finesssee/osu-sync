@@ -109,3 +109,30 @@ fn help_lists_relink() {
     );
     assert_eq!(output.status.code(), Some(0));
 }
+
+fn stdout_of(args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_osu-sync"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn cli_help_lists_the_unified_commands() {
+    let help = stdout_of(&["--cli", "--help"]);
+    for line in [
+        "    unified setup               Link lazer's beatmaps into stable's Songs, then save the mode",
+        "    unified status              Count linked and copied files in Songs",
+        "    unified watch               Run the setup step whenever lazer or Songs changes",
+        "    unified disable             Turn unified storage off; changes no files",
+    ] {
+        assert!(help.lines().any(|l| l == line), "missing {line:?} in:\n{help}");
+    }
+    let main = stdout_of(&["--help"]);
+    assert!(main
+        .lines()
+        .any(|l| l == "    unified <action>        Linked-store setup, status, watch or disable"));
+    assert!(!main.contains("unified setup "));
+}

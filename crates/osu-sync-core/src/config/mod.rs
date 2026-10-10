@@ -179,6 +179,20 @@ impl Config {
         Ok(SaveOutcome::Saved)
     }
 
+    /// This config with new install paths and every other setting kept.
+    pub fn with_paths(self, stable_path: Option<PathBuf>, lazer_path: Option<PathBuf>) -> Self {
+        Self {
+            stable_path,
+            lazer_path,
+            ..self
+        }
+    }
+
+    /// The unified storage settings, or the defaults when none are saved.
+    pub fn unified(&self) -> UnifiedStorageConfig {
+        self.unified_storage.clone().unwrap_or_default()
+    }
+
     /// Get the Songs folder path for osu!stable
     pub fn stable_songs_path(&self) -> Option<PathBuf> {
         self.stable_path.as_ref().map(|p| p.join("Songs"))
@@ -197,5 +211,31 @@ impl Config {
     /// Get the Realm database path for osu!lazer
     pub fn lazer_realm_path(&self) -> Option<PathBuf> {
         self.lazer_path.as_ref().map(|p| p.join("client.realm"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::unified::UnifiedStorageConfig;
+
+    #[test]
+    fn new_paths_keep_the_other_settings() {
+        let config = Config {
+            stable_path: Some(PathBuf::from(r"C:\old\osu!")),
+            lazer_path: Some(PathBuf::from(r"C:\old\lazer")),
+            duplicate_strategy: DuplicateStrategy::Replace,
+            theme: ThemeName::Ocean,
+            unified_storage: Some(UnifiedStorageConfig::linked_store()),
+        };
+        let moved = config.with_paths(Some(PathBuf::from(r"D:\osu!")), None);
+        assert_eq!(moved.stable_path, Some(PathBuf::from(r"D:\osu!")));
+        assert_eq!(moved.lazer_path, None);
+        assert_eq!(moved.duplicate_strategy, DuplicateStrategy::Replace);
+        assert_eq!(moved.theme, ThemeName::Ocean);
+        assert_eq!(
+            moved.unified_storage,
+            Some(UnifiedStorageConfig::linked_store())
+        );
     }
 }

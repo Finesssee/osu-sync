@@ -10,7 +10,7 @@ pub use conflict::{
     AutoResolver, ConfigBasedResolver, ConflictResolver, InteractiveResolver, SmartResolver,
 };
 pub use direction::SyncDirection;
-pub use dry_run::{format_bytes, DryRunAction, DryRunItem, DryRunResult};
+pub use dry_run::{format_byte_count, format_bytes, DryRunAction, DryRunItem, DryRunResult};
 pub use engine::{
     ProgressCallback, SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress, SyncResult,
 };

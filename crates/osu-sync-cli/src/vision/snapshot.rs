@@ -333,7 +333,9 @@ impl TuiSnapshot {
                 replay_count: replays.len(),
                 loading: *loading,
             },
-            AppState::UnifiedConfig { .. } => StateData::UnifiedConfig { selected: 0 },
+            AppState::UnifiedConfig { screen } => StateData::UnifiedConfig {
+                selected: screen.selected,
+            },
             AppState::Help { previous_state } => StateData::Help {
                 previous_state: Self::get_state_name(previous_state),
             },

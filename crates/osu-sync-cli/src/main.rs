@@ -47,8 +47,9 @@ fn main() -> anyhow::Result<()> {
     osu_sync_core::config::set_path_overrides(flags.overrides);
     osu_sync_core::config::live_guard::set_allow_live(flags.allow_live);
 
-    // Check for --help
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    // --cli and --test print their own help
+    let has_mode = args.iter().any(|a| a == "--cli" || a == "--test");
+    if !has_mode && args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
         return Ok(());
     }
@@ -150,6 +151,7 @@ fn print_help() {
     println!("    dry-run <direction>     Preview what would be synced");
     println!("    sync <direction>        Perform sync");
     println!("    relink                  Hard-link stable copies of lazer files to them");
+    println!("    unified <action>        Linked-store setup, status, watch or disable");
     println!(
         "    --relink                After sync s2l or bi, relink stable copies to lazer's files"
     );

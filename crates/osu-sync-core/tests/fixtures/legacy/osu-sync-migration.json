@@ -1,0 +1,13 @@
+{
+  "created_at": 1791607269,
+  "stable_path": "D:\\osu!",
+  "lazer_path": "D:\\osu!lazer",
+  "mode": "LazerMaster",
+  "moved_paths": {
+    "D:\\osu!\\Songs": "D:\\osu!\\Songs.osu-sync-backup"
+  },
+  "created_links": [
+    "D:\\osu!\\Songs"
+  ],
+  "completed": true
+}

@@ -18,7 +18,7 @@ src/
 ├── stable/         # StableScanner, Importer/Exporter
 ├── stats/          # StatsAnalyzer, export formats
 ├── sync/           # SyncEngine, DryRun, conflicts
-├── unified/        # Unified storage (symlinks/junctions)
+├── unified/        # Unified storage (linked store: hard links)
 ├── activity.rs     # ActivityLog for recent operations
 ├── error.rs        # Error enum with thiserror
 └── lib.rs          # Public API re-exports
@@ -40,10 +40,11 @@ src/
 | Beatmap filtering | `filter/engine.rs` |
 | Statistics analysis | `stats/analyzer.rs` |
 | Export stats | `stats/export.rs` |
-| Create symlinks | `unified/link.rs` |
+| Hard-link errors | `unified/link.rs` |
+| Linked-store step | `unified/engine.rs` |
 | File watching | `unified/watcher.rs` |
 | Game detection | `unified/game_detect.rs` |
-| Migration | `unified/migration.rs` |
+| Old junction-mode records | `unified/manifest.rs` |
 
 ## CONVENTIONS
 
@@ -71,8 +72,8 @@ DuplicateInfo { source, existing, match_type }
 DuplicateStrategy { Skip, Overwrite, Ask }
 
 // Unified
-UnifiedStorageMode { Disabled, StableMaster, LazerMaster, TrueUnified }
-LinkType { Symlink, Junction, HardLink }
+UnifiedStorageMode { Disabled, LinkedStore }
+LinkedStoreStatus { linked_files, copied_files, bytes_saved, unreadable_files }
 ```
 
 ## ANTI-PATTERNS
@@ -86,5 +87,5 @@ LinkType { Symlink, Junction, HardLink }
 - **LazerDatabase** runs the `realm-export` helper (tools/realm-export) and parses its JSON
 - **StableDatabase** uses osu-db crate (read-only)
 - **LazerFileStore**: Files stored as `{hash[0..2]}/{hash}` in files directory
-- **Junctions on Windows**: Preferred over symlinks (no admin)
+- **Hard links on NTFS**: Songs and lazer's files must share a volume (no admin needed)
 - **SHA256 hashing**: Cached for performance

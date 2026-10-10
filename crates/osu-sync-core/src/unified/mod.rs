@@ -1,67 +1,36 @@
-//! Unified Storage Module
+//! Unified storage: stable's Songs folder built from hard links into lazer's `files` store.
 //!
-//! This module provides functionality to combine osu!stable and osu!lazer
-//! installations into a shared folder structure using symlinks/junctions.
-//!
-//! # Features
-//!
-//! - Three storage modes: StableMaster, LazerMaster, TrueUnified
-//! - Platform-specific link operations (junctions on Windows, symlinks on Unix)
-//! - File watching for automatic sync
-//! - Game launch detection for sync triggers
-//! - Migration tools for converting existing installations
-//!
-//! # Status: Work in Progress
-//!
-//! Some submodules are not yet implemented.
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use osu_sync_core::unified::{UnifiedStorageConfig, UnifiedWatcher, FileChangeEvent};
-//!
-//! // Create a file watcher
-//! let (mut watcher, rx) = UnifiedWatcher::new()?;
-//! watcher.watch(Path::new("/path/to/songs"))?;
-//!
-//! // Process events
-//! while let Ok(event) = rx.recv() {
-//!     match event {
-//!         FileChangeEvent::Created { path, .. } => println!("Created: {:?}", path),
-//!         FileChangeEvent::Modified { path } => println!("Modified: {:?}", path),
-//!         FileChangeEvent::Deleted { path } => println!("Deleted: {:?}", path),
-//!         FileChangeEvent::Renamed { from, to } => println!("Renamed: {:?} -> {:?}", from, to),
-//!     }
-//! }
-//! ```
+//! The linked store is the only mode. One step writes every lazer set stable lacks
+//! into Songs as hard links to lazer's blobs, then relinks stable copies of lazer
+//! blobs. Setup, the watcher and "sync now" run the same step, and a rerun with
+//! nothing new changes nothing. The junction modes of older versions are gone; their
+//! configs load as disabled, and the junctions and records they made stay in place.
 
 mod config;
 mod engine;
 mod game_detect;
 mod link;
 mod manifest;
-mod migration;
 mod watcher;
 
-pub use config::{SharedResourceType, SyncTriggers, UnifiedStorageConfig, UnifiedStorageMode};
-
-pub use migration::{
-    BackupManifest, MigrationPlan, MigrationProgress, MigrationResult, MigrationStep,
-    UnifiedMigration,
+pub use config::{
+    retired_mode_notice, save_mode, SyncTriggers, UnifiedStorageConfig, UnifiedStorageMode,
+    DISABLED_NOTE,
 };
 
-pub use watcher::{FileChangeEvent, UnifiedWatcher, WatcherEventHandler};
+pub use engine::{LinkedStoreStatus, StepPhase, StepReport, UnifiedStorageEngine};
 
+pub use manifest::legacy_notes;
+
+pub use watcher::{watch, WatchEvent, WatchTiming};
+
+// Kept public although nothing in the workspace uses most of it; shrinking
+// game_detect to the one check the linked store needs is a separate change.
 pub use game_detect::{
     find_running_processes, is_process_running, GameEvent, GameLaunchDetector, OsuGame, ProcessInfo,
 };
 
-pub use engine::{RepairResult, SetupResult, SyncResult, UnifiedStorageEngine, VerificationResult};
+pub(crate) use link::{classify_hard_link_error, rename_no_replace, same_volume, HardLinkFailure};
 
-pub use manifest::{LinkStatus, LinkedResource, ManifestSummary, UnifiedManifest};
-
-pub use link::{
-    classify_hard_link_error, copy_dir_recursive, rename_no_replace, same_volume, HardLinkFailure,
-    LinkCapability, LinkCheckInfo, LinkInfo, LinkManager, LinkType, CROSS_VOLUME_OS_ERROR,
-    LINK_LIMIT_OS_ERROR,
-};
+#[cfg(test)]
+pub(crate) use link::LINK_LIMIT_OS_ERROR;

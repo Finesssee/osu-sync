@@ -958,10 +958,7 @@ impl BackupManager {
                     }
                 }
 
-                // Extract file
-                let mut outfile = std::fs::File::create(&outpath)?;
-                let bytes = std::io::copy(&mut file, &mut outfile)?;
-                bytes_written += bytes;
+                bytes_written += crate::linkstore::write_replacing(&outpath, &mut file)?;
                 files_restored += 1;
             }
         }

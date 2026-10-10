@@ -183,9 +183,35 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// `bytes` with digit grouping, plus [`format_bytes`] from 1 KB up, such as
+/// "63,151,477 bytes (60.2 MB)".
+pub fn format_byte_count(bytes: u64) -> String {
+    let digits = bytes.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    if bytes < 1024 {
+        format!("{grouped} bytes")
+    } else {
+        format!("{grouped} bytes ({})", format_bytes(bytes))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_counts_are_grouped_with_a_short_size() {
+        assert_eq!(format_byte_count(0), "0 bytes");
+        assert_eq!(format_byte_count(1023), "1,023 bytes");
+        assert_eq!(format_byte_count(1536), "1,536 bytes (2 KB)");
+        assert_eq!(format_byte_count(63_151_477), "63,151,477 bytes (60.2 MB)");
+    }
 
     #[test]
     fn test_format_bytes() {

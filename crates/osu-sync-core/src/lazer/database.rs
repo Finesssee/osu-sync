@@ -247,6 +247,11 @@ impl LazerDatabase {
         &self.file_store
     }
 
+    /// The beatmap sets that are not pending deletion, without copying them.
+    pub fn sets(&self) -> &[LazerBeatmapSet] {
+        &self.sets
+    }
+
     /// Get all beatmap sets that are not pending deletion
     pub fn get_all_beatmap_sets(&self) -> Result<Vec<LazerBeatmapSet>> {
         Ok(self.sets.clone())

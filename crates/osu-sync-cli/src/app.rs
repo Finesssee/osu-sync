@@ -207,27 +207,26 @@ pub enum AppMessage {
     ReplayComplete(ReplayExportResult),
     // Unified storage
     UnifiedStorageProgress {
-        phase: String,
+        phase: StepPhase,
         current: usize,
         total: usize,
-        message: String,
     },
     UnifiedStorageComplete {
-        success: bool,
-        message: String,
-        links_created: usize,
-        space_saved: u64,
+        /// The report and what happened to the saved mode.
+        result: Result<(StepReport, String), String>,
     },
     UnifiedStorageStatus {
-        mode: String,
-        active_links: usize,
-        broken_links: usize,
-        space_saved: u64,
+        mode: UnifiedStorageMode,
+        status: Result<LinkedStoreStatus, String>,
+        notes: Vec<String>,
     },
-    UnifiedStorageVerifyComplete {
-        healthy: usize,
-        broken: usize,
-        repaired: usize,
+    UnifiedStorageDisabled {
+        message: String,
+    },
+    /// The worker's saved unified storage mode, with a note when a retired mode was saved.
+    UnifiedMode {
+        mode: UnifiedStorageMode,
+        notice: Option<String>,
     },
     Error(String),
 }
@@ -279,22 +278,23 @@ pub enum WorkerMessage {
         rename_pattern: Option<String>,
     },
     // Unified storage
-    StartUnifiedSetup {
-        mode: UnifiedStorageMode,
-        shared_path: Option<PathBuf>,
-        resources: Vec<SharedResourceType>,
-    },
+    /// Runs one linked-store step, then saves the linked-store mode.
+    StartUnifiedSetup,
     GetUnifiedStatus,
-    VerifyUnifiedLinks,
-    RepairUnifiedLinks,
+    GetUnifiedMode,
+    /// Saves the disabled mode. Changes no files.
     DisableUnifiedStorage,
     UpdateConfig(osu_sync_core::config::Config),
+    /// Replaces the install paths in the worker's config and keeps its other settings.
+    SetPaths {
+        stable: Option<std::path::PathBuf>,
+        lazer: Option<std::path::PathBuf>,
+    },
     Cancel,
     Shutdown,
 }
 
-/// Re-export unified storage types for worker messages
-pub use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
+use osu_sync_core::unified::{LinkedStoreStatus, StepPhase, StepReport, UnifiedStorageMode};
 
 /// Application state enum
 #[derive(Debug, Clone)]
@@ -927,18 +927,14 @@ impl App {
                         });
                     }
 
-                    // Save config to disk
-                    let config = osu_sync_core::config::Config {
-                        stable_path: new_stable.clone().map(std::path::PathBuf::from),
-                        lazer_path: new_lazer.clone().map(std::path::PathBuf::from),
-                        duplicate_strategy: osu_sync_core::config::DuplicateStrategy::Ask,
-                        theme: theme::current_theme_name(),
-                        unified_storage: None,
-                    };
-                    let save_result = config.save();
+                    let stable = new_stable.clone().map(std::path::PathBuf::from);
+                    let lazer = new_lazer.clone().map(std::path::PathBuf::from);
+                    let save_result = osu_sync_core::config::Config::load()
+                        .with_paths(stable.clone(), lazer.clone())
+                        .save();
                     let _ = self
                         .worker_tx
-                        .send(WorkerMessage::UpdateConfig(config.clone()));
+                        .send(WorkerMessage::SetPaths { stable, lazer });
 
                     self.state = AppState::Config {
                         selected,
@@ -1787,233 +1783,54 @@ impl App {
 
     /// Go to unified storage configuration screen
     fn go_to_unified_config(&mut self) {
-        use crate::screens::unified_config::UnifiedConfigScreen;
         self.state = AppState::UnifiedConfig {
-            screen: UnifiedConfigScreen::new(),
+            screen: crate::screens::unified_config::UnifiedConfigScreen::new(),
         };
+        let _ = self.worker_tx.send(WorkerMessage::GetUnifiedMode);
+    }
+
+    /// Show the setup screen and start one linked-store step.
+    fn start_unified_setup(&mut self) {
+        self.state = AppState::UnifiedSetup {
+            screen: crate::screens::unified_setup::UnifiedSetupScreen::new(),
+        };
+        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup);
     }
 
     /// Handle key events for unified config screen
     fn handle_unified_config_key(&mut self, key: KeyEvent) {
-        use crate::screens::unified_config::{ConfigAction, StorageMode};
+        use crate::screens::unified_config::ConfigAction;
 
-        // First, handle key and get action (without holding borrow)
-        let action = if let AppState::UnifiedConfig { screen } = &mut self.state {
-            screen.handle_key(key.code)
-        } else {
+        let AppState::UnifiedConfig { screen } = &mut self.state else {
             return;
         };
-
-        let Some(action) = action else { return };
-
+        let Some(action) = screen.handle_key(key.code) else {
+            return;
+        };
         match action {
-            ConfigAction::RequestConfirm => {
-                // Extract what we need for validation
-                let (mode, shared_path_empty) =
-                    if let AppState::UnifiedConfig { screen } = &self.state {
-                        (screen.mode, screen.shared_path.is_empty())
-                    } else {
-                        return;
-                    };
-
-                // Validate configuration first
-                if mode == StorageMode::TrueUnified && shared_path_empty {
-                    if let AppState::UnifiedConfig { screen } = &mut self.state {
-                        screen.status_message =
-                            Some("Please enter a shared path for True Unified mode".into());
-                    }
-                    return;
-                }
-
-                // Check for running games (doesn't borrow self.state)
-                let games_running = self.detect_running_games();
-
-                // Calculate dry run info - extract mode from state first
-                let screen_mode = if let AppState::UnifiedConfig { screen } = &self.state {
-                    screen.mode
-                } else {
-                    return;
+            ConfigAction::EnableLinkedStore => self.start_unified_setup(),
+            ConfigAction::Disable => {
+                screen.message = Some("Saving the disabled mode...".to_string());
+                let _ = self.worker_tx.send(WorkerMessage::DisableUnifiedStorage);
+            }
+            ConfigAction::ShowStatus => {
+                self.state = AppState::UnifiedStatus {
+                    screen: crate::screens::unified_status::UnifiedStatusScreen::new(),
                 };
-                let dry_run_info = self.calculate_unified_dry_run_for_mode(screen_mode);
-
-                // Show confirmation dialog
-                if let AppState::UnifiedConfig { screen } = &mut self.state {
-                    screen.show_confirmation(games_running, dry_run_info);
-                }
+                let _ = self.worker_tx.send(WorkerMessage::GetUnifiedStatus);
             }
-            ConfigAction::ConfirmApply => {
-                // Clone what we need from screen
-                let setup_params = if let AppState::UnifiedConfig { screen } = &self.state {
-                    Some((
-                        screen.mode,
-                        screen.shared_path.clone(),
-                        screen.shared_resources.clone(),
-                    ))
-                } else {
-                    None
-                };
-
-                if let Some((mode, shared_path, resources)) = setup_params {
-                    self.start_unified_setup_with_params(mode, shared_path, resources);
-                }
-            }
-            ConfigAction::CancelConfirm => {
-                // Just close dialog, stay on config screen
-                if let AppState::UnifiedConfig { screen } = &mut self.state {
-                    screen.status_message = Some("Setup cancelled".into());
-                }
-            }
-            ConfigAction::Cancel => {
+            ConfigAction::Back => {
                 self.state = AppState::MainMenu { selected: 8 };
             }
         }
     }
 
-    /// Detect running osu! game processes
-    fn detect_running_games(&self) -> Vec<String> {
-        let mut running = Vec::new();
-
-        // Check for osu!stable
-        if Self::is_process_running("osu!.exe") {
-            running.push("osu!stable (osu!.exe)".to_string());
-        }
-
-        // Check for osu!lazer
-        if Self::is_process_running("osu!.exe") || Self::is_process_running("osu.Game.exe") {
-            // Note: lazer uses same exe name but different path
-        }
-
-        running
-    }
-
-    /// Check if a process is running (Windows)
-    #[cfg(windows)]
-    fn is_process_running(name: &str) -> bool {
-        use std::process::Command;
-        if let Ok(output) = Command::new("tasklist")
-            .args(["/FI", &format!("IMAGENAME eq {}", name), "/NH"])
-            .output()
-        {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            output_str.contains(name)
-        } else {
-            false
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn is_process_running(_name: &str) -> bool {
-        false
-    }
-
-    /// Calculate dry run info for unified storage setup
-    fn calculate_unified_dry_run_for_mode(
-        &self,
-        mode: crate::screens::unified_config::StorageMode,
-    ) -> crate::screens::unified_config::DryRunInfo {
-        use crate::screens::unified_config::{DryRunInfo, StorageMode};
-
-        let mut info = DryRunInfo::default();
-        let mut warnings = Vec::new();
-
-        // Estimate based on cached scan results
-        if let Some(stable) = &self.cached_stable_scan {
-            if stable.beatmap_sets > 0 {
-                info.files_to_move += stable.beatmap_sets;
-                // Rough estimate: 50MB per beatmap set average
-                info.total_size += stable.beatmap_sets as u64 * 50 * 1024 * 1024;
-            }
-        }
-
-        if let Some(lazer) = &self.cached_lazer_scan {
-            if lazer.beatmap_sets > 0 {
-                info.files_to_move += lazer.beatmap_sets;
-                info.total_size += lazer.beatmap_sets as u64 * 50 * 1024 * 1024;
-            }
-        }
-
-        // Links to create = files to share
-        info.links_to_create = info.files_to_move;
-
-        // Add warnings based on mode
-        match mode {
-            StorageMode::StableMaster => {
-                warnings.push("Lazer beatmaps will be replaced with links to stable".into());
-            }
-            StorageMode::LazerMaster => {
-                warnings.push("Stable beatmaps will be replaced with links to lazer".into());
-            }
-            StorageMode::TrueUnified => {
-                warnings.push("Both installations will link to shared folder".into());
-                warnings.push("Original files will be moved to shared location".into());
-            }
-            StorageMode::Disabled => {}
-        }
-
-        // Check disk space warning
-        if info.total_size > 50 * 1024 * 1024 * 1024 {
-            // > 50GB
-            warnings.push("Large amount of data - this may take a while".into());
-        }
-
-        info.warnings = warnings;
-        info
-    }
-
-    fn start_unified_setup_with_params(
-        &mut self,
-        mode: crate::screens::unified_config::StorageMode,
-        shared_path: String,
-        resources: std::collections::HashSet<crate::screens::unified_config::ResourceType>,
-    ) {
-        use crate::screens::unified_config::{ResourceType, StorageMode};
-
-        let mode = match mode {
-            StorageMode::Disabled => UnifiedStorageMode::Disabled,
-            StorageMode::StableMaster => UnifiedStorageMode::StableMaster,
-            StorageMode::LazerMaster => UnifiedStorageMode::LazerMaster,
-            StorageMode::TrueUnified => UnifiedStorageMode::TrueUnified,
-        };
-
-        let shared_path = if mode == UnifiedStorageMode::TrueUnified {
-            if shared_path.is_empty() {
-                None
-            } else {
-                Some(std::path::PathBuf::from(shared_path))
-            }
-        } else {
-            None
-        };
-
-        let mut shared_resources = Vec::new();
-        for resource in resources {
-            let mapped = match resource {
-                ResourceType::Beatmaps => SharedResourceType::Beatmaps,
-                ResourceType::Skins => SharedResourceType::Skins,
-                ResourceType::Replays => SharedResourceType::Replays,
-                ResourceType::Screenshots => SharedResourceType::Screenshots,
-                ResourceType::Exports => SharedResourceType::Exports,
-                ResourceType::Backgrounds => SharedResourceType::Backgrounds,
-            };
-            shared_resources.push(mapped);
-        }
-
-        self.state = AppState::UnifiedSetup {
-            screen: crate::screens::unified_setup::UnifiedSetupScreen::new(),
-        };
-
-        let _ = self.worker_tx.send(WorkerMessage::StartUnifiedSetup {
-            mode,
-            shared_path,
-            resources: shared_resources,
-        });
-    }
-
-    /// Start the unified storage setup
+    /// Handle key events for unified setup screen
     fn handle_unified_setup_key(&mut self, key: KeyEvent) {
-        if event::is_escape(&key) {
-            // Cancel setup and return to config
-            self.go_to_unified_config();
+        if let AppState::UnifiedSetup { screen } = &self.state {
+            if screen.handle_key(key.code) {
+                self.go_to_unified_config();
+            }
         }
     }
 
@@ -2021,29 +1838,16 @@ impl App {
     fn handle_unified_status_key(&mut self, key: KeyEvent) {
         use crate::screens::unified_status::StatusAction;
 
-        if let AppState::UnifiedStatus { screen } = &mut self.state {
-            if let Some(action) = screen.handle_key(key.code) {
-                match action {
-                    StatusAction::Verify => {
-                        screen.loading = true;
-                        let _ = self.worker_tx.send(WorkerMessage::VerifyUnifiedLinks);
-                    }
-                    StatusAction::Repair => {
-                        screen.loading = true;
-                        let _ = self.worker_tx.send(WorkerMessage::RepairUnifiedLinks);
-                    }
-                    StatusAction::SyncNow => {
-                        // Re-run unified setup with current config
-                        let _ = self.worker_tx.send(WorkerMessage::GetUnifiedStatus);
-                    }
-                    StatusAction::Configure => {
-                        self.go_to_unified_config();
-                    }
-                    StatusAction::Back => {
-                        self.state = AppState::MainMenu { selected: 8 };
-                    }
-                }
+        let AppState::UnifiedStatus { screen } = &mut self.state else {
+            return;
+        };
+        match screen.handle_key(key.code) {
+            Some(StatusAction::Refresh) => {
+                let _ = self.worker_tx.send(WorkerMessage::GetUnifiedStatus);
             }
+            Some(StatusAction::SyncNow) => self.start_unified_setup(),
+            Some(StatusAction::Back) => self.go_to_unified_config(),
+            None => {}
         }
     }
 
@@ -3061,57 +2865,38 @@ impl App {
                     phase,
                     current,
                     total,
-                    message,
                 } => {
                     if let AppState::UnifiedSetup { screen } = &mut self.state {
-                        screen.current_operation = format!("{}: {}", phase, message);
-                        if total > 0 {
-                            screen.progress =
-                                Some(crate::screens::unified_setup::MigrationProgress {
-                                    phase: crate::screens::unified_setup::MigrationPhase::Preparing,
-                                    current,
-                                    total,
-                                    current_item: message,
-                                    bytes_processed: 0,
-                                    bytes_total: 0,
-                                });
-                        }
+                        screen.phase = Some(phase);
+                        screen.current = current;
+                        screen.total = total;
                     }
                 }
-                AppMessage::UnifiedStorageComplete {
-                    success,
-                    message,
-                    links_created: _,
-                    space_saved: _,
-                } => {
+                AppMessage::UnifiedStorageComplete { result } => {
                     if let AppState::UnifiedSetup { screen } = &mut self.state {
-                        screen.set_complete(success, Some(message));
+                        screen.result = Some(result);
                     }
                 }
                 AppMessage::UnifiedStorageStatus {
                     mode,
-                    active_links,
-                    broken_links,
-                    space_saved,
+                    status,
+                    notes,
                 } => {
                     if let AppState::UnifiedStatus { screen } = &mut self.state {
-                        screen.mode = mode;
-                        screen.health.total = active_links + broken_links;
-                        screen.health.active = active_links;
-                        screen.health.broken = broken_links;
-                        screen.stats.space_saved = space_saved;
+                        screen.mode = Some(mode);
+                        screen.status = Some(status);
+                        screen.notes = notes;
                     }
                 }
-                AppMessage::UnifiedStorageVerifyComplete {
-                    healthy,
-                    broken,
-                    repaired: _,
-                } => {
-                    if let AppState::UnifiedStatus { screen } = &mut self.state {
-                        screen.health.active = healthy;
-                        screen.health.broken = broken;
-                        screen.health.total = healthy + broken;
-                        screen.loading = false;
+                AppMessage::UnifiedStorageDisabled { message } => {
+                    if let AppState::UnifiedConfig { screen } = &mut self.state {
+                        screen.set_saved(UnifiedStorageMode::Disabled, None);
+                        screen.message = Some(message);
+                    }
+                }
+                AppMessage::UnifiedMode { mode, notice } => {
+                    if let AppState::UnifiedConfig { screen } = &mut self.state {
+                        screen.set_saved(mode, notice);
                     }
                 }
                 AppMessage::Error(error) => {

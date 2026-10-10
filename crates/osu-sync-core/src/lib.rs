@@ -94,9 +94,10 @@ pub use dedup::{
 
 // Sync engine
 pub use sync::{
-    format_bytes, AutoResolver, ConfigBasedResolver, ConflictResolver, DryRunAction, DryRunItem,
-    DryRunResult, InteractiveResolver, ProgressCallback, SkipList, SmartResolver, SyncDirection,
-    SyncEngine, SyncEngineBuilder, SyncError, SyncPhase, SyncProgress, SyncResult,
+    format_byte_count, format_bytes, AutoResolver, ConfigBasedResolver, ConflictResolver,
+    DryRunAction, DryRunItem, DryRunResult, InteractiveResolver, ProgressCallback, SkipList,
+    SmartResolver, SyncDirection, SyncEngine, SyncEngineBuilder, SyncError, SyncPhase,
+    SyncProgress, SyncResult,
 };
 
 // Statistics

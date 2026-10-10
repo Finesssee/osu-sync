@@ -1,1760 +1,468 @@
-//! Main Unified Storage Engine
+//! The linked-store step and its status.
 //!
-//! This module provides the orchestration layer that coordinates all unified
-//! storage operations between osu! stable and lazer installations.
-//!
-//! The engine manages:
-//! - Initial setup of unified storage (creating links)
-//! - Synchronization between installations
-//! - Verification of link integrity
-//! - Repair of broken links
-//! - Teardown and cleanup
+//! One step builds stable's Songs folder out of lazer's `files` store: the
+//! materializer writes every lazer set stable lacks as hard links (`.osu` and `.osb`
+//! files are copies), then the relinker turns stable files that are plain copies of
+//! lazer blobs into links. Setup, the watcher and "sync now" all run this step, and
+//! a rerun with nothing new changes nothing.
 
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
+use serde::Serialize;
+
+use crate::config::{live_guard, Config};
 use crate::error::{Error, Result};
+use crate::lazer::{LazerBeatmapSet, LazerDatabase};
+use crate::linkstore::{ensure_stable_closed, link_count_at, Materializer, Relinker, StableClaims};
+use crate::sync::format_byte_count;
 
-use super::config::{SharedResourceType, UnifiedStorageConfig, UnifiedStorageMode};
-use super::link::{copy_dir_recursive, LinkManager};
-use super::manifest::{LinkStatus, LinkedResource, UnifiedManifest};
+/// Shortest time between two progress reports within one phase.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Result of a setup operation.
-///
-/// Contains statistics about the initial unified storage setup,
-/// including the number of links created and any warnings encountered.
-#[derive(Debug, Clone, Default)]
-pub struct SetupResult {
-    /// Number of filesystem links (symlinks/junctions) created.
-    pub links_created: usize,
-    /// Number of resources (beatmaps, skins, etc.) successfully linked.
-    pub resources_linked: usize,
-    /// Non-fatal warnings encountered during setup.
-    pub warnings: Vec<String>,
+/// The part of the step a progress report belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPhase {
+    /// Reading lazer's library through the realm export.
+    Reading,
+    /// Writing missing lazer sets into Songs.
+    Materializing,
+    /// Turning stable copies of lazer blobs into links.
+    Relinking,
 }
 
-impl SetupResult {
-    /// Creates a new empty setup result.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns `true` if setup completed without warnings.
-    pub fn is_clean(&self) -> bool {
-        self.warnings.is_empty()
-    }
-
-    /// Adds a warning message to the result.
-    pub fn add_warning(&mut self, warning: impl Into<String>) {
-        self.warnings.push(warning.into());
-    }
-}
-
-/// Result of a sync operation.
-///
-/// Contains statistics about what changed during synchronization.
-#[derive(Debug, Clone, Default)]
-pub struct SyncResult {
-    /// Number of new links created.
-    pub new_links: usize,
-    /// Number of existing links updated.
-    pub updated: usize,
-    /// Number of stale links removed.
-    pub removed: usize,
-    /// Errors encountered during sync (non-fatal).
-    pub errors: Vec<String>,
-}
-
-impl SyncResult {
-    /// Creates a new empty sync result.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns `true` if sync completed without errors.
-    pub fn is_success(&self) -> bool {
-        self.errors.is_empty()
-    }
-
-    /// Returns the total number of changes made.
-    pub fn total_changes(&self) -> usize {
-        self.new_links + self.updated + self.removed
-    }
-
-    /// Adds an error message to the result.
-    pub fn add_error(&mut self, error: impl Into<String>) {
-        self.errors.push(error.into());
-    }
-
-    /// Merges another sync result into this one.
-    pub fn merge(&mut self, other: SyncResult) {
-        self.new_links += other.new_links;
-        self.updated += other.updated;
-        self.removed += other.removed;
-        self.errors.extend(other.errors);
-    }
-}
-
-/// Result of a verification operation.
-///
-/// Contains statistics about the current state of all links.
-#[derive(Debug, Clone, Default)]
-pub struct VerificationResult {
-    /// Total number of links tracked in the manifest.
-    pub total_links: usize,
-    /// Number of links that are active and valid.
-    pub active: usize,
-    /// Number of links that are broken (target missing).
-    pub broken: usize,
-    /// Number of links that are stale (no longer needed).
-    pub stale: usize,
-}
-
-impl VerificationResult {
-    /// Creates a new empty verification result.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns `true` if all links are healthy.
-    pub fn is_healthy(&self) -> bool {
-        self.broken == 0 && self.stale == 0
-    }
-
-    /// Returns the percentage of healthy links (0.0 to 100.0).
-    pub fn health_percentage(&self) -> f64 {
-        if self.total_links == 0 {
-            return 100.0;
+impl StepPhase {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Reading => "Reading lazer library",
+            Self::Materializing => "Linking lazer sets into Songs",
+            Self::Relinking => "Relinking stable copies",
         }
-        (self.active as f64 / self.total_links as f64) * 100.0
     }
 }
 
-/// Result of a repair operation.
-///
-/// Contains statistics about what was fixed during repair.
-#[derive(Debug, Clone, Default)]
-pub struct RepairResult {
-    /// Number of links successfully repaired.
-    pub repaired: usize,
-    /// Number of links that could not be repaired.
-    pub failed: usize,
-    /// Number of stale links that were removed.
-    pub removed: usize,
+/// What one linked-store step did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct StepReport {
+    pub lazer_sets: usize,
+    /// Sets that got at least one new file.
+    pub sets_written: usize,
+    /// Sets whose folder was already complete.
+    pub sets_complete: usize,
+    pub sets_skipped: usize,
+    pub sets_failed: usize,
+    /// New files made as hard links to lazer blobs.
+    pub files_linked: usize,
+    /// New files written as copies: `.osu`, `.osb`, and link fallbacks.
+    pub files_copied: usize,
+    /// Existing stable copies replaced by links.
+    pub relinked: usize,
+    pub bytes_reclaimed: u64,
+    pub notes: Vec<String>,
+    pub errors: Vec<String>,
+    /// `client.realm`'s stamp right before the step read it.
+    #[serde(skip)]
+    pub(crate) realm_stamp: Option<RealmStamp>,
 }
 
-impl RepairResult {
-    /// Creates a new empty repair result.
-    pub fn new() -> Self {
-        Self::default()
+impl StepReport {
+    /// Files the step created or replaced; 0 means the step changed nothing.
+    pub fn changed_files(&self) -> usize {
+        self.files_linked + self.files_copied + self.relinked
     }
 
-    /// Returns `true` if all repairs were successful.
-    pub fn is_success(&self) -> bool {
-        self.failed == 0
-    }
-
-    /// Returns the total number of actions taken.
-    pub fn total_actions(&self) -> usize {
-        self.repaired + self.failed + self.removed
+    /// The counts as label and value, in the order every front end shows them.
+    pub fn rows(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Lazer sets", self.lazer_sets.to_string()),
+            ("Sets written", self.sets_written.to_string()),
+            ("Sets complete", self.sets_complete.to_string()),
+            ("Sets skipped", self.sets_skipped.to_string()),
+            ("Sets failed", self.sets_failed.to_string()),
+            ("Files linked", self.files_linked.to_string()),
+            ("Files copied", self.files_copied.to_string()),
+            ("Relinked", self.relinked.to_string()),
+            ("Bytes reclaimed", format_byte_count(self.bytes_reclaimed)),
+        ]
     }
 }
 
-/// Main orchestration engine for unified storage operations.
-///
-/// The `UnifiedStorageEngine` coordinates all unified storage operations,
-/// including setup, synchronization, verification, and repair of links
-/// between osu! stable and lazer installations.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use osu_sync_core::unified::{UnifiedStorageConfig, UnifiedStorageEngine};
-/// use std::path::PathBuf;
-///
-/// let config = UnifiedStorageConfig::stable_master();
-/// let stable = PathBuf::from("/path/to/osu-stable");
-/// let lazer = PathBuf::from("/path/to/osu-lazer");
-///
-/// let mut engine = UnifiedStorageEngine::new(config, stable, lazer)?;
-///
-/// // Initial setup
-/// let setup_result = engine.setup()?;
-/// println!("Created {} links", setup_result.links_created);
-///
-/// // Verify integrity
-/// let verify_result = engine.verify()?;
-/// if !verify_result.is_healthy() {
-///     let repair_result = engine.repair()?;
-///     println!("Repaired {} links", repair_result.repaired);
-/// }
-/// ```
+/// Bytes at the start of a realm file that change on every commit: two top refs and
+/// the flag byte that selects between them.
+pub(crate) const REALM_HEADER_LEN: usize = 24;
+
+/// What tells one state of `client.realm` from another. Realm commits through a mapped
+/// view, which changes neither the modified time nor the size and raises no change
+/// event, but every commit rewrites the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RealmStamp {
+    pub(crate) modified: SystemTime,
+    pub(crate) len: u64,
+    pub(crate) header: [u8; REALM_HEADER_LEN],
+}
+
+impl RealmStamp {
+    /// Reads the stamp without writing or locking: the file is opened for reading only
+    /// and shares read, write and delete with lazer.
+    pub(crate) fn read(path: &Path) -> Option<Self> {
+        let file = open_shared(path).ok()?;
+        let meta = file.metadata().ok()?;
+        let mut head = Vec::with_capacity(REALM_HEADER_LEN);
+        file.take(REALM_HEADER_LEN as u64)
+            .read_to_end(&mut head)
+            .ok()?;
+        let mut header = [0u8; REALM_HEADER_LEN];
+        header[..head.len()].copy_from_slice(&head);
+        Some(Self {
+            modified: meta.modified().ok()?,
+            len: meta.len(),
+            header,
+        })
+    }
+}
+
+#[cfg(windows)]
+fn open_shared(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x1 | 0x2 | 0x4;
+    File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_shared(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+/// How much of Songs shares its data with lazer's store.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct LinkedStoreStatus {
+    /// Files with two or more hard links.
+    pub linked_files: u64,
+    /// Files with one link: `.osu` and `.osb` files, stable-only sets, fallbacks.
+    pub copied_files: u64,
+    /// Sum of the sizes of the linked files, stored once instead of twice.
+    pub bytes_saved: u64,
+    /// Files whose link count could not be read, such as locked ones.
+    pub unreadable_files: u64,
+}
+
+impl LinkedStoreStatus {
+    /// The counts as label and value; unreadable files only when there are some.
+    pub fn rows(&self) -> Vec<(&'static str, String)> {
+        let mut rows = vec![
+            ("Linked files", self.linked_files.to_string()),
+            ("Copied files", self.copied_files.to_string()),
+            ("Bytes saved", format_byte_count(self.bytes_saved)),
+        ];
+        if self.unreadable_files > 0 {
+            rows.push(("Unreadable files", self.unreadable_files.to_string()));
+        }
+        rows
+    }
+}
+
+/// Runs the linked-store step between one stable and one lazer install.
 pub struct UnifiedStorageEngine {
-    /// Configuration for unified storage behavior.
-    config: UnifiedStorageConfig,
-    /// Path to the osu! stable installation.
-    stable_path: PathBuf,
-    /// Path to the osu! lazer installation.
-    lazer_path: PathBuf,
-    /// Manifest tracking all linked resources.
-    manifest: UnifiedManifest,
-    /// Manager for filesystem link operations.
-    link_manager: LinkManager,
+    stable: PathBuf,
+    lazer: PathBuf,
+    relink_threads: Option<NonZeroUsize>,
+    relink_cache: Option<PathBuf>,
 }
 
 impl UnifiedStorageEngine {
-    /// Creates a new unified storage engine.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - Configuration for unified storage behavior
-    /// * `stable` - Path to the osu! stable installation
-    /// * `lazer` - Path to the osu! lazer installation
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The configuration is invalid
-    /// - The stable or lazer paths don't exist
-    /// - Failed to initialize the link manager
-    pub fn new(config: UnifiedStorageConfig, stable: PathBuf, lazer: PathBuf) -> Result<Self> {
-        // Validate configuration
-        config.validate().map_err(Error::Config)?;
-
-        // Validate paths exist
-        if !stable.exists() {
-            return Err(Error::OsuNotFound(stable));
+    /// `stable` is the osu!stable folder (holding Songs and osu!.db), `lazer` the
+    /// osu!lazer data folder (holding client.realm and files).
+    pub fn new(stable: impl Into<PathBuf>, lazer: impl Into<PathBuf>) -> Self {
+        let stable = stable.into();
+        let relink_cache = Relinker::default_cache(&stable.join("Songs"));
+        Self {
+            stable,
+            lazer: lazer.into(),
+            relink_threads: None,
+            relink_cache,
         }
-        if !lazer.exists() {
-            return Err(Error::OsuNotFound(lazer));
-        }
-
-        // Initialize manifest with the configured mode
-        let manifest = UnifiedManifest::new(config.mode);
-
-        // Initialize link manager with configuration options
-        let link_manager = LinkManager::new(config.should_use_junctions());
-
-        Ok(Self {
-            config,
-            stable_path: stable,
-            lazer_path: lazer,
-            manifest,
-            link_manager,
-        })
     }
 
-    /// Returns a reference to the current configuration.
-    pub fn config(&self) -> &UnifiedStorageConfig {
-        &self.config
+    /// The engine for the installs `config` names.
+    pub fn from_config(config: &Config) -> Result<Self> {
+        let stable = config.stable_path.clone().ok_or(Error::MissingPath {
+            path_type: "osu!stable",
+        })?;
+        let lazer = config.lazer_path.clone().ok_or(Error::MissingPath {
+            path_type: "osu!lazer",
+        })?;
+        Ok(Self::new(stable, lazer))
     }
 
-    /// Returns the path to the osu! stable installation.
-    pub fn stable_path(&self) -> &PathBuf {
-        &self.stable_path
+    /// Threads for the relink part of the step; `None` uses relink's default cap.
+    pub fn threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.relink_threads = threads;
+        self
     }
 
-    /// Returns the path to the osu! lazer installation.
-    pub fn lazer_path(&self) -> &PathBuf {
-        &self.lazer_path
+    /// Where relink keeps its hash cache; `None` hashes every candidate on every step.
+    pub fn relink_cache(mut self, cache: Option<PathBuf>) -> Self {
+        self.relink_cache = cache;
+        self
     }
 
-    /// Returns a reference to the manifest.
-    pub fn manifest(&self) -> &UnifiedManifest {
-        &self.manifest
+    pub fn songs(&self) -> PathBuf {
+        self.stable.join("Songs")
     }
 
-    fn check_live_writes(&self) -> Result<()> {
-        crate::config::live_guard::check_write(&self.stable_path)?;
-        crate::config::live_guard::check_write(&self.lazer_path)
+    pub fn files(&self) -> PathBuf {
+        self.lazer.join("files")
     }
 
-    /// Performs initial setup of unified storage.
-    ///
-    /// This operation:
-    /// 1. Analyzes both installations for shared resources
-    /// 2. Backs up existing data if necessary
-    /// 3. Creates symbolic links or junctions as configured
-    /// 4. Updates the manifest with tracked links
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Unified storage is not enabled in the configuration
-    /// - Failed to create required links
-    /// - Insufficient permissions for link creation
-    pub fn setup(&mut self) -> Result<SetupResult> {
-        if !self.config.is_enabled() {
-            return Err(Error::Config(
-                "Unified storage is not enabled in configuration".to_string(),
-            ));
+    pub fn realm(&self) -> PathBuf {
+        self.lazer.join("client.realm")
+    }
+
+    /// Checks made before any write. Fails when Songs or lazer's `files` is a junction
+    /// or symbolic link, which only an older unified storage mode makes, or when the
+    /// live guard refuses either folder.
+    pub(crate) fn preflight(&self) -> Result<()> {
+        for (what, path) in [
+            ("stable Songs folder", self.songs()),
+            ("lazer files folder", self.files()),
+        ] {
+            refuse_link(what, &path)?;
         }
-
-        self.check_live_writes()?;
-        tracing::info!("Setting up unified storage in {:?} mode", self.config.mode);
-
-        let mut result = SetupResult::new();
-
-        // TODO: Implement setup logic
-        // 1. Scan shared resources in both installations
-        // 2. Determine which installation owns each resource
-        // 3. Create links from non-master to master
-        // 4. Update manifest
-
-        match self.config.mode {
-            UnifiedStorageMode::Disabled => {
-                // Should not reach here due to earlier check
-                unreachable!("Setup called with disabled mode");
-            }
-            UnifiedStorageMode::StableMaster => {
-                self.setup_stable_master(&mut result)?;
-            }
-            UnifiedStorageMode::LazerMaster => {
-                self.setup_lazer_master(&mut result)?;
-            }
-            UnifiedStorageMode::TrueUnified => {
-                self.setup_true_unified(&mut result)?;
-            }
-        }
-
-        tracing::info!(
-            "Setup complete: {} links created, {} resources linked",
-            result.links_created,
-            result.resources_linked
-        );
-
-        Ok(result)
-    }
-
-    /// Synchronizes changes between installations.
-    ///
-    /// This operation:
-    /// 1. Detects new, modified, or deleted resources
-    /// 2. Creates or updates links as needed
-    /// 3. Removes stale links
-    /// 4. Updates the manifest
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Unified storage is not enabled
-    /// - Critical sync operation fails
-    pub fn sync(&mut self) -> Result<SyncResult> {
-        if !self.config.is_enabled() {
-            return Err(Error::Config(
-                "Unified storage is not enabled in configuration".to_string(),
-            ));
-        }
-
-        self.check_live_writes()?;
-        tracing::info!("Starting unified storage sync");
-
-        let result = match self.config.mode {
-            UnifiedStorageMode::Disabled => {
-                unreachable!("Sync called with disabled mode");
-            }
-            UnifiedStorageMode::StableMaster => self.sync_stable_master()?,
-            UnifiedStorageMode::LazerMaster => self.sync_lazer_master()?,
-            UnifiedStorageMode::TrueUnified => self.sync_true_unified()?,
-        };
-
-        tracing::info!(
-            "Sync complete: {} new, {} updated, {} removed",
-            result.new_links,
-            result.updated,
-            result.removed
-        );
-
-        Ok(result)
-    }
-
-    /// Verifies the integrity of all links.
-    ///
-    /// This operation checks each tracked link to determine if it:
-    /// - Is still valid and accessible
-    /// - Points to a valid target
-    /// - Is still needed based on current configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if verification cannot be performed.
-    pub fn verify(&self) -> Result<VerificationResult> {
-        tracing::info!("Verifying unified storage integrity");
-
-        let mut result = VerificationResult::new();
-
-        for resource in self.manifest.iter() {
-            // Check if this resource is marked as stale in the manifest
-            let is_stale = resource.status == LinkStatus::Stale;
-
-            // Count and verify each link for this resource
-            for link_path in &resource.link_paths {
-                result.total_links += 1;
-
-                // If the resource is marked as stale, count all its links as stale
-                if is_stale {
-                    result.stale += 1;
-                    continue;
-                }
-
-                // Otherwise, verify the link's validity
-                match self.link_manager.check_link(link_path) {
-                    Ok(info) => {
-                        if info.is_valid {
-                            result.active += 1;
-                        } else {
-                            result.broken += 1;
-                        }
-                    }
-                    Err(_) => {
-                        result.broken += 1;
-                    }
-                }
-            }
-        }
-
-        tracing::info!(
-            "Verification complete: {} total, {} active, {} broken, {} stale",
-            result.total_links,
-            result.active,
-            result.broken,
-            result.stale
-        );
-
-        Ok(result)
-    }
-
-    /// Repairs broken or stale links.
-    ///
-    /// This operation:
-    /// 1. Attempts to recreate broken links
-    /// 2. Removes stale links that are no longer needed
-    /// 3. Updates the manifest with current state
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if repair cannot be performed.
-    pub fn repair(&mut self) -> Result<RepairResult> {
-        self.check_live_writes()?;
-        tracing::info!("Repairing unified storage links");
-
-        let mut result = RepairResult::new();
-
-        // Run verification to ensure manifest status is up to date
-        let _verification = self.verify()?;
-
-        // Collect resources needing attention to avoid borrow issues
-        // This includes Broken, Stale, and Pending resources
-        let resources_to_repair: Vec<_> = self
-            .manifest
-            .find_needing_attention()
-            .into_iter()
-            .map(|r| (r.source_path.clone(), r.link_paths.clone(), r.status))
-            .collect();
-
-        // Track which resources were successfully repaired so we can update their status
-        let mut repaired_sources: Vec<PathBuf> = Vec::new();
-
-        for (source_path, link_paths, status) in resources_to_repair {
-            // Skip stale resources here - they're handled separately below
-            if status == LinkStatus::Stale {
-                continue;
-            }
-
-            let mut all_links_ok = true;
-
-            for link_path in &link_paths {
-                match self.link_manager.check_link(link_path) {
-                    Ok(info) => {
-                        if !info.is_valid {
-                            // Attempt to repair by recreating link
-                            match self.link_manager.create_link(link_path, &source_path) {
-                                Ok(_) => {
-                                    result.repaired += 1;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to repair link {}: {}",
-                                        link_path.display(),
-                                        e
-                                    );
-                                    result.failed += 1;
-                                    all_links_ok = false;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Link doesn't exist, try to create it
-                        match self.link_manager.create_link(link_path, &source_path) {
-                            Ok(_) => {
-                                result.repaired += 1;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to create link {}: {}",
-                                    link_path.display(),
-                                    e
-                                );
-                                result.failed += 1;
-                                all_links_ok = false;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If all links for this resource were successfully repaired, mark for status update
-            if all_links_ok && !link_paths.is_empty() {
-                repaired_sources.push(source_path);
-            }
-        }
-
-        // Update status to Active for successfully repaired resources
-        for source_path in repaired_sources {
-            self.manifest
-                .update_status(&source_path, LinkStatus::Active);
-        }
-
-        // Handle stale links - remove them from the manifest
-        let stale_resources: Vec<_> = self
-            .manifest
-            .find_by_status(LinkStatus::Stale)
-            .into_iter()
-            .map(|r| r.source_path.clone())
-            .collect();
-
-        for source_path in stale_resources {
-            if self.manifest.remove_resource(&source_path) {
-                result.removed += 1;
-            }
-        }
-
-        tracing::info!(
-            "Repair complete: {} repaired, {} failed, {} removed",
-            result.repaired,
-            result.failed,
-            result.removed
-        );
-
-        Ok(result)
-    }
-
-    /// Tears down unified storage, restoring independent installations.
-    ///
-    /// This operation:
-    /// 1. Removes all symbolic links and junctions
-    /// 2. Clears the manifest
-    ///
-    /// Note: Restoring original data from backups is not currently implemented.
-    /// If backup restoration is needed in the future, it would require:
-    /// - A backup system that preserves original data before link creation
-    /// - Logic to copy data back from the master location to the link locations
-    /// - Handling of conflicts when data has changed in the master location
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if teardown cannot be completed.
-    pub fn teardown(&mut self) -> Result<()> {
-        self.check_live_writes()?;
-        tracing::info!("Tearing down unified storage");
-
-        // Collect all link paths to avoid borrow issues
-        let all_link_paths: Vec<PathBuf> = self
-            .manifest
-            .iter()
-            .flat_map(|r| r.link_paths.clone())
-            .collect();
-
-        let total_links = all_link_paths.len();
-        let mut removed_count = 0;
-
-        for link_path in all_link_paths {
-            if let Err(e) = LinkManager::remove_link(&link_path) {
-                tracing::warn!("Failed to remove link {}: {}", link_path.display(), e);
-            } else {
-                removed_count += 1;
-            }
-        }
-
-        self.manifest.clear();
-
-        tracing::info!(
-            "Teardown complete: removed {}/{} links",
-            removed_count,
-            total_links
-        );
-
+        live_guard::check_write(&self.songs())?;
+        live_guard::check_write(&self.files())?;
         Ok(())
     }
 
-    // -------------------------------------------------------------------------
-    // Mode-specific setup implementations
-    // -------------------------------------------------------------------------
-
-    /// Sets up unified storage with stable as the master.
-    ///
-    /// In this mode, osu! stable owns the canonical copies and
-    /// osu! lazer links to stable's resources.
-    fn setup_stable_master(&mut self, result: &mut SetupResult) -> Result<()> {
-        tracing::debug!("Setting up StableMaster mode");
-
-        for resource_type in self.config.shared_resources_iter() {
-            let folder_name = resource_type.folder_name();
-
-            let stable_resource = self.stable_path.join(folder_name);
-            let lazer_resource = self.lazer_path.join(folder_name);
-
-            // Check if the resource exists in stable
-            if !stable_resource.exists() {
-                result.add_warning(format!("{} not found in stable installation", folder_name));
-                continue;
-            }
-
-            // If lazer already has content at that path, back it up
-            if lazer_resource.exists() {
-                // Check if it's already a link pointing to the right target
-                if LinkManager::is_link(&lazer_resource) {
-                    if let Ok(target) = LinkManager::read_link(&lazer_resource) {
-                        // Normalize paths for comparison
-                        let stable_canonical = stable_resource.canonicalize().ok();
-                        let target_canonical = target.canonicalize().ok();
-                        if stable_canonical.is_some() && stable_canonical == target_canonical {
-                            tracing::debug!("{} already linked correctly, skipping", folder_name);
-                            // Still add to manifest if not already tracked
-                            if self.manifest.find_by_source(&stable_resource).is_none() {
-                                self.manifest.add_resource(LinkedResource::active(
-                                    *resource_type,
-                                    stable_resource.clone(),
-                                    vec![lazer_resource.clone()],
-                                    None,
-                                ));
-                                result.resources_linked += 1;
-                            }
-                            continue;
-                        }
-                    }
-                    // Link exists but points to wrong target - remove it
-                    tracing::debug!(
-                        "Removing existing link at {} (points to wrong target)",
-                        lazer_resource.display()
-                    );
-                    if let Err(e) = LinkManager::remove_link(&lazer_resource) {
-                        result.add_warning(format!(
-                            "Failed to remove existing link at {}: {}",
-                            lazer_resource.display(),
-                            e
-                        ));
-                        continue;
-                    }
-                } else {
-                    // It's a real directory, back it up
-                    let backup_path = self.lazer_path.join(format!("{}_backup", folder_name));
-                    tracing::info!(
-                        "Backing up existing {} to {}",
-                        lazer_resource.display(),
-                        backup_path.display()
-                    );
-
-                    // If backup already exists, remove it first
-                    if backup_path.exists() {
-                        if let Err(e) = fs::remove_dir_all(&backup_path) {
-                            result.add_warning(format!(
-                                "Failed to remove old backup at {}: {}",
-                                backup_path.display(),
-                                e
-                            ));
-                            continue;
-                        }
-                    }
-
-                    if let Err(e) = fs::rename(&lazer_resource, &backup_path) {
-                        result.add_warning(format!(
-                            "Failed to backup {} to {}: {}",
-                            lazer_resource.display(),
-                            backup_path.display(),
-                            e
-                        ));
-                        continue;
-                    }
-                }
-            }
-
-            // Create link from lazer location to stable location
-            tracing::debug!(
-                "Creating link {} -> {}",
-                lazer_resource.display(),
-                stable_resource.display()
-            );
-
-            match self
-                .link_manager
-                .link_directory(&stable_resource, &lazer_resource)
-            {
-                Ok(link_info) => {
-                    tracing::info!(
-                        "Created {} link: {} -> {}",
-                        link_info.link_type,
-                        lazer_resource.display(),
-                        stable_resource.display()
-                    );
-
-                    // Add to manifest
-                    self.manifest.add_resource(LinkedResource::active(
-                        *resource_type,
-                        stable_resource.clone(),
-                        vec![lazer_resource.clone()],
-                        None,
-                    ));
-
-                    result.links_created += 1;
-                    result.resources_linked += 1;
-                }
-                Err(e) => {
-                    result.add_warning(format!("Failed to create link for {}: {}", folder_name, e));
-                }
-            }
-        }
-
-        Ok(())
+    /// [`Self::preflight`], then a check that osu!stable is closed.
+    fn ready(&self) -> Result<()> {
+        self.preflight()?;
+        ensure_stable_closed()
     }
 
-    /// Sets up unified storage with lazer as the master.
-    ///
-    /// In this mode, osu! lazer owns the canonical copies and
-    /// osu! stable links to lazer's resources.
-    fn setup_lazer_master(&mut self, result: &mut SetupResult) -> Result<()> {
-        tracing::debug!("Setting up LazerMaster mode");
-
-        for resource_type in self.config.shared_resources_iter() {
-            let folder_name = resource_type.folder_name();
-
-            let stable_resource = self.stable_path.join(folder_name);
-            let lazer_resource = self.lazer_path.join(folder_name);
-
-            // Check if the resource exists in lazer
-            if !lazer_resource.exists() {
-                result.add_warning(format!("{} not found in lazer installation", folder_name));
-                continue;
-            }
-
-            // If stable already has content at that path, handle it
-            if stable_resource.exists() {
-                // Check if it's already a link pointing to the right target
-                if LinkManager::is_link(&stable_resource) {
-                    if let Ok(target) = LinkManager::read_link(&stable_resource) {
-                        // Normalize paths for comparison
-                        let lazer_canonical = lazer_resource.canonicalize().ok();
-                        let target_canonical = target.canonicalize().ok();
-                        if lazer_canonical.is_some() && lazer_canonical == target_canonical {
-                            tracing::debug!("{} already linked correctly, skipping", folder_name);
-                            // Still add to manifest if not already tracked
-                            if self.manifest.find_by_source(&lazer_resource).is_none() {
-                                self.manifest.add_resource(LinkedResource::active(
-                                    *resource_type,
-                                    lazer_resource.clone(),
-                                    vec![stable_resource.clone()],
-                                    None,
-                                ));
-                                result.resources_linked += 1;
-                            }
-                            continue;
-                        }
-                    }
-                    // Link exists but points to wrong target - remove it
-                    tracing::debug!(
-                        "Removing existing link at {} (points to wrong target)",
-                        stable_resource.display()
-                    );
-                    if let Err(e) = LinkManager::remove_link(&stable_resource) {
-                        result.add_warning(format!(
-                            "Failed to remove existing link at {}: {}",
-                            stable_resource.display(),
-                            e
-                        ));
-                        continue;
-                    }
-                } else {
-                    // It's a real directory, back it up
-                    let backup_path = self.stable_path.join(format!("{}_backup", folder_name));
-                    tracing::info!(
-                        "Backing up existing {} to {}",
-                        stable_resource.display(),
-                        backup_path.display()
-                    );
-
-                    // If backup already exists, remove it first
-                    if backup_path.exists() {
-                        if let Err(e) = fs::remove_dir_all(&backup_path) {
-                            result.add_warning(format!(
-                                "Failed to remove old backup at {}: {}",
-                                backup_path.display(),
-                                e
-                            ));
-                            continue;
-                        }
-                    }
-
-                    if let Err(e) = fs::rename(&stable_resource, &backup_path) {
-                        result.add_warning(format!(
-                            "Failed to backup {} to {}: {}",
-                            stable_resource.display(),
-                            backup_path.display(),
-                            e
-                        ));
-                        continue;
-                    }
-                }
-            }
-
-            // Create link from stable location to lazer location
-            tracing::debug!(
-                "Creating link {} -> {}",
-                stable_resource.display(),
-                lazer_resource.display()
-            );
-
-            match self
-                .link_manager
-                .create_link(&stable_resource, &lazer_resource)
-            {
-                Ok(link_info) => {
-                    tracing::info!(
-                        "Created {} link: {} -> {}",
-                        link_info.link_type,
-                        stable_resource.display(),
-                        lazer_resource.display()
-                    );
-
-                    // Add to manifest (lazer is the source, stable is the link)
-                    self.manifest.add_resource(LinkedResource::active(
-                        *resource_type,
-                        lazer_resource.clone(),
-                        vec![stable_resource.clone()],
-                        None,
-                    ));
-
-                    result.links_created += 1;
-                    result.resources_linked += 1;
-                }
-                Err(e) => {
-                    result.add_warning(format!("Failed to create link for {}: {}", folder_name, e));
-                }
-            }
-        }
-
-        Ok(())
+    /// The step: reads lazer's library, then materializes and relinks. Waits for
+    /// nothing; fails with [`Error::GameRunning`] while osu!stable runs.
+    pub fn sync(&self, progress: &mut dyn FnMut(StepPhase, usize, usize)) -> Result<StepReport> {
+        self.ready()?;
+        progress(StepPhase::Reading, 0, 0);
+        // Stamped before the export reads the realm, so a commit during the export
+        // changes the stamp the watcher compares against and gets its own step.
+        let realm_stamp = RealmStamp::read(&self.realm());
+        let db = LazerDatabase::open(&self.lazer)?;
+        let mut report = self.step(db.sets(), progress)?;
+        report.notes.extend(db.skipped().map(ToString::to_string));
+        report.realm_stamp = realm_stamp;
+        Ok(report)
     }
 
-    /// Sets up unified storage with a shared third-party location.
-    ///
-    /// In this mode, both installations link to a shared location
-    /// that is independent of either installation.
-    fn setup_true_unified(&mut self, result: &mut SetupResult) -> Result<()> {
-        tracing::debug!("Setting up TrueUnified mode");
-
-        let shared_path = self
-            .config
-            .get_shared_path()
-            .ok_or_else(|| Error::Config("TrueUnified mode requires a shared path".to_string()))?
-            .clone();
-
-        // Collect resource types to avoid borrow issues
-        let resource_types: Vec<SharedResourceType> =
-            self.config.shared_resources_iter().cloned().collect();
-
-        for resource_type in resource_types {
-            let folder_name = resource_type.folder_name();
-
-            let shared_resource = shared_path.join(folder_name);
-            let stable_resource = self.stable_path.join(folder_name);
-            let lazer_resource = self.lazer_path.join(folder_name);
-
-            tracing::debug!(
-                "Setting up shared {} at {}",
-                folder_name,
-                shared_resource.display()
-            );
-
-            // Step 1: Create the shared folder if it doesn't exist
-            if !shared_resource.exists() {
-                fs::create_dir_all(&shared_resource).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to create shared directory {}: {}",
-                        shared_resource.display(),
-                        e
-                    ))
-                })?;
-                tracing::debug!("Created shared directory: {}", shared_resource.display());
-            }
-
-            // Step 2: Migrate content from BOTH installations to shared location
-            // Prefer stable content first, then add unique lazer content
-            if stable_resource.exists() && !LinkManager::is_link(&stable_resource) {
-                Self::migrate_directory_contents(&stable_resource, &shared_resource)?;
-                tracing::debug!(
-                    "Migrated stable content from {} to {}",
-                    stable_resource.display(),
-                    shared_resource.display()
-                );
-            }
-
-            if lazer_resource.exists() && !LinkManager::is_link(&lazer_resource) {
-                // Only copy unique content from lazer (files that don't exist in shared)
-                Self::migrate_directory_contents(&lazer_resource, &shared_resource)?;
-                tracing::debug!(
-                    "Migrated unique lazer content from {} to {}",
-                    lazer_resource.display(),
-                    shared_resource.display()
-                );
-            }
-
-            // Step 3: Back up both stable and lazer folders (rename to {folder}_backup)
-            let mut links_created_for_resource = 0;
-
-            // Back up stable folder if it exists and is not already a link
-            if stable_resource.exists() && !LinkManager::is_link(&stable_resource) {
-                let backup_path = self.stable_path.join(format!("{}_backup", folder_name));
-
-                // Remove old backup if it exists
-                if backup_path.exists() {
-                    if let Err(e) = fs::remove_dir_all(&backup_path) {
-                        result.add_warning(format!(
-                            "Failed to remove old stable backup at {}: {}",
-                            backup_path.display(),
-                            e
-                        ));
-                    }
-                }
-
-                if let Err(e) = fs::rename(&stable_resource, &backup_path) {
-                    result.add_warning(format!(
-                        "Failed to backup stable {} to {}: {}",
-                        stable_resource.display(),
-                        backup_path.display(),
-                        e
-                    ));
-                    continue;
-                }
-                tracing::debug!(
-                    "Backed up stable {} to {}",
-                    stable_resource.display(),
-                    backup_path.display()
-                );
-            }
-
-            // Back up lazer folder if it exists and is not already a link
-            if lazer_resource.exists() && !LinkManager::is_link(&lazer_resource) {
-                let backup_path = self.lazer_path.join(format!("{}_backup", folder_name));
-
-                // Remove old backup if it exists
-                if backup_path.exists() {
-                    if let Err(e) = fs::remove_dir_all(&backup_path) {
-                        result.add_warning(format!(
-                            "Failed to remove old lazer backup at {}: {}",
-                            backup_path.display(),
-                            e
-                        ));
-                    }
-                }
-
-                if let Err(e) = fs::rename(&lazer_resource, &backup_path) {
-                    result.add_warning(format!(
-                        "Failed to backup lazer {} to {}: {}",
-                        lazer_resource.display(),
-                        backup_path.display(),
-                        e
-                    ));
-                    continue;
-                }
-                tracing::debug!(
-                    "Backed up lazer {} to {}",
-                    lazer_resource.display(),
-                    backup_path.display()
-                );
-            }
-
-            // Step 4: Create links from BOTH stable and lazer to the shared location
-            // Remove existing links that point to wrong target
-            if stable_resource.exists() && LinkManager::is_link(&stable_resource) {
-                if let Ok(target) = LinkManager::read_link(&stable_resource) {
-                    let shared_canonical = shared_resource.canonicalize().ok();
-                    let target_canonical = target.canonicalize().ok();
-                    if shared_canonical != target_canonical {
-                        // Link points to wrong target, remove it
-                        if let Err(e) = LinkManager::remove_link(&stable_resource) {
-                            result.add_warning(format!("Failed to remove old stable link: {}", e));
-                        }
-                    }
-                }
-            }
-
-            if lazer_resource.exists() && LinkManager::is_link(&lazer_resource) {
-                if let Ok(target) = LinkManager::read_link(&lazer_resource) {
-                    let shared_canonical = shared_resource.canonicalize().ok();
-                    let target_canonical = target.canonicalize().ok();
-                    if shared_canonical != target_canonical {
-                        // Link points to wrong target, remove it
-                        if let Err(e) = LinkManager::remove_link(&lazer_resource) {
-                            result.add_warning(format!("Failed to remove old lazer link: {}", e));
-                        }
-                    }
-                }
-            }
-
-            // Create stable link to shared location
-            if !stable_resource.exists() {
-                match self
-                    .link_manager
-                    .link_directory(&shared_resource, &stable_resource)
-                {
-                    Ok(link_info) => {
-                        tracing::info!(
-                            "Created {} link: {} -> {}",
-                            link_info.link_type,
-                            stable_resource.display(),
-                            shared_resource.display()
-                        );
-                        links_created_for_resource += 1;
-                    }
-                    Err(e) => {
-                        result.add_warning(format!(
-                            "Failed to create stable link for {}: {}",
-                            folder_name, e
-                        ));
-                    }
-                }
-            } else if LinkManager::is_link(&stable_resource) {
-                // Link already exists and points to correct target
-                links_created_for_resource += 1;
-            }
-
-            // Create lazer link to shared location
-            if !lazer_resource.exists() {
-                match self
-                    .link_manager
-                    .link_directory(&shared_resource, &lazer_resource)
-                {
-                    Ok(link_info) => {
-                        tracing::info!(
-                            "Created {} link: {} -> {}",
-                            link_info.link_type,
-                            lazer_resource.display(),
-                            shared_resource.display()
-                        );
-                        links_created_for_resource += 1;
-                    }
-                    Err(e) => {
-                        result.add_warning(format!(
-                            "Failed to create lazer link for {}: {}",
-                            folder_name, e
-                        ));
-                    }
-                }
-            } else if LinkManager::is_link(&lazer_resource) {
-                // Link already exists and points to correct target
-                links_created_for_resource += 1;
-            }
-
-            // Step 5: Track in manifest (source = shared path, link_paths = [stable_path, lazer_path])
-            if links_created_for_resource > 0 {
-                let linked_resource = LinkedResource::active(
-                    resource_type,
-                    shared_resource.clone(),
-                    vec![stable_resource.clone(), lazer_resource.clone()],
-                    None,
-                );
-                self.manifest.add_resource(linked_resource);
-
-                result.links_created += links_created_for_resource;
-                result.resources_linked += 1;
-            }
-        }
-
-        Ok(())
+    /// The step for `sets` given directly instead of read from lazer's realm.
+    pub fn sync_sets(
+        &self,
+        sets: &[LazerBeatmapSet],
+        progress: &mut dyn FnMut(StepPhase, usize, usize),
+    ) -> Result<StepReport> {
+        self.ready()?;
+        self.step(sets, progress)
     }
 
-    /// Migrates all contents from source directory to destination.
-    /// Skips files that already exist in the destination.
-    fn migrate_directory_contents(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-        if !src.is_dir() {
-            return Ok(());
-        }
-
-        for entry in fs::read_dir(src).map_err(|e| {
-            Error::Other(format!("Failed to read directory {}: {}", src.display(), e))
-        })? {
-            let entry = entry
-                .map_err(|e| Error::Other(format!("Failed to read directory entry: {}", e)))?;
-            let src_path = entry.path();
-            let file_name = entry.file_name();
-            let dst_path = dst.join(&file_name);
-
-            // Skip if destination already exists (prefer existing content)
-            if dst_path.exists() {
-                continue;
-            }
-
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dst_path)?;
-            } else {
-                fs::copy(&src_path, &dst_path).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to copy {} to {}: {}",
-                        src_path.display(),
-                        dst_path.display(),
-                        e
-                    ))
-                })?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // -------------------------------------------------------------------------
-    // Mode-specific sync implementations
-    // -------------------------------------------------------------------------
-
-    /// Syncs changes in StableMaster mode.
-    ///
-    /// Detects new resources in stable and creates links in lazer.
-    fn sync_stable_master(&mut self) -> Result<SyncResult> {
-        tracing::debug!("Syncing in StableMaster mode");
-
-        let mut result = SyncResult::new();
-
-        // For now, focus on Beatmaps (Songs folder) as the primary use case
-        // Other resource types (Skins, etc.) are folder-level links and don't
-        // need individual item tracking
-
-        let songs_folder = self.stable_path.join("Songs");
-        let lazer_songs = self.lazer_path.join("Songs");
-
-        if !songs_folder.exists() {
-            tracing::debug!("Songs folder not found in stable, nothing to sync");
-            return Ok(result);
-        }
-
-        // Collect current beatmap folders in stable
-        let mut stable_beatmaps: HashSet<PathBuf> = HashSet::new();
-        if let Ok(entries) = fs::read_dir(&songs_folder) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stable_beatmaps.insert(path);
-                }
-            }
-        }
-
-        // Get all beatmap resources currently in manifest
-        let manifest_beatmaps: HashSet<PathBuf> = self
-            .manifest
-            .find_by_type(SharedResourceType::Beatmaps)
-            .iter()
-            .map(|r| r.source_path.clone())
-            .collect();
-
-        // Find new entries (in stable but not in manifest)
-        for beatmap_path in &stable_beatmaps {
-            if !manifest_beatmaps.contains(beatmap_path) {
-                // This is a new beatmap folder
-                let folder_name = match beatmap_path.file_name() {
-                    Some(name) => name,
-                    None => continue,
-                };
-                let link_path = lazer_songs.join(folder_name);
-
-                // Check if link already exists and is valid
-                if link_path.exists() || link_path.symlink_metadata().is_ok() {
-                    if LinkManager::is_link(&link_path) {
-                        if let Ok(target) = LinkManager::read_link(&link_path) {
-                            let beatmap_canonical = beatmap_path.canonicalize().ok();
-                            let target_canonical = target.canonicalize().ok();
-                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical
-                            {
-                                // Link exists and is correct, just add to manifest
-                                self.manifest.add_resource(LinkedResource::active(
-                                    SharedResourceType::Beatmaps,
-                                    beatmap_path.clone(),
-                                    vec![link_path],
-                                    None,
-                                ));
-                                result.new_links += 1;
-                                continue;
-                            }
-                        }
-                        // Link exists but points to wrong target - remove and recreate
-                        if let Err(e) = LinkManager::remove_link(&link_path) {
-                            result.add_error(format!(
-                                "Failed to remove stale link {}: {}",
-                                link_path.display(),
-                                e
-                            ));
-                            continue;
-                        }
-                    } else {
-                        // Regular directory exists - skip (don't overwrite user data)
-                        tracing::debug!(
-                            "Skipping {} - directory already exists in lazer",
-                            folder_name.to_string_lossy()
-                        );
-                        continue;
-                    }
-                }
-
-                // Create the link
-                match self.link_manager.link_directory(beatmap_path, &link_path) {
-                    Ok(_) => {
-                        self.manifest.add_resource(LinkedResource::active(
-                            SharedResourceType::Beatmaps,
-                            beatmap_path.clone(),
-                            vec![link_path],
-                            None,
-                        ));
-                        result.new_links += 1;
-                    }
-                    Err(e) => {
-                        result.add_error(format!(
-                            "Failed to create link for {}: {}",
-                            folder_name.to_string_lossy(),
-                            e
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Find removed entries (in manifest but not in stable)
-        // Collect paths first to avoid borrow issues
-        let stale_paths: Vec<PathBuf> = manifest_beatmaps
-            .iter()
-            .filter(|path| !stable_beatmaps.contains(*path))
-            .cloned()
-            .collect();
-
-        for stale_path in stale_paths {
-            // Mark as stale in manifest
-            if self.manifest.update_status(&stale_path, LinkStatus::Stale) {
-                result.removed += 1;
-                tracing::debug!(
-                    "Marked {} as stale (no longer in stable)",
-                    stale_path.display()
-                );
-            }
-        }
-
-        // Verify existing links are still valid
-        let existing_resources: Vec<(PathBuf, Vec<PathBuf>)> = self
-            .manifest
-            .find_by_type(SharedResourceType::Beatmaps)
-            .iter()
-            .filter(|r| r.status == LinkStatus::Active)
-            .map(|r| (r.source_path.clone(), r.link_paths.clone()))
-            .collect();
-
-        for (source_path, link_paths) in existing_resources {
-            for link_path in link_paths {
-                // Check if link is still valid
-                if !LinkManager::is_link(&link_path) {
-                    // Link is broken or missing - try to recreate
-                    if source_path.exists() {
-                        match self.link_manager.link_directory(&source_path, &link_path) {
-                            Ok(_) => {
-                                result.updated += 1;
-                                tracing::debug!("Recreated link: {}", link_path.display());
-                            }
-                            Err(e) => {
-                                result.add_error(format!(
-                                    "Failed to recreate link {}: {}",
-                                    link_path.display(),
-                                    e
-                                ));
-                                self.manifest
-                                    .update_status(&source_path, LinkStatus::Broken);
-                            }
-                        }
-                    } else {
-                        // Source no longer exists
-                        self.manifest.update_status(&source_path, LinkStatus::Stale);
-                        result.removed += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Syncs changes in LazerMaster mode.
-    ///
-    /// Detects new resources in lazer and creates links in stable.
-    fn sync_lazer_master(&mut self) -> Result<SyncResult> {
-        tracing::debug!("Syncing in LazerMaster mode");
-
-        let mut result = SyncResult::new();
-
-        // For now, focus on Beatmaps (Songs folder) as the primary use case
-        // Other resource types (Skins, etc.) are folder-level links and don't
-        // need individual item tracking
-
-        let lazer_songs = self.lazer_path.join("Songs");
-        let stable_songs = self.stable_path.join("Songs");
-
-        if !lazer_songs.exists() {
-            tracing::debug!("Songs folder not found in lazer, nothing to sync");
-            return Ok(result);
-        }
-
-        // Collect current beatmap folders in lazer
-        let mut lazer_beatmaps: HashSet<PathBuf> = HashSet::new();
-        if let Ok(entries) = fs::read_dir(&lazer_songs) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_dir() {
-                    lazer_beatmaps.insert(path);
-                }
-            }
-        }
-
-        // Get all beatmap resources currently in manifest
-        let manifest_beatmaps: HashSet<PathBuf> = self
-            .manifest
-            .find_by_type(SharedResourceType::Beatmaps)
-            .iter()
-            .map(|r| r.source_path.clone())
-            .collect();
-
-        // Find new entries (in lazer but not in manifest)
-        for beatmap_path in &lazer_beatmaps {
-            if !manifest_beatmaps.contains(beatmap_path) {
-                // This is a new beatmap folder
-                let folder_name = match beatmap_path.file_name() {
-                    Some(name) => name,
-                    None => continue,
-                };
-                let link_path = stable_songs.join(folder_name);
-
-                // Check if link already exists and is valid
-                if link_path.exists() || link_path.symlink_metadata().is_ok() {
-                    if LinkManager::is_link(&link_path) {
-                        if let Ok(target) = LinkManager::read_link(&link_path) {
-                            let beatmap_canonical = beatmap_path.canonicalize().ok();
-                            let target_canonical = target.canonicalize().ok();
-                            if beatmap_canonical.is_some() && beatmap_canonical == target_canonical
-                            {
-                                // Link exists and is correct, just add to manifest
-                                self.manifest.add_resource(LinkedResource::active(
-                                    SharedResourceType::Beatmaps,
-                                    beatmap_path.clone(),
-                                    vec![link_path],
-                                    None,
-                                ));
-                                result.new_links += 1;
-                                continue;
-                            }
-                        }
-                        // Link exists but points to wrong target - remove and recreate
-                        if let Err(e) = LinkManager::remove_link(&link_path) {
-                            result.add_error(format!(
-                                "Failed to remove stale link {}: {}",
-                                link_path.display(),
-                                e
-                            ));
-                            continue;
-                        }
-                    } else {
-                        // Regular directory exists - skip (don't overwrite user data)
-                        tracing::debug!(
-                            "Skipping {} - directory already exists in stable",
-                            folder_name.to_string_lossy()
-                        );
-                        continue;
-                    }
-                }
-
-                // Create the link (stable link -> lazer source)
-                match self.link_manager.create_link(&link_path, beatmap_path) {
-                    Ok(_) => {
-                        self.manifest.add_resource(LinkedResource::active(
-                            SharedResourceType::Beatmaps,
-                            beatmap_path.clone(),
-                            vec![link_path],
-                            None,
-                        ));
-                        result.new_links += 1;
-                    }
-                    Err(e) => {
-                        result.add_error(format!(
-                            "Failed to create link for {}: {}",
-                            folder_name.to_string_lossy(),
-                            e
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Find removed entries (in manifest but not in lazer)
-        // Collect paths first to avoid borrow issues
-        let stale_paths: Vec<PathBuf> = manifest_beatmaps
-            .iter()
-            .filter(|path| !lazer_beatmaps.contains(*path))
-            .cloned()
-            .collect();
-
-        for stale_path in stale_paths {
-            // Mark as stale in manifest
-            if self.manifest.update_status(&stale_path, LinkStatus::Stale) {
-                result.removed += 1;
-                tracing::debug!(
-                    "Marked {} as stale (no longer in lazer)",
-                    stale_path.display()
-                );
-            }
-        }
-
-        // Verify existing links are still valid
-        let existing_resources: Vec<(PathBuf, Vec<PathBuf>)> = self
-            .manifest
-            .find_by_type(SharedResourceType::Beatmaps)
-            .iter()
-            .filter(|r| r.status == LinkStatus::Active)
-            .map(|r| (r.source_path.clone(), r.link_paths.clone()))
-            .collect();
-
-        for (source_path, link_paths) in existing_resources {
-            for link_path in link_paths {
-                // Check if link is still valid
-                if !LinkManager::is_link(&link_path) {
-                    // Link is broken or missing - try to recreate
-                    if source_path.exists() {
-                        match self.link_manager.create_link(&link_path, &source_path) {
-                            Ok(_) => {
-                                result.updated += 1;
-                                tracing::debug!("Recreated link: {}", link_path.display());
-                            }
-                            Err(e) => {
-                                result.add_error(format!(
-                                    "Failed to recreate link {}: {}",
-                                    link_path.display(),
-                                    e
-                                ));
-                                self.manifest
-                                    .update_status(&source_path, LinkStatus::Broken);
-                            }
-                        }
-                    } else {
-                        // Source no longer exists
-                        self.manifest.update_status(&source_path, LinkStatus::Stale);
-                        result.removed += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Syncs changes in TrueUnified mode.
-    ///
-    /// Ensures both installations are properly linked to shared location.
-    fn sync_true_unified(&mut self) -> Result<SyncResult> {
-        tracing::debug!("Syncing in TrueUnified mode");
-
-        let mut result = SyncResult::new();
-
-        // Step 1: Verify shared location exists
-        let shared_path = match self.config.get_shared_path() {
-            Some(path) => path.clone(),
-            None => {
-                result.add_error("TrueUnified mode requires a shared path".to_string());
-                return Ok(result);
+    fn step(
+        &self,
+        sets: &[LazerBeatmapSet],
+        progress: &mut dyn FnMut(StepPhase, usize, usize),
+    ) -> Result<StepReport> {
+        let mut last: Option<(StepPhase, Instant)> = None;
+        let mut progress = |phase: StepPhase, done: usize, total: usize| {
+            let due = last.is_none_or(|(last_phase, at)| {
+                last_phase != phase || done == total || at.elapsed() >= PROGRESS_INTERVAL
+            });
+            if due {
+                last = Some((phase, Instant::now()));
+                progress(phase, done, total);
             }
         };
+        let (songs, files) = (self.songs(), self.files());
 
-        if !shared_path.exists() {
-            result.add_error(format!(
-                "Shared location does not exist: {}",
-                shared_path.display()
-            ));
-            return Ok(result);
-        }
+        let (mut claims, db_note) = StableClaims::from_install(&self.stable)?;
+        let refs: Vec<&LazerBeatmapSet> = sets.iter().collect();
+        let materialized =
+            Materializer::new(&songs, &files).run(&refs, &mut claims, &mut |done, total, _| {
+                progress(StepPhase::Materializing, done, total);
+                ControlFlow::Continue(())
+            })?;
+        let tally = materialized.tally();
+        let totals = materialized.totals();
+        let mut report = StepReport {
+            lazer_sets: sets.len(),
+            sets_written: tally.written,
+            sets_complete: tally.complete,
+            sets_skipped: tally.skipped,
+            sets_failed: tally.failed,
+            files_linked: totals.linked,
+            files_copied: totals.copied,
+            ..StepReport::default()
+        };
+        let line = |(folder, reason): (String, String)| format!("{folder}: {reason}");
+        report.notes.extend(db_note);
+        report.notes.extend(tally.skips.into_iter().map(line));
+        report.errors.extend(tally.errors.into_iter().map(line));
+        report.notes.extend(materialized.notes(&songs));
 
-        // Collect resource types to avoid borrow issues
-        let resource_types: Vec<SharedResourceType> =
-            self.config.shared_resources_iter().cloned().collect();
-
-        for resource_type in resource_types {
-            let folder_name = resource_type.folder_name();
-
-            let shared_resource = shared_path.join(folder_name);
-            let stable_resource = self.stable_path.join(folder_name);
-            let lazer_resource = self.lazer_path.join(folder_name);
-
-            // Skip if shared resource doesn't exist
-            if !shared_resource.exists() {
-                tracing::debug!(
-                    "Shared {} does not exist, skipping",
-                    shared_resource.display()
-                );
-                continue;
-            }
-
-            // Step 2: Check both stable and lazer links point to shared location
-            let mut stable_link_ok = false;
-            let mut lazer_link_ok = false;
-
-            // Check stable link
-            if stable_resource.exists() {
-                if LinkManager::is_link(&stable_resource) {
-                    if let Ok(target) = LinkManager::read_link(&stable_resource) {
-                        let shared_canonical = shared_resource.canonicalize().ok();
-                        let target_canonical = target.canonicalize().ok();
-                        if shared_canonical.is_some() && shared_canonical == target_canonical {
-                            stable_link_ok = true;
-                        } else {
-                            // Link points to wrong target
-                            tracing::debug!("Stable {} link points to wrong target", folder_name);
-                        }
-                    }
-                } else {
-                    // Not a link - this is a problem in TrueUnified mode
-                    tracing::debug!(
-                        "Stable {} is not a link (should be linked to shared)",
-                        folder_name
-                    );
-                }
-            }
-
-            // Check lazer link
-            if lazer_resource.exists() {
-                if LinkManager::is_link(&lazer_resource) {
-                    if let Ok(target) = LinkManager::read_link(&lazer_resource) {
-                        let shared_canonical = shared_resource.canonicalize().ok();
-                        let target_canonical = target.canonicalize().ok();
-                        if shared_canonical.is_some() && shared_canonical == target_canonical {
-                            lazer_link_ok = true;
-                        } else {
-                            // Link points to wrong target
-                            tracing::debug!("Lazer {} link points to wrong target", folder_name);
-                        }
-                    }
-                } else {
-                    // Not a link - this is a problem in TrueUnified mode
-                    tracing::debug!(
-                        "Lazer {} is not a link (should be linked to shared)",
-                        folder_name
-                    );
-                }
-            }
-
-            // Step 3: Repair any broken links
-            // Repair stable link if needed
-            if !stable_link_ok {
-                // Remove existing path if it's a wrong link
-                if stable_resource.exists() && LinkManager::is_link(&stable_resource) {
-                    if let Err(e) = LinkManager::remove_link(&stable_resource) {
-                        result.add_error(format!(
-                            "Failed to remove broken stable link for {}: {}",
-                            folder_name, e
-                        ));
-                        continue;
-                    }
-                }
-
-                // Create link if path doesn't exist
-                if !stable_resource.exists() {
-                    match self
-                        .link_manager
-                        .link_directory(&shared_resource, &stable_resource)
-                    {
-                        Ok(link_info) => {
-                            tracing::info!(
-                                "Repaired stable {} link: {} -> {}",
-                                link_info.link_type,
-                                stable_resource.display(),
-                                shared_resource.display()
-                            );
-                            result.new_links += 1;
-                            stable_link_ok = true;
-                        }
-                        Err(e) => {
-                            result.add_error(format!(
-                                "Failed to create stable link for {}: {}",
-                                folder_name, e
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Repair lazer link if needed
-            if !lazer_link_ok {
-                // Remove existing path if it's a wrong link
-                if lazer_resource.exists() && LinkManager::is_link(&lazer_resource) {
-                    if let Err(e) = LinkManager::remove_link(&lazer_resource) {
-                        result.add_error(format!(
-                            "Failed to remove broken lazer link for {}: {}",
-                            folder_name, e
-                        ));
-                        continue;
-                    }
-                }
-
-                // Create link if path doesn't exist
-                if !lazer_resource.exists() {
-                    match self
-                        .link_manager
-                        .link_directory(&shared_resource, &lazer_resource)
-                    {
-                        Ok(link_info) => {
-                            tracing::info!(
-                                "Repaired lazer {} link: {} -> {}",
-                                link_info.link_type,
-                                lazer_resource.display(),
-                                shared_resource.display()
-                            );
-                            result.new_links += 1;
-                            lazer_link_ok = true;
-                        }
-                        Err(e) => {
-                            result.add_error(format!(
-                                "Failed to create lazer link for {}: {}",
-                                folder_name, e
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // Step 4: Update manifest
-            // Check if this resource is already tracked
-            if let Some(existing) = self.manifest.find_by_source_mut(&shared_resource) {
-                // Update status based on link states
-                if stable_link_ok && lazer_link_ok {
-                    existing.set_status(LinkStatus::Active);
-                    result.updated += 1;
-                } else {
-                    existing.set_status(LinkStatus::Broken);
-                }
-            } else if stable_link_ok || lazer_link_ok {
-                // Add new resource to manifest
-                let mut link_paths = Vec::new();
-                if stable_link_ok {
-                    link_paths.push(stable_resource.clone());
-                }
-                if lazer_link_ok {
-                    link_paths.push(lazer_resource.clone());
-                }
-
-                let status = if stable_link_ok && lazer_link_ok {
-                    LinkStatus::Active
-                } else {
-                    LinkStatus::Broken
-                };
-
-                let mut linked_resource =
-                    LinkedResource::new(resource_type, shared_resource.clone(), link_paths);
-                linked_resource.set_status(status);
-                self.manifest.add_resource(linked_resource);
-            }
-        }
-
-        // Check for stale manifest entries (resources no longer in shared location)
-        let stale_resources: Vec<PathBuf> = self
-            .manifest
-            .iter()
-            .filter(|r| !r.source_path.exists())
-            .map(|r| r.source_path.clone())
-            .collect();
-
-        for stale_path in stale_resources {
-            self.manifest.update_status(&stale_path, LinkStatus::Stale);
-            result.removed += 1;
-            tracing::debug!(
-                "Marked {} as stale (no longer exists)",
-                stale_path.display()
-            );
-        }
-
-        Ok(result)
+        let relinked = Relinker::new(&songs, &files, self.relink_cache.clone())
+            .threads(self.relink_threads)
+            .run(&mut |done, total| progress(StepPhase::Relinking, done, total))?;
+        report.relinked = relinked.relinked;
+        report.bytes_reclaimed = relinked.bytes_reclaimed;
+        report.notes.extend(relinked.notes);
+        report.errors.extend(relinked.errors);
+        Ok(report)
     }
+
+    /// Counts linked and copied files in Songs. Reads only, so it runs while a game is open.
+    pub fn status(&self) -> Result<LinkedStoreStatus> {
+        let songs = self.songs();
+        refuse_link("stable Songs folder", &songs)?;
+        songs_status(&songs)
+    }
+}
+
+/// Counts the files under `songs` by link count, without following links.
+fn songs_status(songs: &Path) -> Result<LinkedStoreStatus> {
+    let mut status = LinkedStoreStatus::default();
+    if !songs.is_dir() {
+        return Ok(status);
+    }
+    for entry in walkdir::WalkDir::new(songs).follow_links(false) {
+        let entry = entry.map_err(|e| Error::Other(e.to_string()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        match link_count_at(entry.path()) {
+            Ok(n) if n >= 2 => {
+                status.linked_files += 1;
+                status.bytes_saved += len;
+            }
+            Ok(_) => status.copied_files += 1,
+            Err(_) => status.unreadable_files += 1,
+        }
+    }
+    Ok(status)
+}
+
+/// True when `path` is a junction or symbolic link rather than a real folder.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn refuse_link(what: &str, path: &Path) -> Result<()> {
+    if is_link(path) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        return Err(Error::UnifiedStorage(format!(
+            "the {what} {path} is a junction or symbolic link, which an older unified storage \
+             mode makes. The linked store needs the real folder there. Remove the link with \
+             rmdir \"{path}\" (without /s, so the folder it points to stays), move the real \
+             folder back (older modes kept it as {name}_backup next to the link), then run \
+             setup again.",
+            path = path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
-    fn test_setup_result() {
-        let mut result = SetupResult::new();
-        assert!(result.is_clean());
+    fn status_counts_links_copies_and_saved_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = dir.path().join("blob");
+        fs::write(&blob, b"0123456789").unwrap();
+        let set = dir.path().join("Songs").join("1 A - B");
+        fs::create_dir_all(&set).unwrap();
+        fs::hard_link(&blob, set.join("audio.mp3")).unwrap();
+        fs::write(set.join("A - B (m) [x].osu"), b"osu").unwrap();
 
-        result.add_warning("Test warning");
-        assert!(!result.is_clean());
-        assert_eq!(result.warnings.len(), 1);
+        let status = songs_status(&dir.path().join("Songs")).unwrap();
+        assert_eq!(
+            status,
+            LinkedStoreStatus {
+                linked_files: 1,
+                copied_files: 1,
+                bytes_saved: 10,
+                unreadable_files: 0,
+            }
+        );
     }
 
     #[test]
-    fn test_sync_result() {
-        let mut result = SyncResult::new();
-        assert!(result.is_success());
-        assert_eq!(result.total_changes(), 0);
-
-        result.new_links = 5;
-        result.updated = 3;
-        result.removed = 1;
-        assert_eq!(result.total_changes(), 9);
-
-        result.add_error("Test error");
-        assert!(!result.is_success());
+    fn a_missing_songs_folder_has_an_empty_status() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            songs_status(&dir.path().join("Songs")).unwrap(),
+            LinkedStoreStatus::default()
+        );
     }
 
     #[test]
-    fn test_sync_result_merge() {
-        let mut result1 = SyncResult::new();
-        result1.new_links = 5;
-        result1.updated = 2;
+    fn a_header_only_realm_commit_changes_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let realm = dir.path().join("client.realm");
+        let mut content = vec![0u8; 4096];
+        content[16..20].copy_from_slice(b"T-DB");
+        fs::write(&realm, &content).unwrap();
+        let before = RealmStamp::read(&realm).unwrap();
+        let modified = fs::metadata(&realm).unwrap().modified().unwrap();
 
-        let mut result2 = SyncResult::new();
-        result2.new_links = 3;
-        result2.removed = 1;
+        let file = File::options().read(true).write(true).open(&realm).unwrap();
+        let mut map = unsafe { memmap2::MmapMut::map_mut(&file) }.unwrap();
+        map[..8].copy_from_slice(&[0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0]);
+        map[23] = 1;
+        map.flush().unwrap();
+        drop(map);
+        file.set_modified(modified).unwrap();
+        drop(file);
 
-        result1.merge(result2);
-
-        assert_eq!(result1.new_links, 8);
-        assert_eq!(result1.updated, 2);
-        assert_eq!(result1.removed, 1);
+        let after = RealmStamp::read(&realm).unwrap();
+        assert_eq!(fs::metadata(&realm).unwrap().len(), 4096);
+        assert_eq!(fs::metadata(&realm).unwrap().modified().unwrap(), modified);
+        assert_eq!((after.len, after.modified), (before.len, before.modified));
+        assert_eq!(
+            after.header,
+            [
+                0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'T', b'-', b'D', b'B',
+                0, 0, 0, 1
+            ]
+        );
+        assert_ne!(after, before);
     }
 
     #[test]
-    fn test_verification_result() {
-        let mut result = VerificationResult::new();
-        assert!(result.is_healthy());
-        assert_eq!(result.health_percentage(), 100.0);
-
-        result.total_links = 10;
-        result.active = 8;
-        result.broken = 2;
-        assert!(!result.is_healthy());
-        assert_eq!(result.health_percentage(), 80.0);
+    fn a_missing_realm_has_no_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(RealmStamp::read(&dir.path().join("client.realm")), None);
     }
 
     #[test]
-    fn test_repair_result() {
-        let mut result = RepairResult::new();
-        assert!(result.is_success());
-        assert_eq!(result.total_actions(), 0);
-
-        result.repaired = 5;
-        result.removed = 2;
-        assert!(result.is_success());
-        assert_eq!(result.total_actions(), 7);
-
-        result.failed = 1;
-        assert!(!result.is_success());
-        assert_eq!(result.total_actions(), 8);
+    fn a_report_with_no_new_files_changed_nothing() {
+        let report = StepReport {
+            sets_complete: 3,
+            ..StepReport::default()
+        };
+        assert_eq!(report.changed_files(), 0);
+        let report = StepReport {
+            files_linked: 2,
+            files_copied: 1,
+            relinked: 4,
+            ..StepReport::default()
+        };
+        assert_eq!(report.changed_files(), 7);
     }
 }
