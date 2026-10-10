@@ -281,7 +281,10 @@ fn watch_loop(
                 }
             }
             Some(p) => {
-                let wait = p.due.max(not_before).saturating_duration_since(Instant::now());
+                let wait = p
+                    .due
+                    .max(not_before)
+                    .saturating_duration_since(Instant::now());
                 if wait.is_zero() {
                     None
                 } else {
