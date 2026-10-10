@@ -1,17 +1,19 @@
-//! Runs the linked-store step when stable's Songs or lazer's realm changes.
+//! Runs the linked-store step when stable's Songs, lazer's `files` store or lazer's
+//! realm changes.
 //!
-//! The watcher sleeps on the OS change feed and wakes only for a change, so an idle
-//! library costs no CPU. A change starts a short quiet period; the step runs once
-//! changes stop for `quiet` (a second at most), or at most `interval` after the first
-//! change. A step refused because osu!stable runs is retried an interval later, and
-//! the watcher logs why.
+//! The watcher sleeps on the OS change feed for Songs and `files`. A change starts a
+//! short quiet period; the step runs once changes stop for `quiet` (a second at most),
+//! or at most `interval` after the first change. A step refused because osu!stable
+//! runs is retried an interval later, and the watcher logs why.
 //!
-//! Lazer commits a new set to `client.realm` after writing its blobs, so the watcher
-//! follows the realm and not lazer's `files` store. The step never writes the realm,
-//! so a realm change counts whenever its modified time or size differs from what
-//! the last step stamped right before reading it. Changes arriving during a step are
-//! dropped, and Songs changes within a grace period after it are the step's own; a
-//! realm commit made meanwhile still differs from the stamp and gets its own step.
+//! Lazer writes a new set's blobs as ordinary files, which the feed reports, then
+//! commits the set to `client.realm` through a mapped view, which changes neither the
+//! realm's modified time nor its size and raises no change event. Every commit rewrites
+//! the realm's header, so while idle the watcher reads the realm stamp (size, modified
+//! time and 24 header bytes) once per interval, and a stamp that differs from the one
+//! the last step took right before reading the realm runs the step. Changes arriving
+//! during a step are dropped, and Songs and `files` changes within a grace period after
+//! it are the step's own.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, RecursiveMode, Watcher};
 
-use super::engine::{FileStamp, StepReport, UnifiedStorageEngine};
+use super::engine::{RealmStamp, StepReport, UnifiedStorageEngine};
 use crate::error::{Error, Result};
 use crate::linkstore::is_temp_name;
 
@@ -84,6 +86,7 @@ impl fmt::Display for WatchEvent {
 #[derive(Debug, Clone)]
 struct TriggerFilter {
     songs: PathBuf,
+    files: PathBuf,
     realm: PathBuf,
 }
 
@@ -92,23 +95,29 @@ struct TriggerFilter {
 enum ChangeSource {
     /// Stable's Songs folder, which the step writes too.
     Songs,
+    /// Lazer's `files` store, where lazer writes a new set's blobs.
+    Library,
     /// Lazer's `client.realm`, which the step only reads.
     Realm,
 }
 
 impl TriggerFilter {
-    fn new(songs: &Path, realm: &Path) -> Self {
+    fn new(songs: &Path, files: &Path, realm: &Path) -> Self {
         let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
         Self {
             songs: abs(songs),
+            files: abs(files),
             realm: abs(realm),
         }
     }
 
-    /// The folders to watch: Songs recursively, and the folder holding `client.realm`
-    /// on its own.
+    /// The folders to watch: Songs and `files` recursively, and the folder holding
+    /// `client.realm` on its own.
     fn watch_targets(&self) -> Vec<(PathBuf, RecursiveMode)> {
-        let mut targets = vec![(self.songs.clone(), RecursiveMode::Recursive)];
+        let mut targets = vec![
+            (self.songs.clone(), RecursiveMode::Recursive),
+            (self.files.clone(), RecursiveMode::Recursive),
+        ];
         if let Some(dir) = self.realm.parent() {
             targets.push((dir.to_path_buf(), RecursiveMode::NonRecursive));
         }
@@ -117,20 +126,24 @@ impl TriggerFilter {
 
     /// Where a change to `path` came from, or `None` when it should not run the step:
     /// osu-sync's temp files, `.tmp` files, realm lock and note files, and anything
-    /// else outside Songs, lazer's blobs included.
+    /// else outside Songs and `files`.
     fn classify(&self, path: &Path) -> Option<ChangeSource> {
         if path == self.realm {
             return Some(ChangeSource::Realm);
         }
-        if !path.starts_with(&self.songs) {
+        let source = if path.starts_with(&self.songs) {
+            ChangeSource::Songs
+        } else if path.starts_with(&self.files) {
+            ChangeSource::Library
+        } else {
             return None;
-        }
+        };
         let name = path.file_name()?.to_string_lossy();
         let temp = is_temp_name(&name)
             || Path::new(name.as_ref())
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("tmp"));
-        (!temp).then_some(ChangeSource::Songs)
+        (!temp).then_some(source)
     }
 }
 
@@ -142,7 +155,7 @@ pub fn watch(
     log: &mut dyn FnMut(WatchEvent),
 ) -> Result<()> {
     engine.preflight()?;
-    let filter = TriggerFilter::new(&engine.songs(), &engine.realm());
+    let filter = TriggerFilter::new(&engine.songs(), &engine.files(), &engine.realm());
     let (tx, rx) = std::sync::mpsc::channel();
     let stepping = Arc::new(AtomicBool::new(false));
     let mut watcher = notify::recommended_watcher(feed(tx, stepping.clone()))
@@ -159,7 +172,7 @@ pub fn watch(
         timing,
         &stepping,
         &mut || engine.sync(&mut |_, _, _| {}),
-        &|| FileStamp::of(&realm),
+        &|| RealmStamp::read(&realm),
         log,
     );
     Err(Error::WatcherError("the change feed closed".to_string()))
@@ -178,26 +191,33 @@ fn feed(
 }
 
 /// The watcher's loop over a change feed, with the step and the realm stamp passed
-/// in. Sets `stepping` while the step runs. Runs one step at start, to catch up, and
-/// returns when `rx` closes.
+/// in. Sets `stepping` while the step runs. Runs one step at start, to catch up, reads
+/// the realm stamp once per interval while idle, and returns when `rx` closes.
 fn watch_loop(
     rx: &Receiver<notify::Result<Event>>,
     filter: &TriggerFilter,
     timing: WatchTiming,
     stepping: &AtomicBool,
     step: &mut dyn FnMut() -> Result<StepReport>,
-    realm_stamp: &dyn Fn() -> Option<FileStamp>,
+    realm_stamp: &dyn Fn() -> Option<RealmStamp>,
     log: &mut dyn FnMut(WatchEvent),
 ) {
     let mut pending = Some(Pending::by(Instant::now()));
     let mut grace_until: Option<Instant> = None;
-    let mut last_realm: Option<FileStamp> = None;
+    let mut last_realm: Option<RealmStamp> = None;
 
     loop {
         let message = match &pending {
-            None => match rx.recv() {
+            None => match rx.recv_timeout(timing.interval) {
                 Ok(message) => Some(message),
-                Err(_) => return,
+                Err(RecvTimeoutError::Timeout) => {
+                    if realm_committed(realm_stamp, last_realm) {
+                        log(WatchEvent::Changed(filter.realm.clone()));
+                        pending = Some(Pending::by(Instant::now()));
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
             },
             Some(p) => {
                 let wait = p.due.saturating_duration_since(Instant::now());
@@ -234,22 +254,31 @@ fn watch_loop(
         let retry = Pending::by(Instant::now() + timing.interval);
         match result {
             Ok(report) => {
-                let read = report.realm_stamp;
+                last_realm = report.realm_stamp.or(last_realm);
                 log(WatchEvent::Ran(report));
-                if read.is_some() {
-                    last_realm = read;
-                    if realm_stamp() != read {
-                        pending = Some(retry);
-                    }
+                if realm_committed(realm_stamp, last_realm) {
+                    pending = Some(retry);
                 }
             }
             Err(Error::GameRunning { .. }) => {
                 log(WatchEvent::Deferred);
                 pending = Some(retry);
             }
-            Err(e) => log(WatchEvent::Failed(e.to_string())),
+            Err(e) => {
+                last_realm = realm_stamp().or(last_realm);
+                log(WatchEvent::Failed(e.to_string()));
+            }
         }
     }
+}
+
+/// True when the realm can be read and its stamp differs from `last`. An unreadable
+/// realm never counts as a commit.
+fn realm_committed(
+    realm_stamp: &dyn Fn() -> Option<RealmStamp>,
+    last: Option<RealmStamp>,
+) -> bool {
+    realm_stamp().is_some_and(|now| Some(now) != last)
 }
 
 /// The path that makes `message` run the step, if it should.
@@ -257,8 +286,8 @@ fn trigger(
     message: &notify::Result<Event>,
     filter: &TriggerFilter,
     in_grace: bool,
-    last_realm: Option<FileStamp>,
-    realm_stamp: &dyn Fn() -> Option<FileStamp>,
+    last_realm: Option<RealmStamp>,
+    realm_stamp: &dyn Fn() -> Option<RealmStamp>,
 ) -> Option<PathBuf> {
     let event = match message {
         Ok(event) => event,
@@ -271,8 +300,8 @@ fn trigger(
         .paths
         .iter()
         .find(|path| match filter.classify(path) {
-            Some(ChangeSource::Songs) => !in_grace,
-            Some(ChangeSource::Realm) => last_realm.is_none() || realm_stamp() != last_realm,
+            Some(ChangeSource::Songs | ChangeSource::Library) => !in_grace,
+            Some(ChangeSource::Realm) => realm_committed(realm_stamp, last_realm),
             None => false,
         })
         .cloned()
@@ -303,7 +332,11 @@ mod tests {
     use std::time::SystemTime;
 
     fn filter() -> TriggerFilter {
-        TriggerFilter::new(Path::new(r"C:\s\Songs"), Path::new(r"C:\l\client.realm"))
+        TriggerFilter::new(
+            Path::new(r"C:\s\Songs"),
+            Path::new(r"C:\l\files"),
+            Path::new(r"C:\l\client.realm"),
+        )
     }
 
     fn fast() -> WatchTiming {
@@ -322,10 +355,15 @@ mod tests {
         tx.send(event(path)).unwrap();
     }
 
-    fn stamp(secs: u64) -> Option<FileStamp> {
-        Some(FileStamp {
-            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
+    /// A realm stamp whose header holds `commit`; size and modified time never change,
+    /// as with a commit through a mapped view.
+    fn stamp(commit: u64) -> Option<RealmStamp> {
+        let mut header = [0u8; super::super::engine::REALM_HEADER_LEN];
+        header[..8].copy_from_slice(&commit.to_le_bytes());
+        Some(RealmStamp {
+            modified: SystemTime::UNIX_EPOCH,
             len: 10,
+            header,
         })
     }
 
@@ -347,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn songs_and_realm_changes_trigger_and_blobs_and_temp_files_do_not() {
+    fn songs_blob_and_realm_changes_trigger_and_temp_files_do_not() {
         let f = filter();
         let classify = |p: &str| f.classify(Path::new(p));
         assert_eq!(
@@ -355,7 +393,12 @@ mod tests {
             Some(ChangeSource::Songs)
         );
         assert_eq!(classify(r"C:\l\client.realm"), Some(ChangeSource::Realm));
-        assert_eq!(classify(r"C:\l\files\a\ab\abcdef"), None);
+        assert_eq!(
+            classify(r"C:\l\files\a\ab\abcdef"),
+            Some(ChangeSource::Library)
+        );
+        assert_eq!(classify(r"C:\l\files\a\ab\abcdef.tmp"), None);
+        assert_eq!(classify(r"C:\l\exports\x.osz"), None);
         assert_eq!(classify(r"C:\l\client.realm.lock"), None);
         assert_eq!(classify(r"C:\l\client.realm.note"), None);
         assert_eq!(
@@ -367,12 +410,13 @@ mod tests {
     }
 
     #[test]
-    fn the_watcher_follows_songs_and_the_realm_folder_only() {
+    fn the_watcher_follows_songs_files_and_the_realm_folder() {
         let targets = filter().watch_targets();
         assert_eq!(
             targets,
             [
                 (PathBuf::from(r"C:\s\Songs"), RecursiveMode::Recursive),
+                (PathBuf::from(r"C:\l\files"), RecursiveMode::Recursive),
                 (PathBuf::from(r"C:\l"), RecursiveMode::NonRecursive),
             ]
         );
@@ -420,18 +464,41 @@ mod tests {
     }
 
     #[test]
-    fn a_blob_write_alone_runs_no_step_and_the_realm_commit_after_it_does() {
+    fn a_blob_write_under_files_runs_a_step() {
         let (tx, rx) = channel();
         let steps = Cell::new(0);
-        let realm = Arc::new(std::sync::atomic::AtomicU64::new(1));
-        let commit = realm.clone();
+        let mut log = Vec::new();
         let feeder = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
             send(&tx, r"C:\l\files\0\00\new-blob");
             std::thread::sleep(Duration::from_millis(600));
+        });
+        run(
+            &rx,
+            &mut || {
+                steps.set(steps.get() + 1);
+                Ok(StepReport::default())
+            },
+            &mut |e| log.push(e),
+        );
+        feeder.join().unwrap();
+        assert_eq!(steps.get(), 2);
+        assert_eq!(
+            log[1],
+            WatchEvent::Changed(PathBuf::from(r"C:\l\files\0\00\new-blob"))
+        );
+    }
+
+    #[test]
+    fn a_header_only_realm_commit_with_no_change_event_runs_a_step() {
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        let realm = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let commit = realm.clone();
+        let feeder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
             commit.store(2, Ordering::Relaxed);
-            send(&tx, r"C:\l\client.realm");
-            std::thread::sleep(Duration::from_millis(600));
+            std::thread::sleep(Duration::from_millis(1200));
+            drop(tx);
         });
         let seen = RefCell::new(Vec::new());
         watch_loop(
@@ -440,7 +507,6 @@ mod tests {
             fast(),
             &AtomicBool::new(false),
             &mut || {
-                steps.set(steps.get() + 1);
                 seen.borrow_mut().push(realm.load(Ordering::Relaxed));
                 Ok(StepReport {
                     realm_stamp: stamp(realm.load(Ordering::Relaxed)),

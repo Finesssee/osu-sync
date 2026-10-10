@@ -6,6 +6,8 @@
 //! lazer blobs into links. Setup, the watcher and "sync now" all run this step, and
 //! a rerun with nothing new changes nothing.
 
+use std::fs::File;
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -62,9 +64,9 @@ pub struct StepReport {
     pub bytes_reclaimed: u64,
     pub notes: Vec<String>,
     pub errors: Vec<String>,
-    /// `client.realm`'s modified time and size right before the step read it.
+    /// `client.realm`'s stamp right before the step read it.
     #[serde(skip)]
-    pub(crate) realm_stamp: Option<FileStamp>,
+    pub(crate) realm_stamp: Option<RealmStamp>,
 }
 
 impl StepReport {
@@ -89,21 +91,53 @@ impl StepReport {
     }
 }
 
-/// A file's modified time and size, to tell whether it changed between two looks.
+/// Bytes at the start of a realm file that change on every commit: two top refs and
+/// the flag byte that selects between them.
+pub(crate) const REALM_HEADER_LEN: usize = 24;
+
+/// What tells one state of `client.realm` from another. Realm commits through a mapped
+/// view, which changes neither the modified time nor the size and raises no change
+/// event, but every commit rewrites the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FileStamp {
-    pub modified: SystemTime,
-    pub len: u64,
+pub(crate) struct RealmStamp {
+    pub(crate) modified: SystemTime,
+    pub(crate) len: u64,
+    pub(crate) header: [u8; REALM_HEADER_LEN],
 }
 
-impl FileStamp {
-    pub(crate) fn of(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
+impl RealmStamp {
+    /// Reads the stamp without writing or locking: the file is opened for reading only
+    /// and shares read, write and delete with lazer.
+    pub(crate) fn read(path: &Path) -> Option<Self> {
+        let file = open_shared(path).ok()?;
+        let meta = file.metadata().ok()?;
+        let mut head = Vec::with_capacity(REALM_HEADER_LEN);
+        file.take(REALM_HEADER_LEN as u64)
+            .read_to_end(&mut head)
+            .ok()?;
+        let mut header = [0u8; REALM_HEADER_LEN];
+        header[..head.len()].copy_from_slice(&head);
         Some(Self {
             modified: meta.modified().ok()?,
             len: meta.len(),
+            header,
         })
     }
+}
+
+#[cfg(windows)]
+fn open_shared(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x1 | 0x2 | 0x4;
+    File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_shared(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 /// How much of Songs shares its data with lazer's store.
@@ -219,7 +253,7 @@ impl UnifiedStorageEngine {
         progress(StepPhase::Reading, 0, 0);
         // Stamped before the export reads the realm, so a commit during the export
         // changes the stamp the watcher compares against and gets its own step.
-        let realm_stamp = FileStamp::of(&self.realm());
+        let realm_stamp = RealmStamp::read(&self.realm());
         let db = LazerDatabase::open(&self.lazer)?;
         let mut report = self.step(db.sets(), progress)?;
         report.notes.extend(db.skipped().map(ToString::to_string));
@@ -371,6 +405,45 @@ mod tests {
             songs_status(&dir.path().join("Songs")).unwrap(),
             LinkedStoreStatus::default()
         );
+    }
+
+    #[test]
+    fn a_header_only_realm_commit_changes_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let realm = dir.path().join("client.realm");
+        let mut content = vec![0u8; 4096];
+        content[16..20].copy_from_slice(b"T-DB");
+        fs::write(&realm, &content).unwrap();
+        let before = RealmStamp::read(&realm).unwrap();
+        let modified = fs::metadata(&realm).unwrap().modified().unwrap();
+
+        let file = File::options().read(true).write(true).open(&realm).unwrap();
+        let mut map = unsafe { memmap2::MmapMut::map_mut(&file) }.unwrap();
+        map[..8].copy_from_slice(&[0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0]);
+        map[23] = 1;
+        map.flush().unwrap();
+        drop(map);
+        file.set_modified(modified).unwrap();
+        drop(file);
+
+        let after = RealmStamp::read(&realm).unwrap();
+        assert_eq!(fs::metadata(&realm).unwrap().len(), 4096);
+        assert_eq!(fs::metadata(&realm).unwrap().modified().unwrap(), modified);
+        assert_eq!((after.len, after.modified), (before.len, before.modified));
+        assert_eq!(
+            after.header,
+            [
+                0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'T', b'-', b'D',
+                b'B', 0, 0, 0, 1
+            ]
+        );
+        assert_ne!(after, before);
+    }
+
+    #[test]
+    fn a_missing_realm_has_no_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(RealmStamp::read(&dir.path().join("client.realm")), None);
     }
 
     #[test]

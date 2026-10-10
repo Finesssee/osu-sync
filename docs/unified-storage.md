@@ -66,16 +66,20 @@ does not prove the other name is in lazer's store.
 
 ## Watcher
 
-`unified watch` runs one catch-up step, then watches Songs recursively and the folder
-that holds lazer's `client.realm`. Lazer commits a new set to the realm after writing its
-blobs, so the watcher follows the realm, not `files`. After a change, the step runs once
-changes stop for a quiet second, and at most `watcher_interval_secs` (default 5) after
-the first change.
+`unified watch` runs one catch-up step, then watches Songs and lazer's `files` store
+recursively, plus the folder that holds lazer's `client.realm`. Lazer writes a new set's
+blobs into `files` as ordinary files, which raise change events. It then commits the set
+to the realm through a memory map, which changes neither the realm's modified time nor
+its size and raises no change event. Every commit rewrites the realm's 24-byte header, so
+while idle the watcher reads the realm's size, modified time and header once per interval
+(a shared read that never locks or writes the file), and a new header runs the step.
+After a change, the step runs once changes stop for a quiet second, and at most
+`watcher_interval_secs` (default 5) after the first change.
 
 The watcher ignores temp files and realm events without a new realm commit. It drops
-changes that arrive while a step runs, and treats Songs changes in the two seconds after
-a step as the step's own writes. Each step stamps the realm's modified time and size right
-before it reads the realm, so a commit made during a step still gets its own step. While
+changes that arrive while a step runs, and treats Songs and `files` changes in the two
+seconds after a step as the step's own writes. Each step stamps the realm right before it
+reads the realm, so a commit made during a step still gets its own step. While
 osu!stable runs, the watcher logs why it waits and retries after the interval. The
 watcher runs only from the CLI; the TUI has no watcher.
 
