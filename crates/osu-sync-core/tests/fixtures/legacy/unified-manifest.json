@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "mode": "TrueUnified",
+  "created_at": "2026-10-10T04:41:09.592048800Z",
+  "updated_at": "2026-10-10T04:41:09.592079100Z",
+  "resources": [
+    {
+      "resource_type": "Beatmaps",
+      "source_path": "D:\\osu-shared\\Songs",
+      "link_paths": [
+        "D:\\osu!\\Songs"
+      ],
+      "content_hash": null,
+      "modified_at": "2026-10-10T04:41:09.592067100Z",
+      "status": "Pending"
+    }
+  ]
+}

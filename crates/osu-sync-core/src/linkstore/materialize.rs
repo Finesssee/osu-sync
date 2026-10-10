@@ -14,7 +14,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::beatmap::folder_name;
 use crate::config::live_guard;
 use crate::error::{Error, Result};
-use crate::lazer::LazerBeatmapSet;
+use crate::lazer::{LazerBeatmapSet, StableDatabase};
 use crate::unified::{
     classify_hard_link_error, rename_no_replace, same_volume, GameLaunchDetector, HardLinkFailure,
 };
@@ -275,6 +275,44 @@ impl MaterializeReport {
             _ => None,
         })
     }
+
+    /// The sets by outcome, with each skip and failure as folder and reason.
+    pub fn tally(&self) -> SetTally {
+        let mut tally = SetTally::default();
+        for set in &self.sets {
+            for reason in &set.left_out {
+                tally.skips.push((set.folder.clone(), reason.to_string()));
+            }
+            match &set.outcome {
+                SetOutcome::Materialized(counts) if counts.created() > 0 => tally.written += 1,
+                SetOutcome::Materialized(_) => tally.complete += 1,
+                SetOutcome::Skipped(reason) => {
+                    tally.skipped += 1;
+                    tally.skips.push((set.folder.clone(), reason.to_string()));
+                }
+                SetOutcome::Failed(message) => {
+                    tally.failed += 1;
+                    tally.errors.push((set.folder.clone(), message.clone()));
+                }
+            }
+        }
+        tally
+    }
+}
+
+/// A run's sets by outcome; see [`MaterializeReport::tally`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetTally {
+    /// Sets that got at least one new file.
+    pub written: usize,
+    /// Sets whose folder was already complete.
+    pub complete: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    /// Folder and reason for each skipped set and each left-out `.osu` file, in run order.
+    pub skips: Vec<(String, String)>,
+    /// Folder and message for each failed set.
+    pub errors: Vec<(String, String)>,
 }
 
 /// What stable already holds: folders with their `.osu` names, and beatmap MD5s.
@@ -320,6 +358,37 @@ impl StableClaims {
             }
         }
         Ok(claims)
+    }
+
+    /// [`Self::from_songs`] for the Songs folder of the osu!stable install at `stable`,
+    /// plus the beatmaps its osu!.db lists. Returns a note when osu!.db exists but
+    /// cannot be read, since duplicates are then checked by the Songs listing alone.
+    pub fn from_install(stable: &Path) -> io::Result<(Self, Option<String>)> {
+        let mut claims = Self::from_songs(&stable.join("Songs"))?;
+        if !stable.join("osu!.db").is_file() {
+            return Ok((claims, None));
+        }
+        let note = match StableDatabase::open(stable) {
+            Ok(db) => {
+                for beatmap in db.raw_beatmaps() {
+                    if let Some(folder) = beatmap.folder_name.as_deref() {
+                        claims.claim(
+                            folder,
+                            beatmap.file_name.as_deref(),
+                            beatmap.hash.as_deref(),
+                        );
+                    }
+                }
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Could not read osu!.db, using the Songs listing only: {e}");
+                Some(format!(
+                    "osu!.db could not be read, so duplicates were checked against the Songs folder only: {e}"
+                ))
+            }
+        };
+        Ok((claims, note))
     }
 
     /// Records that `folder` holds a beatmap, as listed in Songs or in osu!.db.
@@ -923,19 +992,23 @@ pub(super) fn is_same_file(a: &Path, b: &Path) -> io::Result<bool> {
     Ok(attributes_handle(a)? == attributes_handle(b)?)
 }
 
-#[cfg(windows)]
 fn attributes_handle(path: &Path) -> io::Result<same_file::Handle> {
+    same_file::Handle::from_file(open_attributes(path)?)
+}
+
+/// Opens `path` for its attributes only, which needs no wait for an antivirus scan.
+#[cfg(windows)]
+pub(super) fn open_attributes(path: &Path) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_READ_ATTRIBUTES: u32 = 0x80;
-    let file = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES)
-        .open(path)?;
-    same_file::Handle::from_file(file)
+        .open(path)
 }
 
 #[cfg(not(windows))]
-fn attributes_handle(path: &Path) -> io::Result<same_file::Handle> {
-    same_file::Handle::from_path(path)
+pub(super) fn open_attributes(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 fn invalid_data(message: String) -> io::Error {
@@ -959,7 +1032,7 @@ fn is_top_level_osu(path: &Path) -> bool {
     path.components().count() == 1 && is_osu(path)
 }
 
-pub(super) fn is_temp_name(name: &str) -> bool {
+pub(crate) fn is_temp_name(name: &str) -> bool {
     name.starts_with(TEMP_PREFIX) && name.ends_with(TEMP_SUFFIX)
 }
 
@@ -2186,5 +2259,22 @@ AudioFilename: audio.mp3
             }
         );
         assert!(!folder.join(OSU_NAME).exists());
+    }
+
+    #[test]
+    fn an_unreadable_osu_db_becomes_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, note) = StableClaims::from_install(dir.path()).unwrap();
+        assert_eq!(note, None);
+
+        fs::write(dir.path().join("osu!.db"), b"not a db").unwrap();
+        let (_, note) = StableClaims::from_install(dir.path()).unwrap();
+        let note = note.unwrap();
+        assert!(
+            note.starts_with(
+                "osu!.db could not be read, so duplicates were checked against the Songs folder only: "
+            ),
+            "{note}"
+        );
     }
 }

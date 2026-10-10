@@ -327,7 +327,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             unified_config::render(frame, chunks[1], screen);
         }
         AppState::UnifiedSetup { screen } => {
-            screen.render(frame, chunks[1]);
+            unified_setup::render(frame, chunks[1], screen);
         }
         AppState::UnifiedStatus { screen } => {
             unified_status::render(frame, chunks[1], screen);
@@ -610,7 +610,7 @@ fn render_state(frame: &mut Frame, area: Rect, state: &AppState, app: &App) {
             unified_config::render(frame, area, screen);
         }
         AppState::UnifiedSetup { screen } => {
-            screen.render(frame, area);
+            unified_setup::render(frame, area, screen);
         }
         AppState::UnifiedStatus { screen } => {
             unified_status::render(frame, area, screen);
@@ -763,14 +763,15 @@ fn get_hints(state: &AppState) -> Vec<(&'static str, &'static str)> {
         AppState::ReplayProgress { .. } => vec![("Esc", "Cancel")],
         AppState::ReplayComplete { .. } => vec![("Enter", "Back to Menu")],
         AppState::UnifiedConfig { .. } => vec![
-            ("Enter", "Select/Toggle"),
-            ("Tab", "Next Section"),
+            ("Enter", "Apply"),
             ("j/k", "Navigate"),
+            ("s", "Status"),
             ("Esc", "Back"),
         ],
-        AppState::UnifiedSetup { .. } => vec![("Esc", "Cancel")],
+        AppState::UnifiedSetup { screen } if screen.is_finished() => vec![("Esc", "Back")],
+        AppState::UnifiedSetup { .. } => vec![],
         AppState::UnifiedStatus { .. } => {
-            vec![("Enter", "Action"), ("←/→", "Navigate"), ("Esc", "Back")]
+            vec![("r", "Refresh"), ("s", "Sync Now"), ("Esc", "Back")]
         }
         AppState::Help { .. } => vec![("Any key", "Close")],
         AppState::Exiting => vec![],

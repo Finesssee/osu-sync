@@ -48,24 +48,8 @@ pub enum Error {
     #[error("Unified storage error: {0}")]
     UnifiedStorage(String),
 
-    #[error("Failed to create symlink/junction from {source_path} to {link_path}: {message}")]
-    LinkCreation {
-        source_path: PathBuf,
-        link_path: PathBuf,
-        message: String,
-    },
-
-    #[error("Symlink/junction is broken: {path}")]
-    BrokenLink { path: PathBuf },
-
-    #[error("Elevated privileges required for symlink creation")]
-    ElevationRequired,
-
     #[error("Game is currently running: {game}")]
     GameRunning { game: String },
-
-    #[error("Migration failed at step '{step}': {message}")]
-    MigrationFailed { step: String, message: String },
 
     #[error("Refusing to write {dest}: {}", .origin.refusal(.root))]
     LiveWriteRefused {
@@ -79,9 +63,6 @@ pub enum Error {
 
     #[error("File watcher error: {0}")]
     WatcherError(String),
-
-    #[error("Manifest error: {0}")]
-    ManifestError(String),
 }
 
 /// Result type alias for osu-sync operations

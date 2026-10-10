@@ -18,7 +18,9 @@ use osu_sync_core::lazer::LazerDatabase;
 use osu_sync_core::stable::StableScanner;
 use osu_sync_core::stats::StatsAnalyzer;
 use osu_sync_core::sync::{SyncDirection, SyncEngineBuilder, SyncProgress};
-use osu_sync_core::unified::{SharedResourceType, UnifiedStorageMode};
+use osu_sync_core::unified::{
+    legacy_notes, save_mode, UnifiedStorageEngine, UnifiedStorageMode, DISABLED_NOTE,
+};
 use osu_sync_core::Error as CoreError;
 
 use crate::app::{AppMessage, ScanResult, WorkerMessage};
@@ -190,21 +192,18 @@ fn run_worker(
                     rename_pattern,
                 );
             }
-            Ok(WorkerMessage::StartUnifiedSetup {
-                mode,
-                shared_path,
-                resources,
-            }) => {
-                handle_unified_setup(&app_tx, &config, mode, shared_path, resources);
+            Ok(WorkerMessage::StartUnifiedSetup) => {
+                handle_unified_setup(&app_tx, &config);
             }
             Ok(WorkerMessage::GetUnifiedStatus) => {
                 handle_unified_status(&app_tx, &config);
             }
-            Ok(WorkerMessage::VerifyUnifiedLinks) => {
-                handle_unified_verify(&app_tx, &config);
-            }
-            Ok(WorkerMessage::RepairUnifiedLinks) => {
-                handle_unified_repair(&app_tx);
+            Ok(WorkerMessage::GetUnifiedMode) => {
+                let unified = config_snapshot(&config).unified();
+                let _ = app_tx.send(AppMessage::UnifiedMode {
+                    mode: unified.mode,
+                    notice: unified.retired_mode_notice(),
+                });
             }
             Ok(WorkerMessage::DisableUnifiedStorage) => {
                 handle_unified_disable(&app_tx, &config);
@@ -1078,199 +1077,63 @@ fn handle_replay_export(
     }
 }
 
-fn handle_unified_setup(
-    app_tx: &Sender<AppMessage>,
-    config: &Arc<RwLock<Config>>,
-    mode: UnifiedStorageMode,
-    shared_path: Option<PathBuf>,
-    _resources: Vec<SharedResourceType>,
-) {
-    let config = config_snapshot(config);
-    use osu_sync_core::unified::{UnifiedMigration, UnifiedStorageConfig};
-
-    // Get stable and lazer paths
-    let stable_path = match config.stable_path.as_ref() {
-        Some(p) => p.clone(),
-        None => {
-            let _ = app_tx.send(AppMessage::Error(
-                "osu!stable path not configured".to_string(),
-            ));
-            return;
-        }
-    };
-
-    let lazer_path = match config.lazer_path.as_ref() {
-        Some(p) => p.clone(),
-        None => {
-            let _ = app_tx.send(AppMessage::Error(
-                "osu!lazer path not configured".to_string(),
-            ));
-            return;
-        }
-    };
-
-    // Send initial progress
-    let _ = app_tx.send(AppMessage::UnifiedStorageProgress {
-        phase: "Preparing".to_string(),
-        current: 0,
-        total: 100,
-        message: "Initializing unified storage setup...".to_string(),
-    });
-
-    // Create unified storage config based on mode
-    let unified_config = match mode {
-        UnifiedStorageMode::Disabled => UnifiedStorageConfig::disabled(),
-        UnifiedStorageMode::StableMaster => UnifiedStorageConfig::stable_master(),
-        UnifiedStorageMode::LazerMaster => UnifiedStorageConfig::lazer_master(),
-        UnifiedStorageMode::TrueUnified => {
-            if let Some(path) = shared_path {
-                UnifiedStorageConfig::true_unified(path)
-            } else {
-                let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
-                    success: false,
-                    message: "Shared path required for True Unified mode".to_string(),
-                    links_created: 0,
-                    space_saved: 0,
-                });
-                return;
-            }
-        }
-    };
-
-    // Create migration
-    let mut migration = UnifiedMigration::new(unified_config, stable_path, lazer_path);
-
-    // Create progress callback
-    let progress_tx = app_tx.clone();
-    let progress_callback = move |progress: osu_sync_core::unified::MigrationProgress| {
-        let _ = progress_tx.send(AppMessage::UnifiedStorageProgress {
-            phase: progress.step_name.clone(),
-            current: progress.current_step,
-            total: progress.total_steps,
-            message: format!(
-                "Step {}/{}: {}",
-                progress.current_step, progress.total_steps, progress.step_name
-            ),
-        });
-    };
-
-    // Execute the migration
-    match migration.execute(progress_callback) {
-        Ok(result) => {
-            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
-                success: result.success,
-                message: if result.success {
-                    "Unified storage setup complete!".to_string()
-                } else {
-                    result
-                        .errors
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown error".to_string())
-                },
-                links_created: result.links_created,
-                space_saved: result.space_saved,
-            });
-        }
-        Err(e) => {
-            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
-                success: false,
-                message: format!("Migration failed: {}", e),
-                links_created: 0,
-                space_saved: 0,
-            });
-        }
-    }
-}
-
-fn handle_unified_status(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
-    let config = config_snapshot(config);
-    // Get current unified storage config
-    let unified_config = config.unified_storage.clone().unwrap_or_default();
-    let mode = format!("{:?}", unified_config.mode);
-
-    // For now, return basic status
-    // In a full implementation, we'd scan the manifest and verify links
-    let _ = app_tx.send(AppMessage::UnifiedStorageStatus {
-        mode,
-        active_links: 0,
-        broken_links: 0,
-        space_saved: 0,
-    });
-}
-
-fn handle_unified_verify(app_tx: &Sender<AppMessage>, config: &Arc<RwLock<Config>>) {
-    let config = config_snapshot(config);
-    // Check if unified storage is enabled
-    let unified_config = config.unified_storage.clone().unwrap_or_default();
-    if unified_config.mode == UnifiedStorageMode::Disabled {
-        let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
-            healthy: 0,
-            broken: 0,
-            repaired: 0,
-        });
-        return;
-    }
-
-    // For now, just return a basic status
-    // In a full implementation, we'd check each junction/symlink
-    let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
-        healthy: 0,
-        broken: 0,
-        repaired: 0,
-    });
-}
-
-fn handle_unified_repair(app_tx: &Sender<AppMessage>) {
-    // Similar to verify but attempts to fix broken links
-    let _ = app_tx.send(AppMessage::UnifiedStorageVerifyComplete {
-        healthy: 0,
-        broken: 0,
-        repaired: 0,
-    });
-}
-
-fn handle_unified_disable(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<Config>>) {
+/// Saves `mode` in the worker's config and on disk, and says what happened.
+fn save_unified_mode(config_lock: &Arc<RwLock<Config>>, mode: UnifiedStorageMode) -> String {
     let mut config = config_snapshot(config_lock);
-
-    // Check for manifest file
-    let manifest_path = config
-        .stable_path
-        .as_ref()
-        .map(|p| p.join(".osu-sync-unified.json"));
-
-    if let Some(path) = manifest_path.filter(|p| p.exists()) {
-        if let Err(e) = osu_sync_core::config::live_guard::check_write(&path) {
-            let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
-                success: false,
-                message: e.to_string(),
-                links_created: 0,
-                space_saved: 0,
-            });
-            return;
-        }
-        // In a full implementation, we would:
-        // 1. Load manifest
-        // 2. Remove all junctions/symlinks
-        // 3. Restore original folder structure
-        // 4. Delete manifest
-
-        // For now, just delete the manifest
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // Update config to disable unified storage
-    config.unified_storage = Some(osu_sync_core::unified::UnifiedStorageConfig::disabled());
-    let _ = config.save();
+    let saved = save_mode(&mut config, mode).unwrap_or_else(|e| {
+        format!(
+            "Unified storage mode {} could not be saved: {e}",
+            mode.label()
+        )
+    });
     if let Ok(mut guard) = config_lock.write() {
-        *guard = config.clone();
+        *guard = config;
     }
+    saved
+}
 
-    let _ = app_tx.send(AppMessage::UnifiedStorageComplete {
-        success: true,
-        message: "Unified storage disabled".to_string(),
-        links_created: 0,
-        space_saved: 0,
+/// Runs one linked-store step, then saves the linked-store mode.
+fn handle_unified_setup(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config_lock);
+    let notes = legacy_notes(&config);
+    let result = UnifiedStorageEngine::from_config(&config).and_then(|engine| {
+        engine.sync(&mut |phase, current, total| {
+            let _ = app_tx.send(AppMessage::UnifiedStorageProgress {
+                phase,
+                current,
+                total,
+            });
+        })
+    });
+    let result = match result {
+        Ok(mut report) => {
+            report.notes.extend(notes);
+            let saved = save_unified_mode(config_lock, UnifiedStorageMode::LinkedStore);
+            Ok((report, saved))
+        }
+        Err(e) => Err(e.to_string()),
+    };
+    let _ = app_tx.send(AppMessage::UnifiedStorageComplete { result });
+}
+
+/// Counts linked and copied files in Songs.
+fn handle_unified_status(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<Config>>) {
+    let config = config_snapshot(config_lock);
+    let status = UnifiedStorageEngine::from_config(&config)
+        .and_then(|engine| engine.status())
+        .map_err(|e| e.to_string());
+    let _ = app_tx.send(AppMessage::UnifiedStorageStatus {
+        mode: config.unified().mode,
+        status,
+        notes: legacy_notes(&config),
+    });
+}
+
+/// Saves the disabled mode. Changes no file in Songs or lazer's store.
+fn handle_unified_disable(app_tx: &Sender<AppMessage>, config_lock: &Arc<RwLock<Config>>) {
+    let saved = save_unified_mode(config_lock, UnifiedStorageMode::Disabled);
+    let _ = app_tx.send(AppMessage::UnifiedStorageDisabled {
+        message: format!("{saved}. {DISABLED_NOTE}"),
     });
 }
 
@@ -1309,9 +1172,8 @@ mod tests {
         });
 
         let config = Config {
-            unified_storage: Some(UnifiedStorageConfig::true_unified(PathBuf::from(
-                "C:\\shared",
-            ))),
+            unified_storage: Some(UnifiedStorageConfig::linked_store()),
+            stable_path: None,
             ..Config::default()
         };
 
@@ -1327,8 +1189,9 @@ mod tests {
             .expect("Timed out waiting for UnifiedStorageStatus");
 
         match status {
-            AppMessage::UnifiedStorageStatus { mode, .. } => {
-                assert_eq!(mode, "TrueUnified");
+            AppMessage::UnifiedStorageStatus { mode, status, .. } => {
+                assert_eq!(mode, UnifiedStorageMode::LinkedStore);
+                assert_eq!(status, Err("osu!stable path not configured".to_string()));
             }
             other => panic!("Unexpected message: {:?}", other),
         }

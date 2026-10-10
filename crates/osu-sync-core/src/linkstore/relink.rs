@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::materialize::{is_same_file, is_temp_name, TEMP_PREFIX, TEMP_SUFFIX};
+use super::materialize::{is_same_file, is_temp_name, open_attributes, TEMP_PREFIX, TEMP_SUFFIX};
 use super::{how, BlobHash, How};
 use crate::config::live_guard;
 use crate::error::{Error, Result};
@@ -764,6 +764,11 @@ fn verify(
         Err(e) if is_locked(&e) => Ok(Err(locked(&plan.stable, &e))),
         checked => checked,
     }
+}
+
+/// Hard links to the data of the file at `path`.
+pub fn link_count_at(path: &Path) -> io::Result<u32> {
+    link_count(&open_attributes(path)?)
 }
 
 /// Hard links to the data of an open file.

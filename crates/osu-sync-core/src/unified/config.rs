@@ -1,317 +1,153 @@
-//! Configuration types for the Unified Storage feature.
+//! Settings for unified storage.
 //!
-//! This module provides configuration structures that control how osu! stable
-//! and lazer installations share resources through unified storage.
+//! Unified storage has one mode, the linked store: stable's Songs folder holds hard
+//! links into lazer's `files` store. Configs from older versions name junction modes
+//! that no longer exist; they load as disabled with a notice instead of failing.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::PathBuf;
+use serde::{Deserialize, Deserializer, Serialize};
 
-/// Mode for unified storage - determines which installation is the "master".
-///
-/// The master installation owns the canonical copy of shared resources,
-/// while the other installation uses symbolic links or junctions to access them.
+use crate::config::{Config, SaveOutcome};
+
+/// What disabling unified storage leaves, for the user to read.
+pub const DISABLED_NOTE: &str =
+    "Files in Songs and lazer's store were not changed. Linked files stay readable from both games.";
+
+/// Whether unified storage is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UnifiedStorageMode {
-    /// Unified storage is disabled; installations are independent.
+    /// Stable and lazer keep separate copies.
     #[default]
     Disabled,
-    /// osu! stable is the master; lazer links to stable's resources.
-    StableMaster,
-    /// osu! lazer is the master; stable links to lazer's resources.
-    LazerMaster,
-    /// Both installations link to a shared third-party location.
-    TrueUnified,
+    /// Stable's beatmap assets are hard links to the blobs in lazer's `files` store.
+    LinkedStore,
 }
 
 impl UnifiedStorageMode {
-    /// Returns `true` if unified storage is enabled in any mode.
-    #[inline]
-    pub fn is_enabled(&self) -> bool {
-        !matches!(self, Self::Disabled)
+    /// Every mode, in the order the config screen lists them.
+    pub const ALL: [UnifiedStorageMode; 2] = [Self::LinkedStore, Self::Disabled];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Disabled => "Disabled",
+            Self::LinkedStore => "Linked store",
+        }
     }
 
-    /// Returns a human-readable description of the mode.
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Disabled => "Unified storage is disabled",
-            Self::StableMaster => "osu! stable is the master installation",
-            Self::LazerMaster => "osu! lazer is the master installation",
-            Self::TrueUnified => "Using shared storage location for both installations",
+            Self::Disabled => "Stable and lazer keep separate copies of every beatmap",
+            Self::LinkedStore => {
+                "Stable's Songs folder links to lazer's files, so each asset is stored once"
+            }
+        }
+    }
+
+    /// The mode a saved name stands for; `None` for a name this version does not have.
+    fn from_saved(name: &str) -> Option<Self> {
+        match name {
+            "Disabled" => Some(Self::Disabled),
+            "LinkedStore" => Some(Self::LinkedStore),
+            _ => None,
         }
     }
 }
 
-/// Resource types that can be shared between installations.
-///
-/// Each resource type represents a category of files that can be
-/// synchronized or shared between osu! stable and lazer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SharedResourceType {
-    /// Beatmap files (.osz, folders with .osu files).
-    Beatmaps,
-    /// Skin folders and files.
-    Skins,
-    /// Replay files (.osr).
-    Replays,
-    /// Screenshot images.
-    Screenshots,
-    /// Exported files (scores, beatmaps, etc.).
-    Exports,
-    /// Background images and videos.
-    Backgrounds,
-}
-
-impl SharedResourceType {
-    /// Returns all available resource types.
-    pub fn all() -> &'static [SharedResourceType] {
-        &[
-            Self::Beatmaps,
-            Self::Skins,
-            Self::Replays,
-            Self::Screenshots,
-            Self::Exports,
-            Self::Backgrounds,
-        ]
-    }
-
-    /// Returns the default folder name for this resource type.
-    pub fn folder_name(&self) -> &'static str {
-        match self {
-            Self::Beatmaps => "Songs",
-            Self::Skins => "Skins",
-            Self::Replays => "Replays",
-            Self::Screenshots => "Screenshots",
-            Self::Exports => "Exports",
-            Self::Backgrounds => "Backgrounds",
-        }
-    }
-
-    /// Returns a human-readable display name for this resource type.
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Beatmaps => "Beatmaps",
-            Self::Skins => "Skins",
-            Self::Replays => "Replays",
-            Self::Screenshots => "Screenshots",
-            Self::Exports => "Exports",
-            Self::Backgrounds => "Backgrounds",
-        }
-    }
-}
-
-/// Sync trigger configuration.
-///
-/// Controls when and how synchronization operations are initiated.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// When the watcher runs the linked-store step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncTriggers {
-    /// Enable automatic file watching for changes.
-    pub file_watcher: bool,
-    /// Trigger sync when a game is launched.
-    pub on_game_launch: bool,
-    /// Allow manual sync triggering.
-    pub manual: bool,
-    /// Interval in seconds for the file watcher polling.
+    /// Longest wait, in seconds, from the first change to the step.
     pub watcher_interval_secs: u64,
 }
 
 impl Default for SyncTriggers {
     fn default() -> Self {
         Self {
-            file_watcher: false,
-            on_game_launch: false,
-            manual: true,
             watcher_interval_secs: 5,
         }
     }
 }
 
-impl SyncTriggers {
-    /// Returns `true` if any automatic trigger is enabled.
-    pub fn has_automatic_triggers(&self) -> bool {
-        self.file_watcher || self.on_game_launch
-    }
-
-    /// Creates a configuration with all triggers enabled.
-    pub fn all_enabled() -> Self {
-        Self {
-            file_watcher: true,
-            on_game_launch: true,
-            manual: true,
-            watcher_interval_secs: 5,
-        }
-    }
-
-    /// Creates a configuration with only manual triggering enabled.
-    pub fn manual_only() -> Self {
-        Self {
-            file_watcher: false,
-            on_game_launch: false,
-            manual: true,
-            watcher_interval_secs: 5,
-        }
-    }
-}
-
-/// Configuration for unified storage.
-///
-/// This struct contains all settings needed to configure how osu! stable
-/// and lazer share resources through the unified storage system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Unified storage settings, saved inside the osu-sync config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct UnifiedStorageConfig {
-    /// The unified storage mode (disabled, stable master, lazer master, or true unified).
     pub mode: UnifiedStorageMode,
-    /// Path to the shared storage location (required for `TrueUnified` mode).
-    pub shared_path: Option<PathBuf>,
-    /// Set of resource types that should be shared between installations.
-    pub shared_resources: HashSet<SharedResourceType>,
-    /// Configuration for sync triggers.
     pub triggers: SyncTriggers,
-    /// Use NTFS junctions instead of symbolic links on Windows.
-    pub use_junctions: bool,
-    /// Track changes in a manifest file for efficient syncing.
-    pub track_manifest: bool,
-}
-
-impl Default for UnifiedStorageConfig {
-    fn default() -> Self {
-        let mut resources = HashSet::new();
-        resources.insert(SharedResourceType::Beatmaps);
-        resources.insert(SharedResourceType::Skins);
-
-        Self {
-            mode: UnifiedStorageMode::Disabled,
-            shared_path: None,
-            shared_resources: resources,
-            triggers: SyncTriggers {
-                file_watcher: true,
-                on_game_launch: false,
-                manual: true,
-                watcher_interval_secs: 5,
-            },
-            use_junctions: true,
-            track_manifest: true,
-        }
-    }
+    /// The mode name an older version saved, when this version no longer has it.
+    #[serde(skip)]
+    pub retired_mode: Option<String>,
 }
 
 impl UnifiedStorageConfig {
-    /// Creates a new disabled configuration.
-    pub fn disabled() -> Self {
+    pub fn linked_store() -> Self {
         Self {
-            mode: UnifiedStorageMode::Disabled,
-            ..Default::default()
+            mode: UnifiedStorageMode::LinkedStore,
+            ..Self::default()
         }
     }
 
-    /// Creates a new configuration with stable as the master.
-    pub fn stable_master() -> Self {
-        Self {
-            mode: UnifiedStorageMode::StableMaster,
-            ..Default::default()
+    /// Chooses `mode`, which replaces any retired mode an older version saved.
+    pub fn set_mode(&mut self, mode: UnifiedStorageMode) {
+        self.mode = mode;
+        self.retired_mode = None;
+    }
+
+    /// What happened to a mode from an older version, for the user to read.
+    pub fn retired_mode_notice(&self) -> Option<String> {
+        self.retired_mode.as_deref().map(retired_mode_notice)
+    }
+}
+
+/// The notice for a saved mode this version no longer has.
+pub fn retired_mode_notice(name: &str) -> String {
+    format!(
+        "The saved unified storage mode \"{name}\" was removed in this version, so it loaded \
+         as disabled. Junctions it made were left in place."
+    )
+}
+
+/// Saves `mode` into `config` and the config file, and says what happened to the file.
+pub fn save_mode(config: &mut Config, mode: UnifiedStorageMode) -> std::io::Result<String> {
+    config
+        .unified_storage
+        .get_or_insert_with(Default::default)
+        .set_mode(mode);
+    Ok(match config.save()? {
+        SaveOutcome::Saved => format!("Saved unified storage mode: {}", mode.label()),
+        SaveOutcome::SkippedForPathOverrides => format!(
+            "Unified storage mode {} was not saved, because --stable-path or --lazer-path is set",
+            mode.label()
+        ),
+    })
+}
+
+/// The saved form, which accepts every mode name older versions wrote and ignores
+/// their other fields (`shared_path`, `shared_resources`, `use_junctions`, ...).
+#[derive(Deserialize)]
+struct SavedConfig {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    triggers: SyncTriggers,
+}
+
+impl<'de> Deserialize<'de> for UnifiedStorageConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let saved = SavedConfig::deserialize(deserializer)?;
+        let mut config = Self {
+            triggers: saved.triggers,
+            ..Self::default()
+        };
+        if let Some(name) = saved.mode {
+            match UnifiedStorageMode::from_saved(&name) {
+                Some(mode) => config.mode = mode,
+                None => {
+                    tracing::warn!("{}", retired_mode_notice(&name));
+                    config.retired_mode = Some(name);
+                }
+            }
         }
-    }
-
-    /// Creates a new configuration with lazer as the master.
-    pub fn lazer_master() -> Self {
-        Self {
-            mode: UnifiedStorageMode::LazerMaster,
-            ..Default::default()
-        }
-    }
-
-    /// Creates a new true unified configuration with the specified shared path.
-    pub fn true_unified(shared_path: PathBuf) -> Self {
-        Self {
-            mode: UnifiedStorageMode::TrueUnified,
-            shared_path: Some(shared_path),
-            ..Default::default()
-        }
-    }
-
-    /// Returns `true` if unified storage is enabled.
-    #[inline]
-    pub fn is_enabled(&self) -> bool {
-        self.mode.is_enabled()
-    }
-
-    /// Returns the shared path, if configured.
-    ///
-    /// For `TrueUnified` mode, this returns the configured shared path.
-    /// For other modes, this returns `None`.
-    pub fn get_shared_path(&self) -> Option<&PathBuf> {
-        self.shared_path.as_ref()
-    }
-
-    /// Returns `true` if the specified resource type is shared.
-    pub fn is_resource_shared(&self, resource: SharedResourceType) -> bool {
-        self.shared_resources.contains(&resource)
-    }
-
-    /// Adds a resource type to the shared resources set.
-    pub fn share_resource(&mut self, resource: SharedResourceType) {
-        self.shared_resources.insert(resource);
-    }
-
-    /// Removes a resource type from the shared resources set.
-    pub fn unshare_resource(&mut self, resource: SharedResourceType) {
-        self.shared_resources.remove(&resource);
-    }
-
-    /// Sets all resource types as shared.
-    pub fn share_all_resources(&mut self) {
-        for resource in SharedResourceType::all() {
-            self.shared_resources.insert(*resource);
-        }
-    }
-
-    /// Clears all shared resources.
-    pub fn unshare_all_resources(&mut self) {
-        self.shared_resources.clear();
-    }
-
-    /// Returns an iterator over the shared resource types.
-    pub fn shared_resources_iter(&self) -> impl Iterator<Item = &SharedResourceType> {
-        self.shared_resources.iter()
-    }
-
-    /// Returns the number of shared resource types.
-    pub fn shared_resources_count(&self) -> usize {
-        self.shared_resources.len()
-    }
-
-    /// Validates the configuration and returns any errors.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error message if:
-    /// - `TrueUnified` mode is set but no shared path is configured
-    /// - The shared path is set but doesn't exist (optional check)
-    pub fn validate(&self) -> Result<(), String> {
-        if self.mode == UnifiedStorageMode::TrueUnified && self.shared_path.is_none() {
-            return Err("TrueUnified mode requires a shared_path to be configured".to_string());
-        }
-
-        if self.is_enabled() && self.shared_resources.is_empty() {
-            return Err("At least one resource type must be selected for sharing".to_string());
-        }
-
-        Ok(())
-    }
-
-    /// Returns `true` if junctions should be used (Windows-specific).
-    ///
-    /// Junctions are preferred on Windows as they don't require administrator
-    /// privileges, unlike symbolic links.
-    #[inline]
-    pub fn should_use_junctions(&self) -> bool {
-        self.use_junctions && cfg!(windows)
-    }
-
-    /// Returns `true` if manifest tracking is enabled.
-    #[inline]
-    pub fn should_track_manifest(&self) -> bool {
-        self.track_manifest
+        Ok(config)
     }
 }
 
@@ -319,81 +155,65 @@ impl UnifiedStorageConfig {
 mod tests {
     use super::*;
 
+    /// The unified storage block a version with junction modes saved for TrueUnified.
+    const TRUE_UNIFIED: &str = r#"{
+        "mode": "TrueUnified",
+        "shared_path": "D:\\osu-shared",
+        "shared_resources": ["Beatmaps", "Skins"],
+        "triggers": {"file_watcher": true, "on_game_launch": false, "manual": true, "watcher_interval_secs": 7},
+        "use_junctions": true,
+        "track_manifest": true
+    }"#;
+
     #[test]
-    fn test_default_config() {
-        let config = UnifiedStorageConfig::default();
-        assert!(!config.is_enabled());
-        assert!(config.is_resource_shared(SharedResourceType::Beatmaps));
-        assert!(config.is_resource_shared(SharedResourceType::Skins));
-        assert!(!config.is_resource_shared(SharedResourceType::Replays));
+    fn retired_modes_load_as_disabled_with_a_notice() {
+        for name in ["StableMaster", "LazerMaster", "TrueUnified"] {
+            let json = TRUE_UNIFIED.replace("TrueUnified", name);
+            let config: UnifiedStorageConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(config.mode, UnifiedStorageMode::Disabled);
+            assert_eq!(config.retired_mode.as_deref(), Some(name));
+            assert_eq!(
+                config.retired_mode_notice(),
+                Some(retired_mode_notice(name))
+            );
+            assert!(retired_mode_notice(name).contains(&format!("\"{name}\" was removed")));
+            assert_eq!(config.triggers.watcher_interval_secs, 7);
+        }
     }
 
     #[test]
-    fn test_unified_storage_mode() {
-        assert!(!UnifiedStorageMode::Disabled.is_enabled());
-        assert!(UnifiedStorageMode::StableMaster.is_enabled());
-        assert!(UnifiedStorageMode::LazerMaster.is_enabled());
-        assert!(UnifiedStorageMode::TrueUnified.is_enabled());
+    fn choosing_a_mode_clears_the_retired_one_and_keeps_the_triggers() {
+        let mut config: UnifiedStorageConfig = serde_json::from_str(TRUE_UNIFIED).unwrap();
+        config.set_mode(UnifiedStorageMode::LinkedStore);
+        assert_eq!(config.mode, UnifiedStorageMode::LinkedStore);
+        assert_eq!(config.retired_mode_notice(), None);
+        assert_eq!(config.triggers.watcher_interval_secs, 7);
     }
 
     #[test]
-    fn test_config_validation() {
-        let mut config = UnifiedStorageConfig::default();
-        assert!(config.validate().is_ok());
-
-        config.mode = UnifiedStorageMode::TrueUnified;
-        assert!(config.validate().is_err());
-
-        config.shared_path = Some(PathBuf::from("/shared"));
-        assert!(config.validate().is_ok());
-
-        config.unshare_all_resources();
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_resource_management() {
-        let mut config = UnifiedStorageConfig::disabled();
-        config.unshare_all_resources();
-        assert_eq!(config.shared_resources_count(), 0);
-
-        config.share_resource(SharedResourceType::Beatmaps);
-        assert_eq!(config.shared_resources_count(), 1);
-        assert!(config.is_resource_shared(SharedResourceType::Beatmaps));
-
-        config.share_all_resources();
+    fn linked_store_round_trips_without_a_notice() {
+        let json = serde_json::to_string(&UnifiedStorageConfig::linked_store()).unwrap();
         assert_eq!(
-            config.shared_resources_count(),
-            SharedResourceType::all().len()
+            json,
+            r#"{"mode":"LinkedStore","triggers":{"watcher_interval_secs":5}}"#
         );
-
-        config.unshare_resource(SharedResourceType::Beatmaps);
-        assert!(!config.is_resource_shared(SharedResourceType::Beatmaps));
+        let config: UnifiedStorageConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, UnifiedStorageConfig::linked_store());
     }
 
     #[test]
-    fn test_sync_triggers() {
-        let triggers = SyncTriggers::default();
-        assert!(!triggers.has_automatic_triggers());
+    fn an_unknown_or_missing_mode_never_fails_to_load() {
+        let config: UnifiedStorageConfig = serde_json::from_str(r#"{"mode":"Mirror"}"#).unwrap();
+        assert_eq!(config.mode, UnifiedStorageMode::Disabled);
+        assert_eq!(config.retired_mode.as_deref(), Some("Mirror"));
 
-        let triggers = SyncTriggers::all_enabled();
-        assert!(triggers.has_automatic_triggers());
-
-        let triggers = SyncTriggers::manual_only();
-        assert!(!triggers.has_automatic_triggers());
-        assert!(triggers.manual);
+        let config: UnifiedStorageConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, UnifiedStorageConfig::default());
     }
 
     #[test]
-    fn test_factory_methods() {
-        let config = UnifiedStorageConfig::stable_master();
-        assert_eq!(config.mode, UnifiedStorageMode::StableMaster);
-
-        let config = UnifiedStorageConfig::lazer_master();
-        assert_eq!(config.mode, UnifiedStorageMode::LazerMaster);
-
-        let config = UnifiedStorageConfig::true_unified(PathBuf::from("/shared"));
-        assert_eq!(config.mode, UnifiedStorageMode::TrueUnified);
-        assert_eq!(config.get_shared_path(), Some(&PathBuf::from("/shared")));
+    fn the_config_screen_offers_two_modes() {
+        let labels: Vec<_> = UnifiedStorageMode::ALL.iter().map(|m| m.label()).collect();
+        assert_eq!(labels, ["Linked store", "Disabled"]);
     }
 }

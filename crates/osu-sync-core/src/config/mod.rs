@@ -179,6 +179,11 @@ impl Config {
         Ok(SaveOutcome::Saved)
     }
 
+    /// The unified storage settings, or the defaults when none are saved.
+    pub fn unified(&self) -> UnifiedStorageConfig {
+        self.unified_storage.clone().unwrap_or_default()
+    }
+
     /// Get the Songs folder path for osu!stable
     pub fn stable_songs_path(&self) -> Option<PathBuf> {
         self.stable_path.as_ref().map(|p| p.join("Songs"))

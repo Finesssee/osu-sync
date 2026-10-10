@@ -5,6 +5,7 @@
 //!   osu-sync --cli dry-run <direction>     Preview sync
 //!   osu-sync --cli sync <direction>        Perform sync
 //!   osu-sync --cli relink                  Relink stable copies onto lazer's files
+//!   osu-sync --cli unified <action>        Linked-store setup, status, watch or disable
 //!
 //! Directions: stable-to-lazer, lazer-to-stable, bidirectional
 //!
@@ -28,6 +29,10 @@ use osu_sync_core::stable::StableScanner;
 use osu_sync_core::sync::{
     DryRunResult, SyncDirection, SyncEngineBuilder, SyncError, SyncProgress, SyncResult,
 };
+use osu_sync_core::unified::{
+    self, save_mode, watch, StepReport, UnifiedStorageEngine, UnifiedStorageMode, WatchEvent,
+    WatchTiming, DISABLED_NOTE,
+};
 
 /// CLI command to execute
 #[derive(Debug, Clone)]
@@ -42,6 +47,34 @@ pub enum CliCommand {
         set_ids: Option<HashSet<i32>>,
     },
     Relink,
+    Unified(UnifiedAction),
+}
+
+/// What `unified` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnifiedAction {
+    /// Runs the linked-store step once and saves the linked-store mode.
+    Setup,
+    /// Counts linked and copied files in Songs.
+    Status,
+    /// Runs the step whenever lazer's store or stable's Songs changes, until stopped.
+    Watch,
+    /// Saves the disabled mode. Changes no file in Songs or lazer.
+    Disable,
+}
+
+impl UnifiedAction {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "setup" => Ok(Self::Setup),
+            "status" => Ok(Self::Status),
+            "watch" => Ok(Self::Watch),
+            "disable" => Ok(Self::Disable),
+            _ => Err(format!(
+                "Invalid unified action '{s}'. Use: setup, status, watch or disable"
+            )),
+        }
+    }
 }
 
 /// CLI options
@@ -144,6 +177,13 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
             }
             "scan" => command = Some(CliCommand::Scan),
             "relink" => command = Some(CliCommand::Relink),
+            "unified" => {
+                i += 1;
+                let action = args
+                    .get(i)
+                    .ok_or("unified requires an action: setup, status, watch or disable")?;
+                command = Some(CliCommand::Unified(UnifiedAction::parse(action)?));
+            }
             "dry-run" => {
                 i += 1;
                 if i >= args.len() {
@@ -191,7 +231,8 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
         Some(cmd) => cmd,
         None => {
             return Err(
-                "No command specified. Use: scan, dry-run <dir>, sync <dir>, or relink".to_string(),
+                "No command specified. Use: scan, dry-run <dir>, sync <dir>, relink, or unified <action>"
+                    .to_string(),
             )
         }
     };
@@ -205,8 +246,15 @@ pub fn parse_args(args: &[String]) -> Result<(CliCommand, CliOptions), String> {
     if options.relink && !relinks {
         return Err("--relink works only with sync s2l or sync bi".to_string());
     }
-    if options.threads.is_some() && !options.relink && !matches!(command, CliCommand::Relink) {
-        return Err("--threads works only with relink or sync s2l/bi --relink".to_string());
+    let takes_threads = matches!(
+        command,
+        CliCommand::Relink | CliCommand::Unified(UnifiedAction::Setup | UnifiedAction::Watch)
+    );
+    if options.threads.is_some() && !options.relink && !takes_threads {
+        return Err(
+            "--threads works only with relink, unified setup, unified watch or sync s2l/bi --relink"
+                .to_string(),
+        );
     }
 
     Ok((command, options))
@@ -241,6 +289,133 @@ pub fn run(command: CliCommand, options: CliOptions) -> anyhow::Result<()> {
         CliCommand::DryRun { direction, set_ids } => run_dry_run(direction, set_ids, options),
         CliCommand::Sync { direction, set_ids } => run_sync(direction, set_ids, options),
         CliCommand::Relink => run_relink(options),
+        CliCommand::Unified(action) => run_unified(action, options),
+    }
+}
+
+fn run_unified(action: UnifiedAction, options: CliOptions) -> anyhow::Result<()> {
+    let mut config = Config::load();
+    let notes = unified::legacy_notes(&config);
+    match action {
+        UnifiedAction::Setup => {
+            let engine = UnifiedStorageEngine::from_config(&config)?.threads(options.threads);
+            let show_progress = !options.json;
+            let mut report = engine.sync(&mut |phase, done, total| {
+                if show_progress {
+                    eprint!("\r{}: {done}/{total}    ", phase.label());
+                }
+            })?;
+            if show_progress {
+                eprintln!();
+            }
+            report.notes.extend(notes);
+            let saved = save_mode(&mut config, UnifiedStorageMode::LinkedStore)?;
+            print_step_report(&report, &saved, options.json);
+            if !report.errors.is_empty() {
+                anyhow::bail!("{} items failed", report.errors.len());
+            }
+            Ok(())
+        }
+        UnifiedAction::Status => {
+            let status = UnifiedStorageEngine::from_config(&config)?.status()?;
+            let mode = config.unified().mode;
+            if options.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "mode": mode,
+                        "status": status,
+                        "notes": notes,
+                    })
+                );
+                return Ok(());
+            }
+            println!("Unified Storage Status:");
+            print_rows(&[("Mode", mode.label().to_string())]);
+            print_rows(&status.rows());
+            print_notes(&notes);
+            Ok(())
+        }
+        UnifiedAction::Watch => {
+            let engine = UnifiedStorageEngine::from_config(&config)?.threads(options.threads);
+            let timing =
+                WatchTiming::from_interval_secs(config.unified().triggers.watcher_interval_secs);
+            eprintln!(
+                "Watching {} and {} (interval {} s). Press Ctrl+C to stop.",
+                engine.songs().display(),
+                engine.realm().display(),
+                timing.interval.as_secs()
+            );
+            for note in &notes {
+                eprintln!("Note: {note}");
+            }
+            let json = options.json;
+            watch(&engine, timing, &mut |event| {
+                print_watch_event(&event, json)
+            })?;
+            Ok(())
+        }
+        UnifiedAction::Disable => {
+            let saved = save_mode(&mut config, UnifiedStorageMode::Disabled)?;
+            if options.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "mode": UnifiedStorageMode::Disabled, "config": saved })
+                );
+            } else {
+                println!("{saved}");
+                println!("{DISABLED_NOTE}");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Prints label and value pairs as an indented, aligned list.
+fn print_rows(rows: &[(&str, String)]) {
+    for (label, value) in rows {
+        println!("  {:<17}{value}", format!("{label}:"));
+    }
+}
+
+fn print_notes(notes: &[String]) {
+    for note in notes {
+        println!();
+        println!("Note: {note}");
+    }
+}
+
+fn print_step_report(report: &StepReport, saved: &str, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "report": report, "config": saved })
+        );
+        return;
+    }
+    println!("Linked Store Step Complete:");
+    print_rows(&report.rows());
+    println!("  {saved}");
+    for error in &report.errors {
+        println!("  Error: {error}");
+    }
+    print_notes(&report.notes);
+}
+
+fn print_watch_event(event: &WatchEvent, json: bool) {
+    let time = chrono::Local::now().format("%H:%M:%S");
+    match event {
+        WatchEvent::Ran(report) if json => {
+            println!(
+                "{}",
+                serde_json::json!({ "time": time.to_string(), "report": report })
+            )
+        }
+        _ if json => println!(
+            "{}",
+            serde_json::json!({ "time": time.to_string(), "event": event.to_string() })
+        ),
+        _ => println!("[{time}] {event}"),
     }
 }
 
@@ -687,6 +862,10 @@ pub fn print_help() {
     println!("    dry-run <direction>         Preview what would be synced");
     println!("    sync <direction>            Perform sync");
     println!("    relink                      Hard-link stable copies of lazer files to them");
+    println!("    unified setup               Link lazer's beatmaps into stable's Songs, then save the mode");
+    println!("    unified status              Count linked and copied files in Songs");
+    println!("    unified watch               Run the setup step whenever lazer or Songs changes");
+    println!("    unified disable             Turn unified storage off; changes no files");
     println!();
     println!("DIRECTIONS:");
     println!("    stable-to-lazer, s2l        Sync from stable to lazer");
@@ -700,7 +879,7 @@ pub fn print_help() {
         "    --relink                    After sync s2l or bi, relink stable copies to lazer's files"
     );
     println!(
-        "    --threads <n>               Threads for relink (default: a quarter of the CPUs, 1 to 4)"
+        "    --threads <n>               Threads for relink and unified setup/watch (default: a quarter of the CPUs, 1 to 4)"
     );
     println!("    --stable-path <dir>         Use this osu!stable folder");
     println!("    --lazer-path <dir>          Use this osu!lazer data folder");
@@ -712,6 +891,7 @@ pub fn print_help() {
     println!("    osu-sync --cli sync s2l --set-ids 123,456,789");
     println!("    osu-sync --cli dry-run bi --json");
     println!("    osu-sync --cli relink --json");
+    println!("    osu-sync --cli unified setup --stable-path D:/sandbox/stable --lazer-path D:/sandbox/lazer");
 }
 
 #[cfg(test)]
@@ -980,6 +1160,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_unified_actions() {
+        for (word, action) in [
+            ("setup", UnifiedAction::Setup),
+            ("status", UnifiedAction::Status),
+            ("watch", UnifiedAction::Watch),
+            ("disable", UnifiedAction::Disable),
+        ] {
+            let (cmd, _) = parse_args(&strings(&["unified", word])).unwrap();
+            assert!(
+                matches!(cmd, CliCommand::Unified(a) if a == action),
+                "{word}"
+            );
+        }
+        let (_, options) = parse_args(&strings(&["unified", "watch", "--threads", "2"])).unwrap();
+        assert_eq!(options.threads.map(NonZeroUsize::get), Some(2));
+        assert_eq!(
+            parse_args(&strings(&["unified"])).unwrap_err(),
+            "unified requires an action: setup, status, watch or disable"
+        );
+        assert_eq!(
+            parse_args(&strings(&["unified", "migrate"])).unwrap_err(),
+            "Invalid unified action 'migrate'. Use: setup, status, watch or disable"
+        );
+    }
+
+    #[test]
     fn relink_flag_is_rejected_outside_s2l_and_bi_sync() {
         for args in [
             &["sync", "l2s", "--relink"][..],
@@ -1051,15 +1257,19 @@ mod tests {
             (&["relink", "--threads"], "--threads requires a value"),
             (
                 &["sync", "s2l", "--threads", "2"],
-                "--threads works only with relink or sync s2l/bi --relink",
+                "--threads works only with relink, unified setup, unified watch or sync s2l/bi --relink",
             ),
             (
                 &["scan", "--threads", "2"],
-                "--threads works only with relink or sync s2l/bi --relink",
+                "--threads works only with relink, unified setup, unified watch or sync s2l/bi --relink",
+            ),
+            (
+                &["unified", "status", "--threads", "2"],
+                "--threads works only with relink, unified setup, unified watch or sync s2l/bi --relink",
             ),
             (
                 &["dry-run", "s2l", "--threads", "2"],
-                "--threads works only with relink or sync s2l/bi --relink",
+                "--threads works only with relink, unified setup, unified watch or sync s2l/bi --relink",
             ),
         ] {
             assert_eq!(parse_args(&strings(args)).unwrap_err(), error, "{args:?}");
