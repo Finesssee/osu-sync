@@ -339,10 +339,7 @@ fn watch_loop(
 
 /// True when the realm can be read and its stamp differs from `last`. An unreadable
 /// realm never counts as a commit.
-fn realm_committed(
-    realm_stamp: &dyn Fn() -> Option<RealmStamp>,
-    last: Option<RealmStamp>,
-) -> bool {
+fn realm_committed(realm_stamp: &dyn Fn() -> Option<RealmStamp>, last: Option<RealmStamp>) -> bool {
     realm_stamp().is_some_and(|now| Some(now) != last)
 }
 

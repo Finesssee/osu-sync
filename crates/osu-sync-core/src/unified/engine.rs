@@ -437,8 +437,8 @@ mod tests {
         assert_eq!(
             after.header,
             [
-                0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'T', b'-', b'D',
-                b'B', 0, 0, 0, 1
+                0x98, 0x4F, 0x07, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, b'T', b'-', b'D', b'B',
+                0, 0, 0, 1
             ]
         );
         assert_ne!(after, before);
